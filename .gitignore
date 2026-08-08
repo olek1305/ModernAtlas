@@ -1,0 +1,7 @@
+bin/
+obj/
+*.user
+*.suo
+Releases/*.zip
+.idea/
+.vscode/

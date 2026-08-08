@@ -1,0 +1,16 @@
+{
+  "type": "code",
+  "modid": "voxelatlas",
+  "name": "VoxelAtlas",
+  "authors": [
+    "arcylisz"
+  ],
+  "description": "Client-side relief layer and foundation for an interactive 3D atlas. It enhances the existing Vintage Story world map without replacing or modifying save data.",
+  "version": "0.1.0",
+  "side": "Client",
+  "requiredOnServer": false,
+  "requiredOnClient": false,
+  "dependencies": {
+    "game": "1.22.6"
+  }
+}
