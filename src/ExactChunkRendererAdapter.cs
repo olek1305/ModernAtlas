@@ -25,7 +25,8 @@ internal sealed class ExactChunkRendererAdapter
     private readonly object mainCamera;
     private readonly object platform;
     private readonly MethodInfo renderOpaque;
-    private readonly MethodInfo clearDefaultFramebuffer;
+    private readonly MethodInfo clearFramebuffer;
+    private readonly MethodInfo blitPrimaryToDefault;
     private readonly FieldInfo cameraMatrixOriginField;
     private readonly FieldInfo poolsByRenderPassField;
     private readonly FieldInfo poolFrustumField;
@@ -38,7 +39,8 @@ internal sealed class ExactChunkRendererAdapter
         object mainCamera,
         object platform,
         MethodInfo renderOpaque,
-        MethodInfo clearDefaultFramebuffer,
+        MethodInfo clearFramebuffer,
+        MethodInfo blitPrimaryToDefault,
         FieldInfo cameraMatrixOriginField,
         FieldInfo poolsByRenderPassField,
         FieldInfo poolFrustumField
@@ -49,7 +51,8 @@ internal sealed class ExactChunkRendererAdapter
         this.mainCamera = mainCamera;
         this.platform = platform;
         this.renderOpaque = renderOpaque;
-        this.clearDefaultFramebuffer = clearDefaultFramebuffer;
+        this.clearFramebuffer = clearFramebuffer;
+        this.blitPrimaryToDefault = blitPrimaryToDefault;
         this.cameraMatrixOriginField = cameraMatrixOriginField;
         this.poolsByRenderPassField = poolsByRenderPassField;
         this.poolFrustumField = poolFrustumField;
@@ -88,7 +91,7 @@ internal sealed class ExactChunkRendererAdapter
                 new[] { typeof(float) },
                 null
             ) ?? throw new MissingMethodException(renderer.GetType().FullName, "RenderOpaque(float)");
-            MethodInfo clearDefault = platform.GetType().GetMethod(
+            MethodInfo clear = platform.GetType().GetMethod(
                 "ClearFrameBuffer",
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
                 null,
@@ -97,6 +100,16 @@ internal sealed class ExactChunkRendererAdapter
             ) ?? throw new MissingMethodException(
                 platform.GetType().FullName,
                 "ClearFrameBuffer(EnumFrameBuffer)"
+            );
+            MethodInfo blit = platform.GetType().GetMethod(
+                "BlitPrimaryToDefault",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                null,
+                Type.EmptyTypes,
+                null
+            ) ?? throw new MissingMethodException(
+                platform.GetType().FullName,
+                "BlitPrimaryToDefault()"
             );
             FieldInfo cameraMatrix = RequireField(camera.GetType(), "CameraMatrixOrigin");
             FieldInfo pools = RequireField(renderer.GetType(), "poolsByRenderPass");
@@ -111,7 +124,8 @@ internal sealed class ExactChunkRendererAdapter
                 camera,
                 platform,
                 opaque,
-                clearDefault,
+                clear,
+                blit,
                 cameraMatrix,
                 pools,
                 poolFrustum
@@ -134,7 +148,8 @@ internal sealed class ExactChunkRendererAdapter
         double centerY,
         double centerZ,
         float yawRadians,
-        float pitchRadians
+        float pitchRadians,
+        int radiusBlocks
     )
     {
         if (disabled) return false;
@@ -152,22 +167,15 @@ internal sealed class ExactChunkRendererAdapter
 
         try
         {
-            FrameBufferRef? target = render.CurrentFrameBuffer;
-            if (target != null)
-            {
-                render.ClearFrameBuffer(
-                    target,
-                    new[] { 0.035f, 0.075f, 0.11f, 1f },
-                    true,
-                    true
-                );
-            }
-            else
-            {
-                clearDefaultFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Default });
-            }
+            // The official chunk shaders write to the multi-attachment Primary
+            // world framebuffer. Rendering them into the default GUI target
+            // produces no color even though the draw call succeeds.
+            clearFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Primary });
 
-            const double distance = 180;
+            // Keep the eye in front of the entire requested atlas volume.
+            // The old fixed distance intersected large maps at tilted angles,
+            // which cut off the upper or lower part of the terrain.
+            double distance = Math.Max(640, radiusBlocks * 2.5);
             double horizontal = Math.Cos(pitchRadians) * distance;
             double eyeX = centerX + Math.Sin(yawRadians) * horizontal;
             double eyeY = centerY + Math.Sin(pitchRadians) * distance;
@@ -176,26 +184,51 @@ internal sealed class ExactChunkRendererAdapter
             double[] view = Mat4d.Create();
             Mat4d.LookAt(
                 view,
-                new[] { 0d, 0d, 0d },
-                new[] { centerX - eyeX, centerY - eyeY, centerZ - eyeZ },
+                new[]
+                {
+                    eyeX - oldCameraX,
+                    eyeY - oldCameraY,
+                    eyeZ - oldCameraZ
+                },
+                new[]
+                {
+                    centerX - oldCameraX,
+                    centerY - oldCameraY,
+                    centerZ - oldCameraZ
+                },
+                new[] { 0d, 1d, 0d }
+            );
+            double[] cullingView = Mat4d.Create();
+            Mat4d.LookAt(
+                cullingView,
+                new[] { eyeX, eyeY, eyeZ },
+                new[] { centerX, centerY, centerZ },
                 new[] { 0d, 1d, 0d }
             );
             double[] projectionDouble = Array.ConvertAll(projection, value => (double)value);
 
-            cameraPosition.Set(eyeX, eyeY, eyeZ);
             Array.Copy(view, cameraMatrix, 16);
 
             FrustumCulling atlasFrustum = new();
-            atlasFrustum.UpdateViewDistance(2048);
+            // FrustumCulling measures from the elevated atlas eye, not from
+            // the map center. At a 45-degree tilt the far edge is farther than
+            // three radii from that eye and the old limit removed roughly half
+            // of the terrain. This is only a GPU-mesh visibility limit; it
+            // does not alter the player position or request distant chunks.
+            float cullingDistance = Math.Max(
+                2048,
+                (float)(distance + radiusBlocks * 1.75 + 384)
+            );
+            atlasFrustum.UpdateViewDistance((int)cullingDistance);
             // A newly constructed culler has a zero LOD0 range. In that state
             // Vintage Story rejects every full-detail terrain pool even when
             // it is geometrically inside the atlas frustum.
-            atlasFrustum.lod0BiasSq = 2048f * 2048f;
-            atlasFrustum.lod2BiasSq = 2048d * 2048d;
+            atlasFrustum.lod0BiasSq = cullingDistance * cullingDistance;
+            atlasFrustum.lod2BiasSq = (double)cullingDistance * cullingDistance;
             atlasFrustum.CalcFrustumEquations(
                 new BlockPos((int)Math.Floor(eyeX), (int)Math.Floor(eyeY), (int)Math.Floor(eyeZ)),
                 projectionDouble,
-                view
+                cullingView
             );
             ReplacePoolFrustums(atlasFrustum, changedPools);
 
@@ -203,6 +236,7 @@ internal sealed class ExactChunkRendererAdapter
             projectionPushed = true;
             render.CurrentActiveShader?.Stop();
             renderOpaque.Invoke(chunkRenderer, new object[] { deltaTime });
+            blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
 
             if (!loggedSuccess)
             {

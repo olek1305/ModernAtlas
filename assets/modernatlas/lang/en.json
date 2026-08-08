@@ -1,6 +1,6 @@
 {
   "hotkey-open-map": "Open ModernAtlas 3D atlas",
-  "controls-help": "LMB: pan • RMB: rotate 360° and tilt • wheel: zoom • WASD/QE/RF • middle: reset • G/Esc: close",
+  "controls-help": "LMB: pan • RMB: rotate/tilt • wheel: zoom • PgUp/PgDn: radius • M: fog • Home: safe defaults • G/Esc: close",
   "status-building": "Building scene: {0}% • {1} blocks",
   "status-ready": "Scene ready • {0} blocks • exact geometry uses only client-available chunks"
 }

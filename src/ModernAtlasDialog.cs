@@ -1,4 +1,5 @@
 using System;
+using Cairo;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Config;
@@ -13,10 +14,15 @@ namespace ModernAtlas;
 /// </summary>
 public sealed class ModernAtlasDialog : GuiDialog
 {
+    private static readonly int[] RadiusSteps = { 250, 500, 750, 1000, 1500, 2000, 3000, 5000 };
+
     private ExactChunkRendererAdapter? exactChunkRenderer;
     private readonly float[] projection = Mat4f.Create();
+    private readonly ModernAtlasConfig config;
+    private readonly Action saveConfig;
 
     private GuiComposer? overlay;
+    private LoadedTexture? fogTexture;
     private bool leftDragging;
     private bool rightDragging;
     private double centerX;
@@ -24,8 +30,12 @@ public sealed class ModernAtlasDialog : GuiDialog
     private double centerZ;
     private float yawDegrees = 42;
     private float pitchDegrees = 72;
-    private float zoom = 38;
+    private float zoom = 180;
     private bool loggedFirstRender;
+    private int fogTextureWidth;
+    private int fogTextureHeight;
+    private float fogTextureZoom = -1;
+    private float fogTexturePitch = -1;
 
     public override string ToggleKeyCombinationCode => "modernatlas-open";
     public override EnumDialogType DialogType => EnumDialogType.HUD;
@@ -34,8 +44,14 @@ public sealed class ModernAtlasDialog : GuiDialog
     public override bool PrefersUngrabbedMouse => true;
     public override bool DisableMouseGrab => true;
 
-    public ModernAtlasDialog(ICoreClientAPI capi) : base(capi)
+    public ModernAtlasDialog(
+        ICoreClientAPI capi,
+        ModernAtlasConfig config,
+        Action saveConfig
+    ) : base(capi)
     {
+        this.config = config;
+        this.saveConfig = saveConfig;
         ComposeOverlay();
     }
 
@@ -46,6 +62,9 @@ public sealed class ModernAtlasDialog : GuiDialog
         centerX = capi.World.Player.Entity.Pos.X;
         centerY = capi.World.Player.Entity.Pos.Y;
         centerZ = capi.World.Player.Entity.Pos.Z;
+        config.AtlasSessionInProgress = true;
+        saveConfig();
+        FitLoadedTerrain();
         capi.Logger.Notification("[ModernAtlas] Opened independent 3D atlas GUI.");
     }
 
@@ -57,13 +76,16 @@ public sealed class ModernAtlasDialog : GuiDialog
             capi.Logger.Notification("[ModernAtlas] First 3D atlas GUI frame rendered.");
         }
         bool rendered = RenderLiveWorld(deltaTime);
+        RenderFogMask();
         capi.Render.GetEngineShader(EnumShaderProgram.Gui).Use();
         capi.Render.GLDepthMask(false);
         capi.Render.GLDisableDepthTest();
         capi.Render.GlToggleBlend(true, EnumBlendMode.Standard);
-        string status = rendered
-            ? "Live world chunks: exact game geometry, materials and lighting"
-            : "Exact world renderer unavailable - no substitute materials are shown";
+        string rendererStatus = rendered
+            ? "exact loaded chunk geometry"
+            : "exact renderer unavailable";
+        string fogStatus = config.FogEnabled ? "fog on" : "fog off";
+        string status = $"Radius {config.RadiusBlocks} blocks ({config.RadiusBlocks * 2}×{config.RadiusBlocks * 2}) • {fogStatus} • {rendererStatus} • no distant chunk requests";
         overlay?.GetDynamicText("status").SetNewText(status);
         overlay?.Render(deltaTime);
     }
@@ -117,7 +139,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     public override void OnMouseWheel(MouseWheelEventArgs args)
     {
         float wheel = args.deltaPrecise != 0 ? args.deltaPrecise : args.delta;
-        zoom = Math.Clamp(zoom * MathF.Pow(0.84f, wheel), 8, 180);
+        zoom = Math.Clamp(zoom * MathF.Pow(0.84f, wheel), 8, 6000);
+        InvalidateFogTexture();
         args.SetHandled();
     }
 
@@ -153,6 +176,31 @@ public sealed class ModernAtlasDialog : GuiDialog
             pitchDegrees = Math.Clamp(pitchDegrees - 4, 18, 86);
             args.Handled = true;
         }
+        else if (args.KeyCode == (int)GlKeys.PageUp)
+        {
+            ChangeRadius(1);
+            args.Handled = true;
+        }
+        else if (args.KeyCode == (int)GlKeys.PageDown)
+        {
+            ChangeRadius(-1);
+            args.Handled = true;
+        }
+        else if (args.KeyCode == (int)GlKeys.M)
+        {
+            config.FogEnabled = !config.FogEnabled;
+            InvalidateFogTexture();
+            saveConfig();
+            args.Handled = true;
+        }
+        else if (args.KeyCode == (int)GlKeys.Home)
+        {
+            config.RadiusBlocks = ModernAtlasConfig.DefaultRadius;
+            config.FogEnabled = true;
+            saveConfig();
+            FitLoadedTerrain();
+            args.Handled = true;
+        }
         else
         {
             base.OnKeyDown(args);
@@ -165,8 +213,17 @@ public sealed class ModernAtlasDialog : GuiDialog
     public override bool ShouldReceiveMouseEvents() => IsOpened();
     public override bool OnEscapePressed() => TryClose();
 
+    public override void OnGuiClosed()
+    {
+        EndAtlasSession();
+        base.OnGuiClosed();
+    }
+
     public override void Dispose()
     {
+        EndAtlasSession();
+        fogTexture?.Dispose();
+        fogTexture = null;
         overlay?.Dispose();
         overlay = null;
         base.Dispose();
@@ -201,7 +258,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
 
         float aspect = render.FrameWidth / (float)Math.Max(1, render.FrameHeight);
-        Mat4f.Ortho(projection, -zoom * aspect, zoom * aspect, -zoom, zoom, 0.1f, 800f);
+        float farPlane = Math.Max(2000, config.RadiusBlocks * 6);
+        Mat4f.Ortho(projection, -zoom * aspect, zoom * aspect, -zoom, zoom, 0.1f, farPlane);
         float yaw = yawDegrees * GameMath.DEG2RAD;
         float pitch = pitchDegrees * GameMath.DEG2RAD;
 
@@ -212,7 +270,8 @@ public sealed class ModernAtlasDialog : GuiDialog
             centerY,
             centerZ,
             yaw,
-            pitch
+            pitch,
+            config.RadiusBlocks
         ) == true;
         render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
         return rendered;
@@ -225,7 +284,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         centerZ = capi.World.Player.Entity.Pos.Z;
         yawDegrees = 42;
         pitchDegrees = 72;
-        zoom = 38;
+        FitLoadedTerrain();
     }
 
     private void Pan(double x, double z, float amount, KeyEvent args)
@@ -239,6 +298,117 @@ public sealed class ModernAtlasDialog : GuiDialog
     private void MaybeRecenterScene()
     {
         // Exact chunk meshes are live and do not require an atlas rebuild.
+    }
+
+    private void FitLoadedTerrain()
+    {
+        float radius = config.RadiusBlocks;
+        float aspect = capi.Render.FrameWidth / (float)Math.Max(1, capi.Render.FrameHeight);
+        float pitch = pitchDegrees * GameMath.DEG2RAD;
+
+        // A circular radius projects to an ellipse when the camera tilts. Add
+        // vertical headroom for trees, buildings and hills so neither the top
+        // nor bottom edge is clipped at low camera angles.
+        float horizontalFit = radius / Math.Max(0.5f, aspect);
+        float verticalFit = radius * Math.Abs(MathF.Sin(pitch))
+            + Math.Min(192, radius * 0.3f) * Math.Abs(MathF.Cos(pitch));
+        zoom = Math.Clamp(Math.Max(horizontalFit, verticalFit) * 1.08f, 80, 6000);
+        InvalidateFogTexture();
+    }
+
+    private void ChangeRadius(int direction)
+    {
+        int currentIndex = Array.FindIndex(RadiusSteps, value => value >= config.RadiusBlocks);
+        if (currentIndex < 0) currentIndex = RadiusSteps.Length - 1;
+        int nextIndex = Math.Clamp(currentIndex + direction, 0, RadiusSteps.Length - 1);
+        config.RadiusBlocks = RadiusSteps[nextIndex];
+        saveConfig();
+        FitLoadedTerrain();
+    }
+
+    private void RenderFogMask()
+    {
+        if (!config.FogEnabled) return;
+
+        int width = capi.Render.FrameWidth;
+        int height = capi.Render.FrameHeight;
+        if (fogTexture == null
+            || fogTextureWidth != width
+            || fogTextureHeight != height
+            || Math.Abs(fogTextureZoom - zoom) > 0.1f
+            || Math.Abs(fogTexturePitch - pitchDegrees) > 0.1f)
+        {
+            RebuildFogTexture(width, height);
+        }
+
+        if (fogTexture?.TextureId > 0)
+        {
+            capi.Render.GetEngineShader(EnumShaderProgram.Gui).Use();
+            capi.Render.GLDisableDepthTest();
+            capi.Render.GlToggleBlend(true, EnumBlendMode.Standard);
+            capi.Render.Render2DTexture(fogTexture.TextureId, 0, 0, width, height, 40);
+        }
+    }
+
+    private void RebuildFogTexture(int width, int height)
+    {
+        fogTexture ??= new LoadedTexture(capi);
+        fogTextureWidth = width;
+        fogTextureHeight = height;
+        fogTextureZoom = zoom;
+        fogTexturePitch = pitchDegrees;
+
+        using ImageSurface surface = new(Format.Argb32, Math.Max(1, width), Math.Max(1, height));
+        using Context context = new(surface);
+        context.Operator = Operator.Source;
+        context.SetSourceRGBA(0.32, 0.38, 0.40, 0.90);
+        context.Paint();
+
+        double radiusX = height * config.RadiusBlocks / (2.0 * zoom);
+        double pitchRadians = pitchDegrees * GameMath.DEG2RAD;
+        double radiusY = radiusX * Math.Max(0.12, Math.Sin(pitchRadians));
+        double reliefAllowance = Math.Min(192, config.RadiusBlocks * 0.3);
+        radiusY += height * reliefAllowance * Math.Abs(Math.Cos(pitchRadians)) / (2.0 * zoom);
+        double centerScreenX = width / 2.0;
+        double centerScreenY = height / 2.0;
+
+        // Concentric translucent ellipses form a soft fog bank without any
+        // world sampling. The fully clear center is the configured radius.
+        const int featherSteps = 18;
+        for (int step = featherSteps; step >= 0; step--)
+        {
+            double scale = 0.82 + 0.18 * step / featherSteps;
+            double alpha = 0.90 * step / featherSteps;
+            context.Save();
+            context.Translate(centerScreenX, centerScreenY);
+            context.Scale(radiusX * scale, radiusY * scale);
+            context.Arc(0, 0, 1, 0, Math.PI * 2);
+            context.Restore();
+            context.SetSourceRGBA(0.32, 0.38, 0.40, alpha);
+            context.Fill();
+        }
+        context.Save();
+        context.Translate(centerScreenX, centerScreenY);
+        context.Scale(radiusX * 0.82, radiusY * 0.82);
+        context.Arc(0, 0, 1, 0, Math.PI * 2);
+        context.Restore();
+        context.SetSourceRGBA(0, 0, 0, 0);
+        context.Fill();
+
+        capi.Gui.LoadOrUpdateCairoTexture(surface, true, ref fogTexture);
+    }
+
+    private void InvalidateFogTexture()
+    {
+        fogTextureZoom = -1;
+        fogTexturePitch = -1;
+    }
+
+    private void EndAtlasSession()
+    {
+        if (!config.AtlasSessionInProgress) return;
+        config.AtlasSessionInProgress = false;
+        saveConfig();
     }
 
     private void Rotate(float degrees, KeyEvent args)

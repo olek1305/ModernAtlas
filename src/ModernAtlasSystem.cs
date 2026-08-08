@@ -10,13 +10,30 @@ namespace ModernAtlas;
 /// </summary>
 public sealed class ModernAtlasSystem : ModSystem
 {
+    private const string ConfigFileName = "ModernAtlas.json";
+
     private ModernAtlasDialog? dialog;
+    private ICoreClientAPI? clientApi;
+    private ModernAtlasConfig? config;
 
     public override bool ShouldLoad(EnumAppSide side) => side == EnumAppSide.Client;
 
     public override void StartClientSide(ICoreClientAPI api)
     {
-        dialog = new ModernAtlasDialog(api);
+        clientApi = api;
+        config = api.LoadModConfig<ModernAtlasConfig>(ConfigFileName) ?? new ModernAtlasConfig();
+        if (config.AtlasSessionInProgress)
+        {
+            config.RadiusBlocks = ModernAtlasConfig.DefaultRadius;
+            config.AtlasSessionInProgress = false;
+            api.Logger.Warning(
+                "[ModernAtlas] The previous atlas session did not close cleanly. Restored the safe 500-block radius."
+            );
+        }
+        config.Validate();
+        SaveConfig();
+
+        dialog = new ModernAtlasDialog(api, config, SaveConfig);
 
         api.Input.RegisterHotKey(
             "modernatlas-open",
@@ -41,6 +58,16 @@ public sealed class ModernAtlasSystem : ModSystem
     {
         dialog?.Dispose();
         dialog = null;
+        clientApi = null;
+        config = null;
         base.Dispose();
+    }
+
+    private void SaveConfig()
+    {
+        if (clientApi != null && config != null)
+        {
+            clientApi.StoreModConfig(config, ConfigFileName);
+        }
     }
 }
