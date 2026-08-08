@@ -19,6 +19,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private readonly float[] model = Mat4f.Create();
 
     private GuiComposer? overlay;
+    private IShaderProgram? atlasShader;
     private FrameBufferRef? framebuffer;
     private int framebufferWidth;
     private int framebufferHeight;
@@ -27,7 +28,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private double centerX;
     private double centerZ;
     private float yawDegrees = 42;
-    private float pitchDegrees = 58;
+    private float pitchDegrees = 72;
     private float zoom = 38;
     private long lastSceneBeginMilliseconds;
     private bool loggedFirstRender;
@@ -43,6 +44,11 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         scene = new ModernAtlasScene(capi);
         ComposeOverlay();
+    }
+
+    public void SetShader(IShaderProgram? shader)
+    {
+        atlasShader = shader;
     }
 
     public override void OnGuiOpened()
@@ -73,6 +79,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         {
             RenderScene(framebuffer);
             capi.Render.GetEngineShader(EnumShaderProgram.Gui).Use();
+            capi.Render.GlToggleBlend(false);
             capi.Render.Render2DTexture(
                 framebuffer.ColorTextureIds[0],
                 0,
@@ -81,6 +88,7 @@ public sealed class ModernAtlasDialog : GuiDialog
                 capi.Render.FrameHeight,
                 20
             );
+            capi.Render.GlToggleBlend(true, EnumBlendMode.Standard);
         }
 
         string status = scene.IsBuilding
@@ -263,7 +271,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         render.ClearFrameBuffer(target, new[] { 0.035f, 0.075f, 0.11f, 1f }, true, true);
 
         MultiTextureMeshRef? mesh = scene.MeshRef;
-        if (mesh != null)
+        if (mesh != null && atlasShader != null)
         {
             float aspect = target.Width / (float)Math.Max(1, target.Height);
             Mat4f.Ortho(projection, -zoom * aspect, zoom * aspect, -zoom, zoom, 0.1f, 800f);
@@ -291,25 +299,18 @@ public sealed class ModernAtlasDialog : GuiDialog
 
             render.GLEnableDepthTest();
             render.GLDepthMask(true);
-            render.GlEnableCullFace();
-            render.GlToggleBlend(true, EnumBlendMode.Standard);
+            // Default block meshes can contain double-sided or non-cube faces
+            // and the off-screen projection may invert winding. Match the
+            // official loose-block renderer and do not cull atlas faces.
+            render.GlDisableCullFace();
+            render.GlToggleBlend(false);
             render.CurrentActiveShader?.Stop();
 
-            IStandardShaderProgram shader = render.PreparedStandardShader(
-                scene.CenterX,
-                (int)capi.World.Player.Entity.Pos.Y,
-                scene.CenterZ,
-                new Vec4f(1, 1, 1, 1)
-            );
-            shader.ProjectionMatrix = projection;
-            shader.ViewMatrix = view;
-            shader.ModelMatrix = model;
-            shader.RgbaAmbientIn = new Vec3f(0.72f, 0.76f, 0.82f);
-            shader.RgbaLightIn = new Vec4f(1.05f, 1.02f, 0.94f, 1);
-            shader.RgbaFogIn = new Vec4f(0.035f, 0.075f, 0.11f, 1);
-            shader.FogMinIn = 0;
-            shader.FogDensityIn = 0;
-            shader.DontWarpVertices = 1;
+            IShaderProgram shader = atlasShader;
+            shader.Use();
+            shader.UniformMatrix("projectionMatrix", projection);
+            shader.UniformMatrix("viewMatrix", view);
+            shader.UniformMatrix("modelMatrix", model);
             render.RenderMultiTextureMesh(mesh, "tex");
             shader.Stop();
 
@@ -333,7 +334,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         centerX = capi.World.Player.Entity.Pos.X;
         centerZ = capi.World.Player.Entity.Pos.Z;
         yawDegrees = 42;
-        pitchDegrees = 58;
+        pitchDegrees = 72;
         zoom = 38;
         BeginScene();
     }

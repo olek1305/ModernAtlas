@@ -246,6 +246,37 @@ public sealed class ModernAtlasScene : IDisposable
         buildingMesh = null;
         if (completed.VerticesCount == 0) return;
 
+        int nonTransparentVertices = 0;
+        float minX = float.MaxValue;
+        float minY = float.MaxValue;
+        float minZ = float.MaxValue;
+        float maxX = float.MinValue;
+        float maxY = float.MinValue;
+        float maxZ = float.MinValue;
+        for (int vertex = 0; vertex < completed.VerticesCount; vertex++)
+        {
+            int xyzIndex = vertex * 3;
+            minX = Math.Min(minX, completed.xyz[xyzIndex]);
+            minY = Math.Min(minY, completed.xyz[xyzIndex + 1]);
+            minZ = Math.Min(minZ, completed.xyz[xyzIndex + 2]);
+            maxX = Math.Max(maxX, completed.xyz[xyzIndex]);
+            maxY = Math.Max(maxY, completed.xyz[xyzIndex + 1]);
+            maxZ = Math.Max(maxZ, completed.xyz[xyzIndex + 2]);
+
+            int colorIndex = vertex * 4;
+            if (completed.Rgba[colorIndex + 3] != 0) nonTransparentVertices++;
+
+            // Default block meshes are inputs for the terrain tessellator. In
+            // normal chunks that later stage supplies vertex light/color. The
+            // atlas uses the meshes directly, so provide an opaque white base
+            // that preserves the actual texture without inheriting an empty
+            // or transparent chunk-light buffer.
+            completed.Rgba[colorIndex] = 255;
+            completed.Rgba[colorIndex + 1] = 255;
+            completed.Rgba[colorIndex + 2] = 255;
+            completed.Rgba[colorIndex + 3] = 255;
+        }
+
         // Atlas meshes do not use block-entity or particle-specific custom
         // vertex streams. Texture IDs, UVs, colors and packed normals remain.
         completed.CustomBytes = null;
@@ -254,9 +285,16 @@ public sealed class ModernAtlasScene : IDisposable
         completed.CustomShorts = null;
         meshRef = capi.Render.UploadMultiTextureMesh(completed);
         capi.Logger.Notification(
-            "[ModernAtlas] 3D scene ready: {0} exterior blocks, {1} vertices.",
+            "[ModernAtlas] 3D scene ready: {0} exterior blocks, {1} vertices ({2} raw opaque), bounds ({3:0.0}, {4:0.0}, {5:0.0}) to ({6:0.0}, {7:0.0}, {8:0.0}).",
             blocksAdded,
-            completed.VerticesCount
+            completed.VerticesCount,
+            nonTransparentVertices,
+            minX,
+            minY,
+            minZ,
+            maxX,
+            maxY,
+            maxZ
         );
     }
 
