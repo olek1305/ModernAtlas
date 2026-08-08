@@ -31,7 +31,7 @@ public sealed class ModernAtlasSystem : ModSystem
         api.Input.SetHotKeyHandler("modernatlas-open", OnOpenMap);
 
         api.Logger.Notification(
-            "[ModernAtlas] Registered non-destructive relief layer. Vanilla map data remains unchanged."
+            "[ModernAtlas] Registered non-destructive block surface layer. Vanilla map data remains unchanged."
         );
     }
 

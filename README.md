@@ -3,14 +3,23 @@
 ModernAtlas is a client-side map enhancement for Vintage Story 1.22.6. Its
 public name is deliberately independent from Google trademarks.
 
-## Current 0.1.0 prototype
+## Current 0.2.0 prototype
 
 - keeps the vanilla map, discovered areas and waypoints intact;
-- adds dynamic hillshade and contour accents from client-visible height data;
+- colors newly loaded map cells from their real topmost world block, including
+  registered blocks and color providers from other mods;
+- adds stronger hillshade and roof/cliff edge shading so structures and terrain
+  are easier to distinguish;
+- rebuilds a visible map tile after a block change;
 - displays terrain height under the cursor;
 - opens the enhanced world map with `G` (rebindable in Controls);
 - does not generate unexplored chunks and does not write to a save file;
 - works as a client-only mod, so a vanilla multiplayer server does not need it.
+
+Entities, players, creatures, dropped items, equipment and particles are not
+queried and therefore cannot appear on this layer. If precise block data is not
+currently client-loaded, ModernAtlas leaves the vanilla image visible and adds
+only translucent relief.
 
 The existing vanilla map database remains in
 `VintagestoryData/Maps/<world-id>.db`. ModernAtlas does not rename, replace,
@@ -52,17 +61,20 @@ dotnet --list-sdks
 dotnet build -c Release -p:VintageStoryPath=/opt/vintagestory
 ```
 
-The source-only ZIP is intentionally the default because it builds through the
-game's own compiler and avoids bundling game binaries.
+The release ZIP contains only ModernAtlas files and its compiled DLL. It does
+not bundle any Vintage Story binaries or assets.
 
 ## Planned architecture
 
-1. Persistent, world-specific ModernAtlas tile cache (separate from saves).
-2. Surface classification for trees, buildings, paths and ruins.
-3. Zoom-dependent level of detail.
-4. Tilted 3D mesh view with rotation and pitch controls.
-5. Optional server companion for multiplayer height/building tiles, respecting
+1. Persistent, world-specific ModernAtlas block cache (separate from saves).
+2. Exposed block geometry for terrain, trees, buildings, paths and ruins.
+3. Tilted 3D mesh view with rotation and pitch controls.
+4. Zoom-dependent level of detail and animated cloud overlay.
+5. Optional server companion for multiplayer block tiles, respecting
    server map permissions and never revealing unexplored terrain by default.
+
+See `DESIGN.md` for the renderer and compatibility design. `AGENTS.md` records
+the product goal and safety rules for future Codex sessions.
 
 ## Public distribution
 

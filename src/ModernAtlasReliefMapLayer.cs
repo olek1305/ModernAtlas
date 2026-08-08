@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Text;
 using Vintagestory.API.Client;
@@ -11,8 +10,9 @@ using Vintagestory.GameContent;
 namespace ModernAtlas;
 
 /// <summary>
-/// A lightweight hillshade overlay. It reads height maps already available to
-/// the client, so it neither generates unexplored terrain nor writes save data.
+/// A block-aware surface and hillshade overlay. Exact materials are sampled
+/// only from chunks already loaded by the client; older map-only areas keep a
+/// translucent relief fallback and never trigger chunk generation.
 /// </summary>
 public sealed class ModernAtlasReliefMapLayer : MapLayer
 {
@@ -20,11 +20,10 @@ public sealed class ModernAtlasReliefMapLayer : MapLayer
     private const int TileGroupSize = MultiChunkMapComponent.ChunkLen;
 
     private readonly ICoreClientAPI clientApi;
-    private readonly ConcurrentQueue<FastVec2i> pending = new();
-    private readonly ConcurrentQueue<ReadyTile> ready = new();
+    private readonly Queue<FastVec2i> pending = new();
     private readonly Dictionary<FastVec2i, MultiChunkMapComponent> components = new();
     private readonly HashSet<FastVec2i> requested = new();
-    private readonly object requestedLock = new();
+    private readonly HashSet<FastVec2i> visible = new();
 
     public override string Title => Lang.Get("modernatlas:map-layer-title");
     public override string LayerGroupCode => "terrain";
@@ -35,6 +34,7 @@ public sealed class ModernAtlasReliefMapLayer : MapLayer
     {
         clientApi = (ICoreClientAPI)api;
         ZIndex = 2;
+        clientApi.Event.BlockChanged += OnBlockChanged;
     }
 
     public override void OnViewChangedClient(List<FastVec2i> nowVisible, List<FastVec2i> nowHidden)
@@ -42,43 +42,35 @@ public sealed class ModernAtlasReliefMapLayer : MapLayer
         foreach (FastVec2i chunk in nowVisible)
         {
             if (chunk.X < 0 || chunk.Y < 0) continue;
-
-            FastVec2i key = chunk.Copy();
-            lock (requestedLock)
-            {
-                if (!requested.Add(key)) continue;
-            }
-            pending.Enqueue(key);
+            visible.Add(chunk.Copy());
+            RequestChunk(chunk, false);
         }
-    }
-
-    public override void OnOffThreadTick(float dt)
-    {
-        int budget = 12;
-        while (budget-- > 0 && pending.TryDequeue(out FastVec2i chunk))
+        foreach (FastVec2i chunk in nowHidden)
         {
-            IMapChunk? mapChunk = api.World.BlockAccessor.GetMapChunk(chunk.X, chunk.Y);
-            if (mapChunk == null)
-            {
-                // No client-side data means this location remains exactly as
-                // represented by the vanilla cache. Do not reveal/generate it.
-                lock (requestedLock) requested.Remove(chunk);
-                continue;
-            }
-
-            int[] pixels = BuildHillshade(chunk, mapChunk);
-            ready.Enqueue(new ReadyTile(chunk, pixels));
+            visible.Remove(chunk);
         }
     }
 
     public override void OnTick(float dt)
     {
-        int budget = 96;
+        // Block.GetColor() may consult the client texture atlas, so surface
+        // snapshots are deliberately captured on the main thread. The small
+        // budget keeps opening the map responsive.
+        int budget = 2;
         HashSet<MultiChunkMapComponent> changed = new();
-        while (budget-- > 0 && ready.TryDequeue(out ReadyTile tile))
+        while (budget-- > 0 && pending.Count > 0)
         {
-            int groupX = tile.Chunk.X / TileGroupSize;
-            int groupZ = tile.Chunk.Y / TileGroupSize;
+            FastVec2i chunk = pending.Dequeue();
+            IMapChunk? mapChunk = api.World.BlockAccessor.GetMapChunk(chunk.X, chunk.Y);
+            if (mapChunk == null)
+            {
+                requested.Remove(chunk);
+                continue;
+            }
+
+            int[] pixels = BuildSurfaceTile(chunk, mapChunk);
+            int groupX = chunk.X / TileGroupSize;
+            int groupZ = chunk.Y / TileGroupSize;
             FastVec2i groupKey = new(groupX, groupZ);
             FastVec2i baseChunk = new(groupX * TileGroupSize, groupZ * TileGroupSize);
 
@@ -89,9 +81,9 @@ public sealed class ModernAtlasReliefMapLayer : MapLayer
             }
 
             component.setChunk(
-                tile.Chunk.X - baseChunk.X,
-                tile.Chunk.Y - baseChunk.Y,
-                tile.Pixels
+                chunk.X - baseChunk.X,
+                chunk.Y - baseChunk.Y,
+                pixels
             );
             changed.Add(component);
         }
@@ -140,6 +132,7 @@ public sealed class ModernAtlasReliefMapLayer : MapLayer
 
     public override void Dispose()
     {
+        clientApi.Event.BlockChanged -= OnBlockChanged;
         foreach (MultiChunkMapComponent component in components.Values)
         {
             if (component.Texture != null && !component.Texture.Disposed)
@@ -148,10 +141,13 @@ public sealed class ModernAtlasReliefMapLayer : MapLayer
             }
         }
         components.Clear();
+        pending.Clear();
+        requested.Clear();
+        visible.Clear();
         base.Dispose();
     }
 
-    private int[] BuildHillshade(FastVec2i chunk, IMapChunk center)
+    private int[] BuildSurfaceTile(FastVec2i chunk, IMapChunk center)
     {
         IMapChunk? west = api.World.BlockAccessor.GetMapChunk(chunk.X - 1, chunk.Y);
         IMapChunk? east = api.World.BlockAccessor.GetMapChunk(chunk.X + 1, chunk.Y);
@@ -170,21 +166,103 @@ public sealed class ModernAtlasReliefMapLayer : MapLayer
                 int hNorth = HeightAt(center, north, x, z - 1, x, ChunkSize - 1);
                 int hSouth = HeightAt(center, south, x, z + 1, x, 0);
 
-                // Light comes from north-west. Positive values brighten slopes
-                // facing the light and negative values darken the opposite side.
-                double slope = (hWest - hEast + hNorth - hSouth) / 10.0;
-                slope = Math.Clamp(slope, -1.0, 1.0);
+                double slope = Math.Clamp(
+                    (hWest - hEast + hNorth - hSouth) / 12.0,
+                    -1.0,
+                    1.0
+                );
+                bool hardEdge = Math.Abs(height - hEast) >= 2 || Math.Abs(height - hSouth) >= 2;
 
-                bool contour = height % 12 == 0 &&
-                    (hWest != height || hEast != height || hNorth != height || hSouth != height);
+                int worldX = chunk.X * ChunkSize + x;
+                int worldZ = chunk.Y * ChunkSize + z;
+                Block? surface = FindSurfaceBlock(worldX, height, worldZ, out int surfaceY);
+                if (surface == null)
+                {
+                    // The precise block column is not client-loaded. Preserve
+                    // vanilla imagery and add only a modest height cue.
+                    int shade = slope >= 0 ? 232 : 28;
+                    int alpha = 18 + (int)(Math.Abs(slope) * 70);
+                    result[index] = PackRgba(shade, shade, shade, alpha);
+                    continue;
+                }
 
-                int alpha = contour ? 62 : 12 + (int)(Math.Abs(slope) * 94);
-                int channel = slope >= 0 ? 244 : 18;
-                result[index] = PackRgba(channel, channel, channel, alpha);
+                int color = GetSafeBlockColor(surface, new BlockPos(worldX, surfaceY, worldZ));
+                double light = 0.90 + slope * 0.22;
+                if (hardEdge) light *= 0.76;
+
+                int red = ClampByte((int)(ColorUtil.ColorR(color) * light));
+                int green = ClampByte((int)(ColorUtil.ColorG(color) * light));
+                int blue = ClampByte((int)(ColorUtil.ColorB(color) * light));
+                result[index] = PackRgba(red, green, blue, 238);
             }
         }
 
         return result;
+    }
+
+    private Block? FindSurfaceBlock(int worldX, int rainHeight, int worldZ, out int surfaceY)
+    {
+        // A little headroom handles foliage and unusual map-height providers;
+        // the downward scan finds the roof/ground when the reported cell is air.
+        for (int y = rainHeight + 2; y >= Math.Max(0, rainHeight - 12); y--)
+        {
+            Block? block = api.World.BlockAccessor.GetBlockOrNull(
+                worldX,
+                y,
+                worldZ,
+                BlockLayersAccess.FluidOrSolid
+            );
+            if (block == null)
+            {
+                surfaceY = rainHeight;
+                return null;
+            }
+            if (block.Id != 0)
+            {
+                surfaceY = y;
+                return block;
+            }
+        }
+
+        surfaceY = rainHeight;
+        return null;
+    }
+
+    private int GetSafeBlockColor(Block block, BlockPos pos)
+    {
+        string path = block.Code?.Path ?? string.Empty;
+        if (path.Length == 0 || path.Contains("unknown", StringComparison.OrdinalIgnoreCase))
+        {
+            return ColorUtil.ToRgba(255, 126, 126, 120);
+        }
+
+        try
+        {
+            return block.GetColor(clientApi, pos);
+        }
+        catch (Exception exception)
+        {
+            clientApi.Logger.Debug(
+                "[ModernAtlas] Using neutral stone color for {0}: {1}",
+                block.Code,
+                exception.Message
+            );
+            return ColorUtil.ToRgba(255, 126, 126, 120);
+        }
+    }
+
+    private void OnBlockChanged(BlockPos pos, Block? oldBlock)
+    {
+        FastVec2i chunk = new(FloorDiv(pos.X, ChunkSize), FloorDiv(pos.Z, ChunkSize));
+        if (visible.Contains(chunk)) RequestChunk(chunk, true);
+    }
+
+    private void RequestChunk(FastVec2i chunk, bool force)
+    {
+        FastVec2i key = chunk.Copy();
+        if (force) requested.Remove(key);
+        if (!requested.Add(key)) return;
+        pending.Enqueue(key);
     }
 
     private static int HeightAt(
@@ -209,12 +287,12 @@ public sealed class ModernAtlasReliefMapLayer : MapLayer
     private static int PackRgba(int red, int green, int blue, int alpha)
         => red | (green << 8) | (blue << 16) | (alpha << 24);
 
+    private static int ClampByte(int value) => Math.Clamp(value, 0, 255);
+
     private static int FloorDiv(int value, int divisor)
     {
         int quotient = value / divisor;
         int remainder = value % divisor;
         return remainder < 0 ? quotient - 1 : quotient;
     }
-
-    private readonly record struct ReadyTile(FastVec2i Chunk, int[] Pixels);
 }

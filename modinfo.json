@@ -5,8 +5,8 @@
   "authors": [
     "arcylisz"
   ],
-  "description": "Client-side relief layer and foundation for an interactive 3D atlas. It enhances the existing Vintage Story world map without replacing or modifying save data.",
-  "version": "0.1.0",
+  "description": "Client-side block-aware surface map and foundation for an interactive 3D atlas. It enhances the existing Vintage Story world map without replacing or modifying save data.",
+  "version": "0.2.0",
   "side": "Client",
   "requiredOnServer": false,
   "requiredOnClient": false,
