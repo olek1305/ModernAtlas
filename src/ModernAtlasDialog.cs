@@ -265,6 +265,9 @@ public sealed class ModernAtlasDialog : GuiDialog
     private void ComposeOverlay()
     {
         ElementBounds root = ElementBounds.Fill;
+        double guiWidth = capi.Render.FrameWidth / Math.Max(0.5, RuntimeEnv.GUIScale);
+        double settingsX = Math.Max(20, guiWidth - 320);
+        ElementBounds settingsPanel = ElementBounds.Fixed(settingsX, 18, 300, 230);
         string[] radiusValues = Array.ConvertAll(RadiusSteps, value => value.ToString());
         string[] radiusNames = Array.ConvertAll(
             RadiusSteps,
@@ -292,32 +295,33 @@ public sealed class ModernAtlasDialog : GuiDialog
                 ElementBounds.Fixed(24, 88, 650, 34),
                 "status"
             )
+            .AddShadedDialogBG(settingsPanel, false, 8, 0.72f)
             .AddStaticText(
                 "Atlas settings",
                 CairoFont.WhiteSmallishText().WithFontSize(20),
-                ElementBounds.FixedOffseted(EnumDialogArea.RightTop, -40, 30, 260, 30)
+                ElementBounds.Fixed(settingsX + 20, 30, 260, 30)
             )
             .AddStaticText(
                 capi.IsSinglePlayer ? "Visible radius" : "Server-safe radius (locked)",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.FixedOffseted(EnumDialogArea.RightTop, -40, 62, 260, 24)
+                ElementBounds.Fixed(settingsX + 20, 62, 260, 24)
             )
             .AddDropDown(
                 radiusValues,
                 radiusNames,
                 selectedRadius,
                 OnRadiusSelected,
-                ElementBounds.FixedOffseted(EnumDialogArea.RightTop, -40, 88, 260, 34),
+                ElementBounds.Fixed(settingsX + 20, 88, 260, 34),
                 "radius"
             )
             .AddStaticText(
                 capi.IsSinglePlayer ? "Unexplored fog" : "Server fog (locked)",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.FixedOffseted(EnumDialogArea.RightTop, -120, 136, 180, 28)
+                ElementBounds.Fixed(settingsX + 20, 136, 180, 28)
             )
             .AddSwitch(
                 OnFogToggled,
-                ElementBounds.FixedOffseted(EnumDialogArea.RightTop, -40, 132, 46, 30),
+                ElementBounds.Fixed(settingsX + 234, 132, 46, 30),
                 "fog",
                 24,
                 4
@@ -325,11 +329,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             .AddStaticText(
                 "Performance mode",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.FixedOffseted(EnumDialogArea.RightTop, -120, 172, 180, 28)
+                ElementBounds.Fixed(settingsX + 20, 172, 180, 28)
             )
             .AddSwitch(
                 OnPerformanceToggled,
-                ElementBounds.FixedOffseted(EnumDialogArea.RightTop, -40, 168, 46, 30),
+                ElementBounds.Fixed(settingsX + 234, 168, 46, 30),
                 "performance",
                 24,
                 4
@@ -337,11 +341,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             .AddStaticText(
                 "Animations",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.FixedOffseted(EnumDialogArea.RightTop, -120, 208, 180, 28)
+                ElementBounds.Fixed(settingsX + 20, 208, 180, 28)
             )
             .AddSwitch(
                 OnAnimationsToggled,
-                ElementBounds.FixedOffseted(EnumDialogArea.RightTop, -40, 204, 46, 30),
+                ElementBounds.Fixed(settingsX + 234, 204, 46, 30),
                 "animations",
                 24,
                 4

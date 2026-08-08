@@ -167,6 +167,12 @@ internal sealed class ExactChunkRendererAdapter
 
         try
         {
+            // The normal world has already rendered before this HUD dialog.
+            // Clear it so weather particles such as rain cannot leak through
+            // transparent atlas pixels. ModernAtlas then draws chunk meshes
+            // through Primary and overlays only its own fog and GUI.
+            clearFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Default });
+
             // The official chunk shaders write to the multi-attachment Primary
             // world framebuffer. Rendering them into the default GUI target
             // produces no color even though the draw call succeeds.
