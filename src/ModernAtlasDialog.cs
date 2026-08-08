@@ -377,7 +377,8 @@ public sealed class ModernAtlasDialog : GuiDialog
             centerZ,
             yaw,
             pitch,
-            EffectiveRadius
+            EffectiveRadius,
+            EffectiveFogEnabled
         ) == true;
         render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
         return rendered;

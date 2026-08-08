@@ -188,7 +188,8 @@ internal sealed class ExactChunkRendererAdapter
         double centerZ,
         float yawRadians,
         float pitchRadians,
-        int radiusBlocks
+        int radiusBlocks,
+        bool fogEnabled
     )
     {
         if (disabled) return false;
@@ -215,7 +216,11 @@ internal sealed class ExactChunkRendererAdapter
             // The official chunk shaders write to the multi-attachment Primary
             // world framebuffer. Rendering them into the default GUI target
             // produces no color even though the draw call succeeds.
-            clearFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Primary });
+            FrameBufferRef primaryFramebuffer = render.FrameBuffers[(int)EnumFrameBuffer.Primary];
+            float[] atlasBackground = fogEnabled
+                ? new[] { 0.32f, 0.38f, 0.40f, 1f }
+                : new[] { 0.035f, 0.075f, 0.11f, 1f };
+            render.ClearFrameBuffer(primaryFramebuffer, atlasBackground, true, true);
 
             // Keep the eye in front of the entire requested atlas volume.
             // The old fixed distance intersected large maps at tilted angles,
@@ -281,8 +286,8 @@ internal sealed class ExactChunkRendererAdapter
             projectionPushed = true;
             render.CurrentActiveShader?.Stop();
             renderOpaque.Invoke(chunkRenderer, new object[] { deltaTime });
-            RenderTransparentChunks(deltaTime);
             blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
+            RenderTransparentChunks(deltaTime);
 
             if (!loggedSuccess)
             {
@@ -323,9 +328,15 @@ internal sealed class ExactChunkRendererAdapter
     {
         if (transparentPassDisabled) return;
 
+        bool defaultFramebufferLoaded = false;
         bool framebufferLoaded = false;
         try
         {
+            // The opaque atlas has already been blitted to the GUI target.
+            // Compose OIT into that target afterwards; a later Primary blit
+            // would overwrite the water and make a successful pass invisible.
+            loadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Default });
+            defaultFramebufferLoaded = true;
             loadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
             framebufferLoaded = true;
             clearFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
@@ -334,6 +345,8 @@ internal sealed class ExactChunkRendererAdapter
             framebufferLoaded = false;
             mergeTransparentRenderPass.Invoke(platform, Array.Empty<object>());
             renderAfterOit.Invoke(chunkRenderer, new object[] { deltaTime });
+            unloadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Default });
+            defaultFramebufferLoaded = false;
 
             if (!loggedTransparentSuccess)
             {
@@ -366,6 +379,18 @@ internal sealed class ExactChunkRendererAdapter
                 {
                     // Preserve the opaque atlas even if framebuffer cleanup is
                     // unavailable after an OIT failure.
+                }
+            }
+            if (defaultFramebufferLoaded)
+            {
+                try
+                {
+                    unloadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Default });
+                }
+                catch
+                {
+                    // The GUI target remains valid even if the framebuffer
+                    // stack cannot be restored after a failed OIT pass.
                 }
             }
         }
