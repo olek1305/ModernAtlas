@@ -26,7 +26,7 @@ internal sealed class ExactChunkRendererAdapter
     private readonly object platform;
     private readonly object beforeOitRenderer;
     private readonly object afterOitRenderer;
-    private readonly IShaderProgram stableLiquidShader;
+    private readonly Func<IShaderProgram?> stableLiquidShaderProvider;
     private readonly MethodInfo renderOpaque;
     private readonly MethodInfo renderOit;
     private readonly MethodInfo renderAfterOit;
@@ -47,6 +47,7 @@ internal sealed class ExactChunkRendererAdapter
     private bool loggedSuccess;
     private bool loggedTransparentSuccess;
     private bool loggedStableLiquidDiagnostics;
+    private float stableLiquidAnimationTime;
 
     private ExactChunkRendererAdapter(
         ICoreClientAPI capi,
@@ -55,7 +56,7 @@ internal sealed class ExactChunkRendererAdapter
         object platform,
         object beforeOitRenderer,
         object afterOitRenderer,
-        IShaderProgram stableLiquidShader,
+        Func<IShaderProgram?> stableLiquidShaderProvider,
         MethodInfo renderOpaque,
         MethodInfo renderOit,
         MethodInfo renderAfterOit,
@@ -79,7 +80,7 @@ internal sealed class ExactChunkRendererAdapter
         this.platform = platform;
         this.beforeOitRenderer = beforeOitRenderer;
         this.afterOitRenderer = afterOitRenderer;
-        this.stableLiquidShader = stableLiquidShader;
+        this.stableLiquidShaderProvider = stableLiquidShaderProvider;
         this.renderOpaque = renderOpaque;
         this.renderOit = renderOit;
         this.renderAfterOit = renderAfterOit;
@@ -99,7 +100,7 @@ internal sealed class ExactChunkRendererAdapter
 
     public static ExactChunkRendererAdapter? TryCreate(
         ICoreClientAPI capi,
-        IShaderProgram stableLiquidShader
+        Func<IShaderProgram?> stableLiquidShaderProvider
     )
     {
         if (!GameVersion.ShortGameVersion.StartsWith(SupportedVersion, StringComparison.Ordinal))
@@ -206,7 +207,7 @@ internal sealed class ExactChunkRendererAdapter
                 platform,
                 beforeOitRenderer,
                 afterOitRenderer,
-                stableLiquidShader,
+                stableLiquidShaderProvider,
                 opaque,
                 oit,
                 afterOit,
@@ -414,7 +415,7 @@ internal sealed class ExactChunkRendererAdapter
             unloadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
             framebufferLoaded = false;
 
-            RenderStableLiquidBlocks(projection, view, cameraPosition);
+            RenderStableLiquidBlocks(deltaTime, projection, view, cameraPosition);
 
             // Compose at the Primary framebuffer's own resolution before the
             // final blit. OIT uses texelFetch(gl_FragCoord), so composing it
@@ -494,12 +495,14 @@ internal sealed class ExactChunkRendererAdapter
     }
 
     private void RenderStableLiquidBlocks(
+        float deltaTime,
         float[] projection,
         double[] view,
         Vec3d cameraPosition
     )
     {
-        if (stableLiquidShader.Disposed)
+        IShaderProgram? activeLiquidShader = stableLiquidShaderProvider();
+        if (activeLiquidShader == null || activeLiquidShader.Disposed)
         {
             if (!loggedStableLiquidDiagnostics)
             {
@@ -519,12 +522,26 @@ internal sealed class ExactChunkRendererAdapter
         render.GlToggleBlend(false, EnumBlendMode.Standard);
         render.GlDisableCullFace();
 
-        stableLiquidShader.Use();
-        stableLiquidShader.UniformMatrix("projectionMatrix", projection);
-        stableLiquidShader.UniformMatrix(
+        activeLiquidShader.Use();
+        activeLiquidShader.UniformMatrix("projectionMatrix", projection);
+        activeLiquidShader.UniformMatrix(
             "modelViewMatrix",
             Array.ConvertAll(view, value => (float)value)
         );
+        activeLiquidShader.Uniform(
+            "playerpos",
+            (float)cameraPosition.X,
+            (float)cameraPosition.Y,
+            (float)cameraPosition.Z
+        );
+        stableLiquidAnimationTime = (stableLiquidAnimationTime + Math.Max(0, deltaTime)) % 4096f;
+        int blockTexturePixels = capi.Settings.Int["textureSize"];
+        if (blockTexturePixels <= 0) blockTexturePixels = 32;
+        float atlasPixels = capi.BlockTextureAtlas.Size.Width;
+        float blockTextureUv = blockTexturePixels / atlasPixels;
+        activeLiquidShader.Uniform("blockTextureSize", blockTextureUv, blockTextureUv);
+        activeLiquidShader.Uniform("textureAtlasSize", atlasPixels, atlasPixels);
+        activeLiquidShader.Uniform("liquidAnimationTime", stableLiquidAnimationTime);
 
         MeshDataPoolManager[] managers = passes[(int)EnumChunkRenderPass.Liquid];
         long renderedTriangles = 0;
@@ -534,7 +551,7 @@ internal sealed class ExactChunkRendererAdapter
         {
             if (managers[index] == null) continue;
             activeManagers++;
-            stableLiquidShader.BindTexture2D("terrainTex", textureIds[index], 0);
+            activeLiquidShader.BindTexture2D("terrainTex", textureIds[index], 0);
             managers[index].Render(cameraPosition, "origin", EnumFrustumCullMode.CullInstant);
             long usedVideoMemory = 0;
             long managerRenderedTriangles = 0;
@@ -547,7 +564,7 @@ internal sealed class ExactChunkRendererAdapter
             renderedTriangles += managerRenderedTriangles;
             allocatedTriangles += managerAllocatedTriangles;
         }
-        stableLiquidShader.Stop();
+        activeLiquidShader.Stop();
         render.GlEnableCullFace();
 
         if (!loggedStableLiquidDiagnostics)
@@ -555,7 +572,7 @@ internal sealed class ExactChunkRendererAdapter
             loggedStableLiquidDiagnostics = true;
             capi.Logger.Notification(
                 "[ModernAtlas] Stable liquid draw: shader pass {0}, {1} atlas managers, {2} rendered triangles, {3} allocated triangles.",
-                stableLiquidShader.PassId,
+                activeLiquidShader.PassId,
                 activeManagers,
                 renderedTriangles,
                 allocatedTriangles

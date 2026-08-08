@@ -34,15 +34,12 @@ public sealed class ModernAtlasSystem : ModSystem
         config.Validate();
         SaveConfig();
 
-        stableLiquidShader = api.Shader.NewShaderProgram();
-        stableLiquidShader.AssetDomain = "modernatlas";
-        api.Shader.RegisterFileShaderProgram("atlasliquid", stableLiquidShader);
-        if (!stableLiquidShader.Compile())
+        if (GetStableLiquidShader() == null)
         {
             api.Logger.Error("[ModernAtlas] Failed to compile the stable liquid shader.");
         }
 
-        dialog = new ModernAtlasDialog(api, config, SaveConfig, stableLiquidShader);
+        dialog = new ModernAtlasDialog(api, config, SaveConfig, GetStableLiquidShader);
 
         api.Input.RegisterHotKey(
             "modernatlas-open",
@@ -71,6 +68,23 @@ public sealed class ModernAtlasSystem : ModSystem
         clientApi = null;
         config = null;
         base.Dispose();
+    }
+
+    private IShaderProgram? GetStableLiquidShader()
+    {
+        if (stableLiquidShader != null && !stableLiquidShader.Disposed)
+        {
+            return stableLiquidShader;
+        }
+        if (clientApi == null) return null;
+
+        IShaderProgram program = clientApi.Shader.NewShaderProgram();
+        program.AssetDomain = "modernatlas";
+        clientApi.Shader.RegisterFileShaderProgram("atlasliquid", program);
+        if (!program.Compile()) return null;
+
+        stableLiquidShader = program;
+        return program;
     }
 
     private void SaveConfig()
