@@ -97,6 +97,10 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
   before/after setup renderers around chunk OIT. Invoke those setup renderers
   directly; never trigger the global OIT stage because that would also render
   entities and particles outside the atlas scope.
+- The stock liquid shader's underwater-murkiness discard assumes perspective
+  depth. The atlas uses an orthographic camera, so bypass that discard only
+  during atlas liquid rendering while retaining Primary depth occlusion. Water
+  and lava surfaces must remain complete at every supported camera angle.
 - Test with an isolated Vintage Story data directory containing vanilla plus
   ModernAtlas. Do not delete or permanently disable the user's other mods.
 

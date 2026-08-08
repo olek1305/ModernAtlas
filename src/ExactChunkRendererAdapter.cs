@@ -389,6 +389,7 @@ internal sealed class ExactChunkRendererAdapter
 
         bool framebufferLoaded = false;
         bool? savedOffscreenBuffer = null;
+        float savedCameraUnderwater = capi.Render.ShaderUniforms.CameraUnderwater;
         try
         {
             loadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
@@ -402,6 +403,14 @@ internal sealed class ExactChunkRendererAdapter
                 beforeOitRenderer,
                 new object[] { deltaTime, EnumRenderStage.OIT }
             );
+            // The stock liquid shader's underwater-murkiness rejection
+            // linearizes depth as perspective. ModernAtlas deliberately uses
+            // an orthographic projection, so that test clips changing slices
+            // of a liquid surface as the camera tilts. The atlas eye is always
+            // above the scene; this value bypasses only that invalid rejection
+            // while the real Primary depth test still occludes fluids behind
+            // terrain and walls.
+            capi.Render.ShaderUniforms.CameraUnderwater = 1;
             renderOit.Invoke(chunkRenderer, new object[] { deltaTime });
             runAfterOit.Invoke(
                 afterOitRenderer,
@@ -444,6 +453,7 @@ internal sealed class ExactChunkRendererAdapter
         }
         finally
         {
+            capi.Render.ShaderUniforms.CameraUnderwater = savedCameraUnderwater;
             if (savedOffscreenBuffer.HasValue)
             {
                 offscreenBufferField.SetValue(platform, savedOffscreenBuffer.Value);
