@@ -105,7 +105,15 @@ public sealed class ModernAtlasScene : IDisposable
                 );
                 if (block == null || block.Id == 0) continue;
 
-                AddBlockMesh(block, worldX - CenterX, y - baseY, worldZ - CenterZ);
+                AddBlockMesh(
+                    block,
+                    worldX,
+                    y,
+                    worldZ,
+                    worldX - CenterX,
+                    y - baseY,
+                    worldZ - CenterZ
+                );
             }
         }
 
@@ -193,7 +201,15 @@ public sealed class ModernAtlasScene : IDisposable
         return loaded[index] ? heights[index] : ownHeight;
     }
 
-    private void AddBlockMesh(Block block, float x, float y, float z)
+    private void AddBlockMesh(
+        Block block,
+        int worldX,
+        int worldY,
+        int worldZ,
+        float x,
+        float y,
+        float z
+    )
     {
         if (buildingMesh == null) return;
 
@@ -212,7 +228,9 @@ public sealed class ModernAtlasScene : IDisposable
             }
             if (source.VerticesCount == 0) return;
 
+            int firstVertex = buildingMesh.VerticesCount;
             buildingMesh.AddMeshData(source, x, y, z);
+            ApplyWorldColor(block, source, firstVertex, worldX, worldY, worldZ);
             blocksAdded++;
         }
         catch (Exception exception)
@@ -240,6 +258,58 @@ public sealed class ModernAtlasScene : IDisposable
         }
     }
 
+    private void ApplyWorldColor(
+        Block block,
+        MeshData source,
+        int firstVertex,
+        int worldX,
+        int worldY,
+        int worldZ
+    )
+    {
+        if (buildingMesh == null || source.ColorMapIdsCount == 0) return;
+
+        int tint = capi.World.ApplyColorMapOnRgba(
+            block.ClimateColorMapResolved,
+            block.SeasonColorMapResolved,
+            ColorUtil.WhiteArgb,
+            worldX,
+            worldY,
+            worldZ,
+            false
+        );
+        byte tintR = ColorUtil.ColorR(tint);
+        byte tintG = ColorUtil.ColorG(tint);
+        byte tintB = ColorUtil.ColorB(tint);
+        int verticesPerFace = Math.Max(1, source.VerticesPerFace);
+        int faceCount = Math.Min(
+            source.ColorMapIdsCount,
+            source.VerticesCount / verticesPerFace
+        );
+
+        for (int face = 0; face < faceCount; face++)
+        {
+            bool usesColorMap = source.ClimateColorMapIds[face] != 0
+                || source.SeasonColorMapIds[face] != 0;
+            if (!usesColorMap) continue;
+
+            int faceStart = firstVertex + face * verticesPerFace;
+            int faceEnd = Math.Min(firstVertex + source.VerticesCount, faceStart + verticesPerFace);
+            for (int vertex = faceStart; vertex < faceEnd; vertex++)
+            {
+                int colorIndex = vertex * 4;
+                buildingMesh.Rgba[colorIndex] = MultiplyColor(buildingMesh.Rgba[colorIndex], tintR);
+                buildingMesh.Rgba[colorIndex + 1] = MultiplyColor(buildingMesh.Rgba[colorIndex + 1], tintG);
+                buildingMesh.Rgba[colorIndex + 2] = MultiplyColor(buildingMesh.Rgba[colorIndex + 2], tintB);
+            }
+        }
+    }
+
+    private static byte MultiplyColor(byte value, byte tint)
+    {
+        return (byte)((value * tint + 127) / 255);
+    }
+
     private void FinishMesh()
     {
         MeshData completed = buildingMesh!;
@@ -265,16 +335,6 @@ public sealed class ModernAtlasScene : IDisposable
 
             int colorIndex = vertex * 4;
             if (completed.Rgba[colorIndex + 3] != 0) nonTransparentVertices++;
-
-            // Default block meshes are inputs for the terrain tessellator. In
-            // normal chunks that later stage supplies vertex light/color. The
-            // atlas uses the meshes directly, so provide an opaque white base
-            // that preserves the actual texture without inheriting an empty
-            // or transparent chunk-light buffer.
-            completed.Rgba[colorIndex] = 255;
-            completed.Rgba[colorIndex + 1] = 255;
-            completed.Rgba[colorIndex + 2] = 255;
-            completed.Rgba[colorIndex + 3] = 255;
         }
 
         // Atlas meshes do not use block-entity or particle-specific custom

@@ -83,9 +83,9 @@ public sealed class ModernAtlasDialog : GuiDialog
             capi.Render.Render2DTexture(
                 framebuffer.ColorTextureIds[0],
                 0,
-                0,
-                capi.Render.FrameWidth,
                 capi.Render.FrameHeight,
+                capi.Render.FrameWidth,
+                -capi.Render.FrameHeight,
                 20
             );
             capi.Render.GlToggleBlend(true, EnumBlendMode.Standard);
