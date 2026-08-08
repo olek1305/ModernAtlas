@@ -30,9 +30,10 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
   from blocks.
 - Preserve the game's live material appearance: texture-atlas coordinates,
   biome tint, sunlight, shadows and connected or multipart block geometry.
-- Render water, lava and transparent block materials through the engine's OIT
-  path. Seeing only a fluid shadow is a rendering failure, not an acceptable
-  fallback.
+- Render water and lava as stable world-aligned block surfaces using their
+  registered atlas textures and biome tint. Exclude camera-dependent Fresnel,
+  shadows and scene lighting from atlas fluids. Other transparent block
+  materials may continue through the engine OIT path.
 - Do not render entities, players, creatures, dropped items, held tools,
   weapons, armor, particles, damage effects or other transient scene objects.
 - Use a neutral stone material when a block or texture cannot be resolved.
@@ -87,20 +88,18 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
 - Prefer public Vintage Story APIs. Isolate any unavoidable game-content API
   integration behind a small adapter and document why it is needed.
 - For Vintage Story 1.22.6, exact live chunk rendering is isolated in
-  `ExactChunkRendererAdapter`. Opaque terrain uses Primary; liquid and
-  transparent geometry uses the engine OIT buffers and must be composed onto
-  the atlas GUI target without leaving the GUI on a world framebuffer.
-- Rebuild the engine's `LiquidDepth` pass with the atlas projection and camera
-  before rendering liquid OIT. Reusing the normal gameplay-camera depth buffer
-  makes the liquid shader discard water and lava while their shadows remain.
-- Vintage Story 1.22.6 also requires its registered `SystemRenderOITLayers`
-  before/after setup renderers around chunk OIT. Invoke those setup renderers
-  directly; never trigger the global OIT stage because that would also render
-  entities and particles outside the atlas scope.
-- The stock liquid shader's underwater-murkiness discard assumes perspective
-  depth. The atlas uses an orthographic camera, so bypass that discard only
-  during atlas liquid rendering while retaining Primary depth occlusion. Water
-  and lava surfaces must remain complete at every supported camera angle.
+  `ExactChunkRendererAdapter`. Opaque terrain and stable atlas liquids use
+  Primary. Non-fluid transparent geometry uses the engine OIT buffers and must
+  be composed without leaving the GUI on a world framebuffer.
+- Do not use the stock camera-dependent liquid shader for the atlas. Temporarily
+  exclude liquid mesh pools from chunk OIT, then draw those same completed
+  meshes with the ModernAtlas stable-liquid shader. Keep hardware depth testing
+  so terrain and walls occlude fluids, but do not let camera angle or panning
+  change a fluid surface's world position or completeness.
+- Vintage Story 1.22.6 requires its registered `SystemRenderOITLayers`
+  before/after setup renderers for remaining transparent chunk materials.
+  Invoke those setup renderers directly; never trigger the global OIT stage
+  because that would also render entities and particles outside atlas scope.
 - Compose layered OIT into `Primary` at its native framebuffer resolution and
   only then blit the completed atlas to the window. Direct composition onto the
   window breaks `texelFetch(gl_FragCoord)` when SSAA changes framebuffer size

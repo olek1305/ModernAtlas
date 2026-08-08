@@ -26,7 +26,7 @@ internal sealed class ExactChunkRendererAdapter
     private readonly object platform;
     private readonly object beforeOitRenderer;
     private readonly object afterOitRenderer;
-    private readonly MethodInfo renderBefore;
+    private readonly IShaderProgram stableLiquidShader;
     private readonly MethodInfo renderOpaque;
     private readonly MethodInfo renderOit;
     private readonly MethodInfo renderAfterOit;
@@ -40,6 +40,8 @@ internal sealed class ExactChunkRendererAdapter
     private readonly FieldInfo cameraMatrixOriginField;
     private readonly FieldInfo poolsByRenderPassField;
     private readonly FieldInfo poolFrustumField;
+    private readonly FieldInfo managerPoolsField;
+    private readonly FieldInfo textureIdsField;
     private bool disabled;
     private bool transparentPassDisabled;
     private bool loggedSuccess;
@@ -52,7 +54,7 @@ internal sealed class ExactChunkRendererAdapter
         object platform,
         object beforeOitRenderer,
         object afterOitRenderer,
-        MethodInfo renderBefore,
+        IShaderProgram stableLiquidShader,
         MethodInfo renderOpaque,
         MethodInfo renderOit,
         MethodInfo renderAfterOit,
@@ -65,7 +67,9 @@ internal sealed class ExactChunkRendererAdapter
         MethodInfo blitPrimaryToDefault,
         FieldInfo cameraMatrixOriginField,
         FieldInfo poolsByRenderPassField,
-        FieldInfo poolFrustumField
+        FieldInfo poolFrustumField,
+        FieldInfo managerPoolsField,
+        FieldInfo textureIdsField
     )
     {
         this.capi = capi;
@@ -74,7 +78,7 @@ internal sealed class ExactChunkRendererAdapter
         this.platform = platform;
         this.beforeOitRenderer = beforeOitRenderer;
         this.afterOitRenderer = afterOitRenderer;
-        this.renderBefore = renderBefore;
+        this.stableLiquidShader = stableLiquidShader;
         this.renderOpaque = renderOpaque;
         this.renderOit = renderOit;
         this.renderAfterOit = renderAfterOit;
@@ -88,9 +92,14 @@ internal sealed class ExactChunkRendererAdapter
         this.cameraMatrixOriginField = cameraMatrixOriginField;
         this.poolsByRenderPassField = poolsByRenderPassField;
         this.poolFrustumField = poolFrustumField;
+        this.managerPoolsField = managerPoolsField;
+        this.textureIdsField = textureIdsField;
     }
 
-    public static ExactChunkRendererAdapter? TryCreate(ICoreClientAPI capi)
+    public static ExactChunkRendererAdapter? TryCreate(
+        ICoreClientAPI capi,
+        IShaderProgram stableLiquidShader
+    )
     {
         if (!GameVersion.ShortGameVersion.StartsWith(SupportedVersion, StringComparison.Ordinal))
         {
@@ -124,13 +133,6 @@ internal sealed class ExactChunkRendererAdapter
                 game,
                 "Vintagestory.Client.NoObf.SystemRenderOITLayers+AfterOIT"
             );
-            MethodInfo before = renderer.GetType().GetMethod(
-                "OnRenderBefore",
-                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
-                null,
-                new[] { typeof(float) },
-                null
-            ) ?? throw new MissingMethodException(renderer.GetType().FullName, "OnRenderBefore(float)");
             MethodInfo opaque = renderer.GetType().GetMethod(
                 "RenderOpaque",
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
@@ -190,6 +192,8 @@ internal sealed class ExactChunkRendererAdapter
             FieldInfo cameraMatrix = RequireField(camera.GetType(), "CameraMatrixOrigin");
             FieldInfo pools = RequireField(renderer.GetType(), "poolsByRenderPass");
             FieldInfo poolFrustum = RequireField(typeof(MeshDataPoolManager), "frustumCuller");
+            FieldInfo managerPools = RequireField(typeof(MeshDataPoolManager), "pools");
+            FieldInfo textureIds = RequireField(renderer.GetType(), "textureIds");
 
             capi.Logger.Notification(
                 "[ModernAtlas] Vintage Story 1.22.6 exact chunk renderer is available."
@@ -201,7 +205,7 @@ internal sealed class ExactChunkRendererAdapter
                 platform,
                 beforeOitRenderer,
                 afterOitRenderer,
-                before,
+                stableLiquidShader,
                 opaque,
                 oit,
                 afterOit,
@@ -214,7 +218,9 @@ internal sealed class ExactChunkRendererAdapter
                 blit,
                 cameraMatrix,
                 pools,
-                poolFrustum
+                poolFrustum,
+                managerPools,
+                textureIds
             );
         }
         catch (Exception exception)
@@ -332,13 +338,8 @@ internal sealed class ExactChunkRendererAdapter
             render.PMatrix.Push(projectionDouble);
             projectionPushed = true;
             render.CurrentActiveShader?.Stop();
-            // The liquid fragment shader compares every water/lava fragment
-            // against the dedicated quarter-resolution LiquidDepth buffer.
-            // Rebuild it with the atlas camera; the normal gameplay buffer has
-            // incompatible depths and makes the shader discard all liquids.
-            renderBefore.Invoke(chunkRenderer, new object[] { deltaTime });
             renderOpaque.Invoke(chunkRenderer, new object[] { deltaTime });
-            if (!RenderTransparentChunks(deltaTime))
+            if (!RenderTransparentChunks(deltaTime, projection, view, cameraPosition))
             {
                 blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
             }
@@ -378,12 +379,17 @@ internal sealed class ExactChunkRendererAdapter
         }
     }
 
-    private bool RenderTransparentChunks(float deltaTime)
+    private bool RenderTransparentChunks(
+        float deltaTime,
+        float[] projection,
+        double[] view,
+        Vec3d cameraPosition
+    )
     {
         if (transparentPassDisabled) return false;
 
         bool framebufferLoaded = false;
-        float savedCameraUnderwater = capi.Render.ShaderUniforms.CameraUnderwater;
+        List<(object Manager, object Pools)> hiddenLiquidPools = new();
         try
         {
             loadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
@@ -397,21 +403,17 @@ internal sealed class ExactChunkRendererAdapter
                 beforeOitRenderer,
                 new object[] { deltaTime, EnumRenderStage.OIT }
             );
-            // The stock liquid shader's underwater-murkiness rejection
-            // linearizes depth as perspective. ModernAtlas deliberately uses
-            // an orthographic projection, so that test clips changing slices
-            // of a liquid surface as the camera tilts. The atlas eye is always
-            // above the scene; this value bypasses only that invalid rejection
-            // while the real Primary depth test still occludes fluids behind
-            // terrain and walls.
-            capi.Render.ShaderUniforms.CameraUnderwater = 1;
+            HideLiquidPools(hiddenLiquidPools);
             renderOit.Invoke(chunkRenderer, new object[] { deltaTime });
+            RestoreLiquidPools(hiddenLiquidPools);
             runAfterOit.Invoke(
                 afterOitRenderer,
                 new object[] { deltaTime, EnumRenderStage.OIT }
             );
             unloadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
             framebufferLoaded = false;
+
+            RenderStableLiquidBlocks(projection, view, cameraPosition);
 
             // Compose at the Primary framebuffer's own resolution before the
             // final blit. OIT uses texelFetch(gl_FragCoord), so composing it
@@ -425,7 +427,7 @@ internal sealed class ExactChunkRendererAdapter
             {
                 loggedTransparentSuccess = true;
                 capi.Logger.Notification(
-                    "[ModernAtlas] Rendering animated liquids and transparent chunk materials through the game's OIT pass."
+                    "[ModernAtlas] Rendering stable liquid block surfaces and engine OIT transparent materials."
                 );
             }
             return true;
@@ -444,7 +446,7 @@ internal sealed class ExactChunkRendererAdapter
         }
         finally
         {
-            capi.Render.ShaderUniforms.CameraUnderwater = savedCameraUnderwater;
+            RestoreLiquidPools(hiddenLiquidPools);
             if (framebufferLoaded)
             {
                 try
@@ -461,6 +463,65 @@ internal sealed class ExactChunkRendererAdapter
             // including after a transparent-pass exception.
             capi.Render.CurrentFrameBuffer = null;
         }
+    }
+
+    private void HideLiquidPools(List<(object Manager, object Pools)> hidden)
+    {
+        if (poolsByRenderPassField.GetValue(chunkRenderer)
+            is not MeshDataPoolManager[][] passes) return;
+
+        foreach (MeshDataPoolManager manager in passes[(int)EnumChunkRenderPass.Liquid])
+        {
+            object? pools = managerPoolsField.GetValue(manager);
+            if (pools == null) continue;
+            object emptyPools = Activator.CreateInstance(pools.GetType())
+                ?? throw new InvalidOperationException("Could not create an empty liquid pool list.");
+            hidden.Add((manager, pools));
+            managerPoolsField.SetValue(manager, emptyPools);
+        }
+    }
+
+    private void RestoreLiquidPools(List<(object Manager, object Pools)> hidden)
+    {
+        for (int index = hidden.Count - 1; index >= 0; index--)
+        {
+            (object manager, object pools) = hidden[index];
+            managerPoolsField.SetValue(manager, pools);
+        }
+        hidden.Clear();
+    }
+
+    private void RenderStableLiquidBlocks(
+        float[] projection,
+        double[] view,
+        Vec3d cameraPosition
+    )
+    {
+        if (stableLiquidShader.Disposed) return;
+        if (poolsByRenderPassField.GetValue(chunkRenderer)
+            is not MeshDataPoolManager[][] passes) return;
+        if (textureIdsField.GetValue(chunkRenderer) is not int[] textureIds) return;
+
+        IRenderAPI render = capi.Render;
+        render.CurrentActiveShader?.Stop();
+        render.GLEnableDepthTest();
+        render.GLDepthMask(true);
+        render.GlToggleBlend(false, EnumBlendMode.Standard);
+
+        stableLiquidShader.Use();
+        stableLiquidShader.UniformMatrix("projectionMatrix", projection);
+        stableLiquidShader.UniformMatrix(
+            "modelViewMatrix",
+            Array.ConvertAll(view, value => (float)value)
+        );
+
+        MeshDataPoolManager[] managers = passes[(int)EnumChunkRenderPass.Liquid];
+        for (int index = 0; index < managers.Length && index < textureIds.Length; index++)
+        {
+            stableLiquidShader.BindTexture2D("terrainTex", textureIds[index], 0);
+            managers[index].Render(cameraPosition, "origin", EnumFrustumCullMode.CullInstant);
+        }
+        stableLiquidShader.Stop();
     }
 
     private void ReplacePoolFrustums(

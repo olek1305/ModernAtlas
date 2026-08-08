@@ -21,6 +21,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private readonly float[] projection = Mat4f.Create();
     private readonly ModernAtlasConfig config;
     private readonly Action saveConfig;
+    private readonly IShaderProgram stableLiquidShader;
 
     private GuiComposer? overlay;
     private LoadedTexture? fogTexture;
@@ -55,18 +56,20 @@ public sealed class ModernAtlasDialog : GuiDialog
     public ModernAtlasDialog(
         ICoreClientAPI capi,
         ModernAtlasConfig config,
-        Action saveConfig
+        Action saveConfig,
+        IShaderProgram stableLiquidShader
     ) : base(capi)
     {
         this.config = config;
         this.saveConfig = saveConfig;
+        this.stableLiquidShader = stableLiquidShader;
         ComposeOverlay();
     }
 
     public override void OnGuiOpened()
     {
         base.OnGuiOpened();
-        exactChunkRenderer ??= ExactChunkRendererAdapter.TryCreate(capi);
+        exactChunkRenderer ??= ExactChunkRendererAdapter.TryCreate(capi, stableLiquidShader);
         centerX = capi.World.Player.Entity.Pos.X;
         centerY = capi.World.Player.Entity.Pos.Y;
         centerZ = capi.World.Player.Entity.Pos.Z;

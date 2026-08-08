@@ -15,6 +15,7 @@ public sealed class ModernAtlasSystem : ModSystem
     private ModernAtlasDialog? dialog;
     private ICoreClientAPI? clientApi;
     private ModernAtlasConfig? config;
+    private IShaderProgram? stableLiquidShader;
 
     public override bool ShouldLoad(EnumAppSide side) => side == EnumAppSide.Client;
 
@@ -33,7 +34,11 @@ public sealed class ModernAtlasSystem : ModSystem
         config.Validate();
         SaveConfig();
 
-        dialog = new ModernAtlasDialog(api, config, SaveConfig);
+        stableLiquidShader = api.Shader.NewShaderProgram();
+        stableLiquidShader.AssetDomain = "modernatlas";
+        api.Shader.RegisterFileShaderProgram("atlasliquid", stableLiquidShader);
+
+        dialog = new ModernAtlasDialog(api, config, SaveConfig, stableLiquidShader);
 
         api.Input.RegisterHotKey(
             "modernatlas-open",
@@ -58,6 +63,7 @@ public sealed class ModernAtlasSystem : ModSystem
     {
         dialog?.Dispose();
         dialog = null;
+        stableLiquidShader = null;
         clientApi = null;
         config = null;
         base.Dispose();

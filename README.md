@@ -9,15 +9,16 @@ public name is deliberately independent from Google trademarks.
 - opens a separate full-screen 3D atlas with `G` (rebindable in Controls);
 - renders the game's completed terrain chunk meshes directly with the official
   world shaders on Vintage Story 1.22.6;
-- renders water, lava and transparent chunk materials through the engine's OIT
-  framebuffer and composition pass;
+- renders water and lava as stable, world-aligned block surfaces without
+  camera-dependent lighting or shadows, while other transparent chunk
+  materials continue through the engine's OIT pass;
 - supports left-drag panning, right-drag 360-degree rotation and tilt, mouse
   wheel zoom, keyboard navigation and middle-click reset;
 - uses the same runtime texture atlases, connected chunk geometry, biome color
   maps, lighting uniforms and sun state as the live world renderer, including
   terrain supplied by other mods;
-- contains no generated per-block material fallback or custom world-material
-  shader;
+- contains no generated per-block material fallback; the dedicated liquid
+  shader samples the game's registered runtime block atlas;
 - does not generate unexplored chunks and does not write to a save file;
 - uses a configurable client-only radius (500 blocks by default, covering a
   1000 by 1000 block diameter) without requesting distant chunks;
