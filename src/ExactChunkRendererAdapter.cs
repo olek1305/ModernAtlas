@@ -47,7 +47,6 @@ internal sealed class ExactChunkRendererAdapter
     private bool loggedSuccess;
     private bool loggedTransparentSuccess;
     private bool loggedStableLiquidDiagnostics;
-    private float stableLiquidAnimationTime;
 
     private ExactChunkRendererAdapter(
         ICoreClientAPI capi,
@@ -518,8 +517,8 @@ internal sealed class ExactChunkRendererAdapter
         IRenderAPI render = capi.Render;
         render.CurrentActiveShader?.Stop();
         render.GLEnableDepthTest();
-        render.GLDepthMask(true);
-        render.GlToggleBlend(false, EnumBlendMode.Standard);
+        render.GLDepthMask(false);
+        render.GlToggleBlend(true, EnumBlendMode.Standard);
         render.GlDisableCullFace();
 
         activeLiquidShader.Use();
@@ -534,14 +533,20 @@ internal sealed class ExactChunkRendererAdapter
             (float)cameraPosition.Y,
             (float)cameraPosition.Z
         );
-        stableLiquidAnimationTime = (stableLiquidAnimationTime + Math.Max(0, deltaTime)) % 4096f;
         int blockTexturePixels = capi.Settings.Int["textureSize"];
         if (blockTexturePixels <= 0) blockTexturePixels = 32;
         float atlasPixels = capi.BlockTextureAtlas.Size.Width;
         float blockTextureUv = blockTexturePixels / atlasPixels;
         activeLiquidShader.Uniform("blockTextureSize", blockTextureUv, blockTextureUv);
         activeLiquidShader.Uniform("textureAtlasSize", atlasPixels, atlasPixels);
-        activeLiquidShader.Uniform("liquidAnimationTime", stableLiquidAnimationTime);
+        activeLiquidShader.Uniform(
+            "waterStillCounter",
+            capi.Render.ShaderUniforms.WaterStillCounter
+        );
+        activeLiquidShader.Uniform(
+            "waterFlowCounter",
+            capi.Render.ShaderUniforms.WaterFlowCounter
+        );
 
         MeshDataPoolManager[] managers = passes[(int)EnumChunkRenderPass.Liquid];
         long renderedTriangles = 0;
@@ -565,6 +570,8 @@ internal sealed class ExactChunkRendererAdapter
             allocatedTriangles += managerAllocatedTriangles;
         }
         activeLiquidShader.Stop();
+        render.GLDepthMask(true);
+        render.GlToggleBlend(false, EnumBlendMode.Standard);
         render.GlEnableCullFace();
 
         if (!loggedStableLiquidDiagnostics)

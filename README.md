@@ -10,8 +10,9 @@ public name is deliberately independent from Google trademarks.
 - renders the game's completed terrain chunk meshes directly with the official
   world shaders on Vintage Story 1.22.6;
 - renders water and lava as stable, world-aligned block surfaces without
-  camera-dependent lighting or shadows, while other transparent chunk
-  materials continue through the engine's OIT pass;
+  camera-dependent lighting or shadows, while preserving native animation
+  timing and authored water transparency; other transparent chunk materials
+  continue through the engine's OIT pass;
 - supports left-drag panning, right-drag 360-degree rotation and tilt, mouse
   wheel zoom, keyboard navigation and middle-click reset;
 - uses the same runtime texture atlases, connected chunk geometry, biome color

@@ -14,7 +14,7 @@ uniform vec3 playerpos;
 uniform mat4 projectionMatrix;
 uniform mat4 modelViewMatrix;
 uniform vec2 blockTextureSize;
-uniform float liquidAnimationTime;
+uniform float waterStillCounter;
 
 out vec2 uv;
 out vec2 uvSize;
@@ -40,7 +40,7 @@ void main(void)
     flowVectorf = flowVector;
     waterFlags = waterFlagsIn;
     float framePhase = mod(
-        liquidAnimationTime + length(worldPos.xz + playerpos.xz) / 3.0,
+        waterStillCounter + length(worldPos.xz + playerpos.xz) / 3.0,
         2.0
     );
     stillFrameWeight = smoothstep(0.0, 1.0, abs(framePhase - 1.0));

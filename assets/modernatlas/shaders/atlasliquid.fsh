@@ -3,7 +3,7 @@
 uniform sampler2D terrainTex;
 uniform vec2 blockTextureSize;
 uniform vec2 textureAtlasSize;
-uniform float liquidAnimationTime;
+uniform float waterFlowCounter;
 
 in vec2 uv;
 in vec2 uvSize;
@@ -19,7 +19,7 @@ layout(location = 0) out vec4 outColor;
 void main(void)
 {
     bool isLava = (waterFlags & (1 << 27)) != 0;
-    float speed = isLava ? liquidAnimationTime * 0.1 : liquidAnimationTime;
+    float speed = isLava ? waterFlowCounter * 0.1 : waterFlowCounter;
     float flowSpeed = length(flowVectorf);
     vec4 color;
     if (flowSpeed > 0.001)
@@ -46,9 +46,9 @@ void main(void)
         );
     }
     color = getColorMapped(terrainTex, color);
-    // Atlas fluids are stable world-aligned block surfaces. They deliberately
-    // exclude Fresnel, shadows, scene lighting and camera-dependent depth
-    // effects, while retaining the registered block texture and biome tint.
-    color.a = 1.0;
+    // Preserve the source texture's authored water alpha. Lava is natively
+    // opaque. Geometry remains stable because no camera-dependent vertex warp
+    // or depth reconstruction is used by this atlas shader.
+    if (isLava) color.a = 1.0;
     outColor = color;
 }

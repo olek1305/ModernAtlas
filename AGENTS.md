@@ -32,8 +32,10 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
   biome tint, sunlight, shadows and connected or multipart block geometry.
 - Render water and lava as stable world-aligned block surfaces using their
   registered atlas textures and biome tint. Exclude camera-dependent Fresnel,
-  shadows and scene lighting from atlas fluids. Other transparent block
-  materials may continue through the engine OIT path.
+  shadows and scene lighting from atlas fluids. Drive texture frames and flow
+  from the engine's native water counters, preserve authored water alpha, and
+  keep lava opaque. Other transparent block materials may continue through the
+  engine OIT path.
 - Do not render entities, players, creatures, dropped items, held tools,
   weapons, armor, particles, damage effects or other transient scene objects.
 - Use a neutral stone material when a block or texture cannot be resolved.
