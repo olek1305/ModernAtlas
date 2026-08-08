@@ -334,7 +334,9 @@ internal sealed class ExactChunkRendererAdapter
             // The opaque atlas has already been blitted to the GUI target.
             // Compose OIT into that target afterwards; a later Primary blit
             // would overwrite the water and make a successful pass invisible.
-            capi.Render.CurrentFrameBuffer = capi.Render.FrameBuffers[(int)EnumFrameBuffer.Default];
+            // Vintage Story represents the window/default framebuffer as
+            // null; EnumFrameBuffer.Default is not an entry in FrameBuffers.
+            capi.Render.CurrentFrameBuffer = null;
             loadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
             framebufferLoaded = true;
             clearFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
@@ -377,6 +379,9 @@ internal sealed class ExactChunkRendererAdapter
                     // unavailable after an OIT failure.
                 }
             }
+            // GUI elements must always continue on the actual window target,
+            // including after a transparent-pass exception.
+            capi.Render.CurrentFrameBuffer = null;
         }
     }
 
