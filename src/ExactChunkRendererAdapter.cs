@@ -16,7 +16,7 @@ namespace ModernAtlas;
 /// remain identical to the normal world view. It renders chunk geometry only;
 /// entities and particle renderers are never invoked.
 /// </summary>
-internal sealed class ExactChunkRendererAdapter
+internal sealed class ExactChunkRendererAdapter : IDisposable
 {
     private const string SupportedVersion = "1.22.6";
 
@@ -27,6 +27,7 @@ internal sealed class ExactChunkRendererAdapter
     private readonly object beforeOitRenderer;
     private readonly object afterOitRenderer;
     private readonly Func<IShaderProgram?> stableLiquidShaderProvider;
+    private readonly SurfaceShellRenderer surfaceShellRenderer;
     private readonly MethodInfo renderOpaque;
     private readonly MethodInfo renderOit;
     private readonly MethodInfo renderAfterOit;
@@ -42,6 +43,11 @@ internal sealed class ExactChunkRendererAdapter
     private readonly FieldInfo poolFrustumField;
     private readonly FieldInfo managerPoolsField;
     private readonly FieldInfo textureIdsField;
+    private readonly FieldInfo skyDaylightUniformField;
+    private readonly PropertyInfo ambientFogDensityProperty;
+    private readonly PropertyInfo ambientFogMinimumProperty;
+    private readonly PropertyInfo ambientColorProperty;
+    private readonly PropertyInfo ambientSceneBrightnessProperty;
     private bool disabled;
     private bool transparentPassDisabled;
     private bool loggedSuccess;
@@ -56,6 +62,7 @@ internal sealed class ExactChunkRendererAdapter
         object beforeOitRenderer,
         object afterOitRenderer,
         Func<IShaderProgram?> stableLiquidShaderProvider,
+        Func<IShaderProgram?> surfaceShellShaderProvider,
         MethodInfo renderOpaque,
         MethodInfo renderOit,
         MethodInfo renderAfterOit,
@@ -70,7 +77,12 @@ internal sealed class ExactChunkRendererAdapter
         FieldInfo poolsByRenderPassField,
         FieldInfo poolFrustumField,
         FieldInfo managerPoolsField,
-        FieldInfo textureIdsField
+        FieldInfo textureIdsField,
+        FieldInfo skyDaylightUniformField,
+        PropertyInfo ambientFogDensityProperty,
+        PropertyInfo ambientFogMinimumProperty,
+        PropertyInfo ambientColorProperty,
+        PropertyInfo ambientSceneBrightnessProperty
     )
     {
         this.capi = capi;
@@ -80,6 +92,7 @@ internal sealed class ExactChunkRendererAdapter
         this.beforeOitRenderer = beforeOitRenderer;
         this.afterOitRenderer = afterOitRenderer;
         this.stableLiquidShaderProvider = stableLiquidShaderProvider;
+        surfaceShellRenderer = new SurfaceShellRenderer(capi, surfaceShellShaderProvider);
         this.renderOpaque = renderOpaque;
         this.renderOit = renderOit;
         this.renderAfterOit = renderAfterOit;
@@ -95,11 +108,17 @@ internal sealed class ExactChunkRendererAdapter
         this.poolFrustumField = poolFrustumField;
         this.managerPoolsField = managerPoolsField;
         this.textureIdsField = textureIdsField;
+        this.skyDaylightUniformField = skyDaylightUniformField;
+        this.ambientFogDensityProperty = ambientFogDensityProperty;
+        this.ambientFogMinimumProperty = ambientFogMinimumProperty;
+        this.ambientColorProperty = ambientColorProperty;
+        this.ambientSceneBrightnessProperty = ambientSceneBrightnessProperty;
     }
 
     public static ExactChunkRendererAdapter? TryCreate(
         ICoreClientAPI capi,
-        Func<IShaderProgram?> stableLiquidShaderProvider
+        Func<IShaderProgram?> stableLiquidShaderProvider,
+        Func<IShaderProgram?> surfaceShellShaderProvider
     )
     {
         if (!GameVersion.ShortGameVersion.StartsWith(SupportedVersion, StringComparison.Ordinal))
@@ -195,6 +214,26 @@ internal sealed class ExactChunkRendererAdapter
             FieldInfo poolFrustum = RequireField(typeof(MeshDataPoolManager), "frustumCuller");
             FieldInfo managerPools = RequireField(typeof(MeshDataPoolManager), "pools");
             FieldInfo textureIds = RequireField(renderer.GetType(), "textureIds");
+            FieldInfo skyDaylightUniform = RequireField(
+                typeof(DefaultShaderUniforms),
+                "SkyDaylight"
+            );
+            PropertyInfo ambientFogDensity = RequireWritableProperty(
+                capi.Ambient.GetType(),
+                nameof(IAmbientManager.BlendedFogDensity)
+            );
+            PropertyInfo ambientFogMinimum = RequireWritableProperty(
+                capi.Ambient.GetType(),
+                nameof(IAmbientManager.BlendedFogMin)
+            );
+            PropertyInfo ambientColor = RequireWritableProperty(
+                capi.Ambient.GetType(),
+                nameof(IAmbientManager.BlendedAmbientColor)
+            );
+            PropertyInfo ambientSceneBrightness = RequireWritableProperty(
+                capi.Ambient.GetType(),
+                nameof(IAmbientManager.BlendedSceneBrightness)
+            );
 
             capi.Logger.Notification(
                 "[ModernAtlas] Vintage Story 1.22.6 exact chunk renderer is available."
@@ -207,6 +246,7 @@ internal sealed class ExactChunkRendererAdapter
                 beforeOitRenderer,
                 afterOitRenderer,
                 stableLiquidShaderProvider,
+                surfaceShellShaderProvider,
                 opaque,
                 oit,
                 afterOit,
@@ -221,7 +261,12 @@ internal sealed class ExactChunkRendererAdapter
                 pools,
                 poolFrustum,
                 managerPools,
-                textureIds
+                textureIds,
+                skyDaylightUniform,
+                ambientFogDensity,
+                ambientFogMinimum,
+                ambientColor,
+                ambientSceneBrightness
             );
         }
         catch (Exception exception)
@@ -242,8 +287,12 @@ internal sealed class ExactChunkRendererAdapter
         double centerZ,
         float yawRadians,
         float pitchRadians,
-        int radiusBlocks,
-        bool fogEnabled
+        int viewDistanceBlocks,
+        bool fogEnabled,
+        float windWaveCounter,
+        float windWaveCounterHighFrequency,
+        float waterStillCounter,
+        float waterFlowCounter
     )
     {
         if (disabled) return false;
@@ -258,9 +307,68 @@ internal sealed class ExactChunkRendererAdapter
         double[] savedCameraMatrix = (double[])cameraMatrix.Clone();
         List<(object Pool, object? Frustum)> changedPools = new();
         bool projectionPushed = false;
+        IAmbientManager ambient = capi.Ambient;
+        float savedFogDensity = ambient.BlendedFogDensity;
+        float savedFlatFogDensity = ambient.BlendedFlatFogDensity;
+        float savedFogMinimum = ambient.BlendedFogMin;
+        Vec3f savedAmbientColor = ambient.BlendedAmbientColor;
+        float savedSceneBrightness = ambient.BlendedSceneBrightness;
+        DefaultShaderUniforms shaderUniforms = render.ShaderUniforms;
+        float savedCameraUnderwater = shaderUniforms.CameraUnderwater;
+        int savedFogSphereQuantity = shaderUniforms.FogSphereQuantity;
+        float savedFlagFogDensity = shaderUniforms.FlagFogDensity;
+        float savedNightVisionStrength = shaderUniforms.NightVisionStrength;
+        float savedPsychedelicStrength = shaderUniforms.PsychedelicStrength;
+        float savedGlitchStrength = shaderUniforms.GlitchStrength;
+        float savedGlobalWorldWarp = shaderUniforms.GlobalWorldWarp;
+        float savedPerceptionEffectIntensity = shaderUniforms.PerceptionEffectIntensity;
+        int savedPointLightsCount = shaderUniforms.PointLightsCount;
+        float savedDropShadowIntensity = shaderUniforms.DropShadowIntensity;
+        Vec3f savedLightPosition = shaderUniforms.LightPosition3D;
+        float savedSkyDaylight = (float)(skyDaylightUniformField.GetValue(shaderUniforms) ?? 0f);
+        float savedSunsetMod = shaderUniforms.SunsetMod;
+        float savedWindWaveCounter = shaderUniforms.WindWaveCounter;
+        float savedWindWaveCounterHighFrequency = shaderUniforms.WindWaveCounterHighFreq;
 
         try
         {
+            // The atlas already has an explicit unexplored-area mask. World
+            // distance fog is based on the elevated atlas eye and otherwise
+            // covers most of the orthographic map with haze.
+            ambientFogDensityProperty.SetValue(ambient, 0f);
+            ambient.BlendedFlatFogDensity = 0;
+            ambientFogMinimumProperty.SetValue(ambient, 0f);
+            ambientColorProperty.SetValue(ambient, new Vec3f(0.9f, 0.9f, 0.9f));
+            ambientSceneBrightnessProperty.SetValue(ambient, 1f);
+            shaderUniforms.CameraUnderwater = 0;
+            shaderUniforms.FogSphereQuantity = 0;
+            shaderUniforms.FlagFogDensity = 0;
+            shaderUniforms.NightVisionStrength = 0;
+            shaderUniforms.PsychedelicStrength = 0;
+            shaderUniforms.GlitchStrength = 0;
+            shaderUniforms.GlobalWorldWarp = 0;
+            shaderUniforms.PerceptionEffectIntensity = 0;
+            shaderUniforms.PointLightsCount = 0;
+            // Shadow maps were rendered for the normal player camera. Reusing
+            // them from the elevated orthographic atlas eye produces a dark
+            // square per chunk, especially around dusk. Keep only the stock
+            // normal-based directional shading with a fixed atlas light.
+            shaderUniforms.DropShadowIntensity = 0;
+            shaderUniforms.LightPosition3D = new Vec3f(-0.34f, 0.86f, -0.38f);
+            // RenderOpaque also feeds the current sky daylight and sunset
+            // state into the chunk shader. Around dusk its haxy-fade branch
+            // blends loaded pools with the changing sky color, which exposes
+            // pool/chunk boundaries even with shadow maps disabled. A zero
+            // daylight value makes that branch retain the terrain color.
+            skyDaylightUniformField.SetValue(shaderUniforms, 0f);
+            shaderUniforms.SunsetMod = 0;
+
+            // The dialog supplies either live render-only counters or one
+            // captured frame when atlas animations are paused. Restore the
+            // engine values after this draw so normal gameplay is unaffected.
+            shaderUniforms.WindWaveCounter = windWaveCounter;
+            shaderUniforms.WindWaveCounterHighFreq = windWaveCounterHighFrequency;
+
             // The normal world has already rendered before this HUD dialog.
             // Clear it so weather particles such as rain cannot leak through
             // transparent atlas pixels. ModernAtlas then draws chunk meshes
@@ -279,7 +387,7 @@ internal sealed class ExactChunkRendererAdapter
             // Keep the eye in front of the entire requested atlas volume.
             // The old fixed distance intersected large maps at tilted angles,
             // which cut off the upper or lower part of the terrain.
-            double distance = Math.Max(640, radiusBlocks * 2.5);
+            double distance = Math.Max(640, viewDistanceBlocks * 2.5);
             double horizontal = Math.Cos(pitchRadians) * distance;
             double eyeX = centerX + Math.Sin(yawRadians) * horizontal;
             double eyeY = centerY + Math.Sin(pitchRadians) * distance;
@@ -321,7 +429,7 @@ internal sealed class ExactChunkRendererAdapter
             // does not alter the player position or request distant chunks.
             float cullingDistance = Math.Max(
                 2048,
-                (float)(distance + radiusBlocks * 1.75 + 384)
+                (float)(distance + viewDistanceBlocks * 1.75 + 384)
             );
             atlasFrustum.UpdateViewDistance((int)cullingDistance);
             // A newly constructed culler has a zero LOD0 range. In that state
@@ -339,8 +447,23 @@ internal sealed class ExactChunkRendererAdapter
             render.PMatrix.Push(projectionDouble);
             projectionPushed = true;
             render.CurrentActiveShader?.Stop();
+            surfaceShellRenderer.Render(
+                projection,
+                view,
+                cameraPosition,
+                centerX,
+                centerZ,
+                viewDistanceBlocks
+            );
             renderOpaque.Invoke(chunkRenderer, new object[] { deltaTime });
-            if (!RenderTransparentChunks(deltaTime, projection, view, cameraPosition))
+            if (!RenderTransparentChunks(
+                deltaTime,
+                projection,
+                view,
+                cameraPosition,
+                waterStillCounter,
+                waterFlowCounter
+            ))
             {
                 blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
             }
@@ -375,16 +498,43 @@ internal sealed class ExactChunkRendererAdapter
             }
             Array.Copy(savedCameraMatrix, cameraMatrix, 16);
             cameraPosition.Set(oldCameraX, oldCameraY, oldCameraZ);
+            ambientFogDensityProperty.SetValue(ambient, savedFogDensity);
+            ambient.BlendedFlatFogDensity = savedFlatFogDensity;
+            ambientFogMinimumProperty.SetValue(ambient, savedFogMinimum);
+            ambientColorProperty.SetValue(ambient, savedAmbientColor);
+            ambientSceneBrightnessProperty.SetValue(ambient, savedSceneBrightness);
+            shaderUniforms.CameraUnderwater = savedCameraUnderwater;
+            shaderUniforms.FogSphereQuantity = savedFogSphereQuantity;
+            shaderUniforms.FlagFogDensity = savedFlagFogDensity;
+            shaderUniforms.NightVisionStrength = savedNightVisionStrength;
+            shaderUniforms.PsychedelicStrength = savedPsychedelicStrength;
+            shaderUniforms.GlitchStrength = savedGlitchStrength;
+            shaderUniforms.GlobalWorldWarp = savedGlobalWorldWarp;
+            shaderUniforms.PerceptionEffectIntensity = savedPerceptionEffectIntensity;
+            shaderUniforms.PointLightsCount = savedPointLightsCount;
+            shaderUniforms.DropShadowIntensity = savedDropShadowIntensity;
+            shaderUniforms.LightPosition3D = savedLightPosition;
+            skyDaylightUniformField.SetValue(shaderUniforms, savedSkyDaylight);
+            shaderUniforms.SunsetMod = savedSunsetMod;
+            shaderUniforms.WindWaveCounter = savedWindWaveCounter;
+            shaderUniforms.WindWaveCounterHighFreq = savedWindWaveCounterHighFrequency;
             if (projectionPushed) render.PMatrix.Pop();
             render.CurrentActiveShader?.Stop();
         }
+    }
+
+    public void Dispose()
+    {
+        surfaceShellRenderer.Dispose();
     }
 
     private bool RenderTransparentChunks(
         float deltaTime,
         float[] projection,
         double[] view,
-        Vec3d cameraPosition
+        Vec3d cameraPosition,
+        float waterStillCounter,
+        float waterFlowCounter
     )
     {
         if (transparentPassDisabled) return false;
@@ -414,7 +564,14 @@ internal sealed class ExactChunkRendererAdapter
             unloadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
             framebufferLoaded = false;
 
-            RenderStableLiquidBlocks(deltaTime, projection, view, cameraPosition);
+            RenderStableLiquidBlocks(
+                deltaTime,
+                projection,
+                view,
+                cameraPosition,
+                waterStillCounter,
+                waterFlowCounter
+            );
 
             // Compose at the Primary framebuffer's own resolution before the
             // final blit. OIT uses texelFetch(gl_FragCoord), so composing it
@@ -497,7 +654,9 @@ internal sealed class ExactChunkRendererAdapter
         float deltaTime,
         float[] projection,
         double[] view,
-        Vec3d cameraPosition
+        Vec3d cameraPosition,
+        float waterStillCounter,
+        float waterFlowCounter
     )
     {
         IShaderProgram? activeLiquidShader = stableLiquidShaderProvider();
@@ -541,11 +700,11 @@ internal sealed class ExactChunkRendererAdapter
         activeLiquidShader.Uniform("textureAtlasSize", atlasPixels, atlasPixels);
         activeLiquidShader.Uniform(
             "waterStillCounter",
-            capi.Render.ShaderUniforms.WaterStillCounter
+            waterStillCounter
         );
         activeLiquidShader.Uniform(
             "waterFlowCounter",
-            capi.Render.ShaderUniforms.WaterFlowCounter
+            waterFlowCounter
         );
 
         MeshDataPoolManager[] managers = passes[(int)EnumChunkRenderPass.Liquid];
@@ -619,6 +778,19 @@ internal sealed class ExactChunkRendererAdapter
             if (field != null) return field;
         }
         throw new MissingFieldException(type.FullName, name);
+    }
+
+    private static PropertyInfo RequireWritableProperty(Type type, string name)
+    {
+        for (Type? current = type; current != null; current = current.BaseType)
+        {
+            PropertyInfo? property = current.GetProperty(
+                name,
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
+            );
+            if (property?.SetMethod != null) return property;
+        }
+        throw new MissingMemberException(type.FullName, name);
     }
 
     private static object FindRegisteredRenderer(object game, string fullTypeName)

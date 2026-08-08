@@ -14,14 +14,17 @@ namespace ModernAtlas;
 /// </summary>
 public sealed class ModernAtlasDialog : GuiDialog
 {
-    private static readonly int[] RadiusSteps =
-        { 250, 500, 750, 1000, 1500 };
+    private const float MinimumPitchDegrees = 20;
+    private const int DefaultViewDistance = 500;
+    private const int MaximumGameViewDistance = 1536;
+    private const int FogTextureDownsample = 4;
 
     private ExactChunkRendererAdapter? exactChunkRenderer;
     private readonly float[] projection = Mat4f.Create();
     private readonly ModernAtlasConfig config;
     private readonly Action saveConfig;
     private readonly Func<IShaderProgram?> stableLiquidShaderProvider;
+    private readonly Func<IShaderProgram?> surfaceShellShaderProvider;
 
     private GuiComposer? overlay;
     private LoadedTexture? fogTexture;
@@ -38,11 +41,24 @@ public sealed class ModernAtlasDialog : GuiDialog
     private int fogTextureHeight;
     private float fogTextureZoom = -1;
     private float fogTexturePitch = -1;
-    private int radiusSafetyGeneration;
+    private bool pausedGameForAtlas;
+    private float atlasAnimationSeconds;
+    private float frozenWindWaveCounter;
+    private float frozenWindWaveCounterHighFrequency;
+    private float frozenWaterStillCounter;
+    private float frozenWaterFlowCounter;
+    private long lastAtlasFrameMilliseconds;
 
-    private int EffectiveRadius => capi.IsSinglePlayer
-        ? config.RadiusBlocks
-        : ModernAtlasConfig.DefaultRadius;
+    private int GameViewDistance
+    {
+        get
+        {
+            int viewDistance = capi.Settings.Int["viewDistance"];
+            return viewDistance > 0
+                ? Math.Clamp(viewDistance, GlobalConstants.ChunkSize, MaximumGameViewDistance)
+                : DefaultViewDistance;
+        }
+    }
     private bool EffectiveFogEnabled => capi.IsSinglePlayer && config.FogEnabled
         || !capi.IsSinglePlayer;
 
@@ -57,29 +73,45 @@ public sealed class ModernAtlasDialog : GuiDialog
         ICoreClientAPI capi,
         ModernAtlasConfig config,
         Action saveConfig,
-        Func<IShaderProgram?> stableLiquidShaderProvider
+        Func<IShaderProgram?> stableLiquidShaderProvider,
+        Func<IShaderProgram?> surfaceShellShaderProvider
     ) : base(capi)
     {
         this.config = config;
         this.saveConfig = saveConfig;
         this.stableLiquidShaderProvider = stableLiquidShaderProvider;
+        this.surfaceShellShaderProvider = surfaceShellShaderProvider;
         ComposeOverlay();
     }
 
     public override void OnGuiOpened()
     {
         base.OnGuiOpened();
-        exactChunkRenderer ??= ExactChunkRendererAdapter.TryCreate(capi, stableLiquidShaderProvider);
+        PauseSingleplayerForAtlas();
+        atlasAnimationSeconds = 0;
+        CaptureAnimationFrame();
+        lastAtlasFrameMilliseconds = capi.ElapsedMilliseconds;
+        exactChunkRenderer ??= ExactChunkRendererAdapter.TryCreate(
+            capi,
+            stableLiquidShaderProvider,
+            surfaceShellShaderProvider
+        );
         centerX = capi.World.Player.Entity.Pos.X;
-        centerY = capi.World.Player.Entity.Pos.Y;
         centerZ = capi.World.Player.Entity.Pos.Z;
+        centerY = capi.World.Player.Entity.Pos.Y;
+        FocusOnExteriorSurface();
         FitLoadedTerrain();
         SyncSettingsControls();
-        capi.Logger.Notification("[ModernAtlas] Opened independent 3D atlas GUI.");
+        capi.Logger.Notification(
+            "[ModernAtlas] Opened independent 3D atlas GUI at exterior surface height {0:0.0}; singleplayer paused: {1}.",
+            centerY,
+            capi.IsSinglePlayer && capi.IsGamePaused
+        );
     }
 
     public override void OnRenderGUI(float deltaTime)
     {
+        AdvancePausedAnimation();
         if (!loggedFirstRender)
         {
             loggedFirstRender = true;
@@ -95,12 +127,10 @@ public sealed class ModernAtlasDialog : GuiDialog
             ? "exact loaded chunk geometry"
             : "exact renderer unavailable";
         string fogStatus = EffectiveFogEnabled ? "fog on" : "fog off";
-        string performanceStatus = config.PerformanceMode ? "performance on" : "quality mode";
-        string animationStatus = !config.AnimationsEnabled
-            ? "animations off"
-            : config.PerformanceMode ? "animations reduced" : "animations on";
+        string animationStatus = config.AnimationsEnabled ? "animations on" : "animations paused";
         string multiplayerStatus = capi.IsSinglePlayer ? "singleplayer controls" : "multiplayer safe limits locked";
-        string status = $"Radius {EffectiveRadius} blocks ({EffectiveRadius * 2}×{EffectiveRadius * 2}) • {fogStatus} • {performanceStatus} • {animationStatus} • {multiplayerStatus} • {rendererStatus} • no distant chunk requests";
+        string pauseStatus = capi.IsSinglePlayer ? "game paused" : "live server";
+        string status = $"Game view distance {GameViewDistance} blocks • {fogStatus} • {animationStatus} • exterior surface • {pauseStatus} • {multiplayerStatus} • {rendererStatus} • no distant chunk requests";
         overlay?.GetDynamicText("status").SetNewText(status);
         overlay?.Render(deltaTime);
     }
@@ -125,8 +155,13 @@ public sealed class ModernAtlasDialog : GuiDialog
         {
             leftDragging = false;
             MaybeRecenterScene();
+            InvalidateFogTexture();
         }
-        if (args.Button == EnumMouseButton.Right) rightDragging = false;
+        if (args.Button == EnumMouseButton.Right)
+        {
+            rightDragging = false;
+            InvalidateFogTexture();
+        }
         args.Handled = true;
     }
 
@@ -138,7 +173,11 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (rightDragging)
         {
             yawDegrees = NormalizeDegrees(yawDegrees + args.DeltaX * 0.42f);
-            pitchDegrees = Math.Clamp(pitchDegrees - args.DeltaY * 0.32f, 18, 86);
+            pitchDegrees = Math.Clamp(
+                pitchDegrees - args.DeltaY * 0.32f,
+                MinimumPitchDegrees,
+                86
+            );
             InvalidateFogTexture();
             args.Handled = true;
         }
@@ -202,24 +241,14 @@ public sealed class ModernAtlasDialog : GuiDialog
         else if (args.KeyCode == (int)GlKeys.E) Rotate(6, args);
         else if (args.KeyCode == (int)GlKeys.R)
         {
-            pitchDegrees = Math.Clamp(pitchDegrees + 4, 18, 86);
+            pitchDegrees = Math.Clamp(pitchDegrees + 4, MinimumPitchDegrees, 86);
             InvalidateFogTexture();
             args.Handled = true;
         }
         else if (args.KeyCode == (int)GlKeys.F)
         {
-            pitchDegrees = Math.Clamp(pitchDegrees - 4, 18, 86);
+            pitchDegrees = Math.Clamp(pitchDegrees - 4, MinimumPitchDegrees, 86);
             InvalidateFogTexture();
-            args.Handled = true;
-        }
-        else if (args.KeyCode == (int)GlKeys.PageUp)
-        {
-            ChangeRadius(1);
-            args.Handled = true;
-        }
-        else if (args.KeyCode == (int)GlKeys.PageDown)
-        {
-            ChangeRadius(-1);
             args.Handled = true;
         }
         else if (args.KeyCode == (int)GlKeys.M)
@@ -237,12 +266,9 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
         else if (args.KeyCode == (int)GlKeys.Home)
         {
-            config.RadiusBlocks = ModernAtlasConfig.DefaultRadius;
-            config.FogEnabled = true;
-            config.PerformanceMode = true;
-            config.AnimationsEnabled = true;
+            config.FogEnabled = false;
             saveConfig();
-            FitLoadedTerrain();
+            ResetView();
             SyncSettingsControls();
             args.Handled = true;
         }
@@ -260,13 +286,15 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnGuiClosed()
     {
-        EndAtlasSession();
+        ResumeSingleplayerAfterAtlas();
         base.OnGuiClosed();
     }
 
     public override void Dispose()
     {
-        EndAtlasSession();
+        ResumeSingleplayerAfterAtlas();
+        exactChunkRenderer?.Dispose();
+        exactChunkRenderer = null;
         fogTexture?.Dispose();
         fogTexture = null;
         overlay?.Dispose();
@@ -279,15 +307,6 @@ public sealed class ModernAtlasDialog : GuiDialog
         ElementBounds root = ElementBounds.Fill;
         double guiWidth = capi.Gui.WindowBounds.InnerWidth / Math.Max(0.5, RuntimeEnv.GUIScale);
         double settingsX = Math.Max(20, guiWidth - 320);
-        string[] radiusValues = Array.ConvertAll(RadiusSteps, value => value.ToString());
-        string[] radiusNames = Array.ConvertAll(
-            RadiusSteps,
-            value => $"{value} block radius ({value * 2}×{value * 2})"
-        );
-        int selectedRadius = Math.Max(
-            0,
-            Array.FindIndex(RadiusSteps, value => value == EffectiveRadius)
-        );
 
         overlay = capi.Gui.CreateCompo("modernatlas-3d", root)
             .AddStaticText(
@@ -312,50 +331,25 @@ public sealed class ModernAtlasDialog : GuiDialog
                 ElementBounds.Fixed(settingsX + 20, 30, 260, 30)
             )
             .AddStaticText(
-                capi.IsSinglePlayer ? "Visible radius" : "Server-safe radius (locked)",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(settingsX + 20, 62, 260, 24)
-            )
-            .AddDropDown(
-                radiusValues,
-                radiusNames,
-                selectedRadius,
-                OnRadiusSelected,
-                ElementBounds.Fixed(settingsX + 20, 88, 260, 34),
-                "radius"
-            )
-            .AddStaticText(
                 capi.IsSinglePlayer ? "Unexplored fog" : "Server fog (locked)",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(settingsX + 20, 136, 180, 28)
+                ElementBounds.Fixed(settingsX + 20, 70, 180, 28)
             )
             .AddSwitch(
                 OnFogToggled,
-                ElementBounds.Fixed(settingsX + 234, 132, 46, 30),
+                ElementBounds.Fixed(settingsX + 234, 66, 46, 30),
                 "fog",
                 24,
                 4
             )
             .AddStaticText(
-                "Performance mode",
+                "Atlas animations",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(settingsX + 20, 172, 180, 28)
-            )
-            .AddSwitch(
-                OnPerformanceToggled,
-                ElementBounds.Fixed(settingsX + 234, 168, 46, 30),
-                "performance",
-                24,
-                4
-            )
-            .AddStaticText(
-                "Animations",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(settingsX + 20, 208, 180, 28)
+                ElementBounds.Fixed(settingsX + 20, 110, 180, 28)
             )
             .AddSwitch(
                 OnAnimationsToggled,
-                ElementBounds.Fixed(settingsX + 234, 204, 46, 30),
+                ElementBounds.Fixed(settingsX + 234, 106, 46, 30),
                 "animations",
                 24,
                 4
@@ -370,22 +364,41 @@ public sealed class ModernAtlasDialog : GuiDialog
         render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
 
         float aspect = render.FrameWidth / (float)Math.Max(1, render.FrameHeight);
-        float farPlane = Math.Max(2000, EffectiveRadius * 6);
+        float farPlane = Math.Max(2000, GameViewDistance * 6);
         Mat4f.Ortho(projection, -zoom * aspect, zoom * aspect, -zoom, zoom, 0.1f, farPlane);
         float yaw = yawDegrees * GameMath.DEG2RAD;
         float pitch = pitchDegrees * GameMath.DEG2RAD;
+        DefaultShaderUniforms uniforms = capi.Render.ShaderUniforms;
+        float animationOffset = capi.IsSinglePlayer && capi.IsGamePaused
+            ? atlasAnimationSeconds
+            : 0;
+        float windWaveCounter = config.AnimationsEnabled
+            ? uniforms.WindWaveCounter + animationOffset
+            : frozenWindWaveCounter;
+        float windWaveCounterHighFrequency = config.AnimationsEnabled
+            ? uniforms.WindWaveCounterHighFreq + animationOffset
+            : frozenWindWaveCounterHighFrequency;
+        float waterStillCounter = config.AnimationsEnabled
+            ? uniforms.WaterStillCounter + animationOffset
+            : frozenWaterStillCounter;
+        float waterFlowCounter = config.AnimationsEnabled
+            ? uniforms.WaterFlowCounter + animationOffset
+            : frozenWaterFlowCounter;
 
-        float renderDeltaTime = config.AnimationsEnabled ? deltaTime : 0;
         bool rendered = exactChunkRenderer?.Render(
-            renderDeltaTime,
+            deltaTime,
             projection,
             centerX,
             centerY,
             centerZ,
             yaw,
             pitch,
-            EffectiveRadius,
-            EffectiveFogEnabled
+            GameViewDistance,
+            EffectiveFogEnabled,
+            windWaveCounter,
+            windWaveCounterHighFrequency,
+            waterStillCounter,
+            waterFlowCounter
         ) == true;
         render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
         return rendered;
@@ -394,8 +407,9 @@ public sealed class ModernAtlasDialog : GuiDialog
     private void ResetView()
     {
         centerX = capi.World.Player.Entity.Pos.X;
-        centerY = capi.World.Player.Entity.Pos.Y;
         centerZ = capi.World.Player.Entity.Pos.Z;
+        centerY = capi.World.Player.Entity.Pos.Y;
+        FocusOnExteriorSurface();
         yawDegrees = 42;
         pitchDegrees = 72;
         FitLoadedTerrain();
@@ -412,12 +426,12 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private void MaybeRecenterScene()
     {
-        // Exact chunk meshes are live and do not require an atlas rebuild.
+        FocusOnExteriorSurface();
     }
 
     private void FitLoadedTerrain()
     {
-        float radius = EffectiveRadius;
+        float radius = GameViewDistance;
         float aspect = capi.Render.FrameWidth / (float)Math.Max(1, capi.Render.FrameHeight);
         float pitch = pitchDegrees * GameMath.DEG2RAD;
 
@@ -431,44 +445,6 @@ public sealed class ModernAtlasDialog : GuiDialog
         InvalidateFogTexture();
     }
 
-    private void ChangeRadius(int direction)
-    {
-        if (!capi.IsSinglePlayer) return;
-        int currentIndex = Array.FindIndex(RadiusSteps, value => value >= config.RadiusBlocks);
-        if (currentIndex < 0) currentIndex = RadiusSteps.Length - 1;
-        int nextIndex = Math.Clamp(currentIndex + direction, 0, RadiusSteps.Length - 1);
-        config.RadiusBlocks = RadiusSteps[nextIndex];
-        BeginRadiusSafetyWindow();
-        FitLoadedTerrain();
-        SyncSettingsControls();
-    }
-
-    private void OnRadiusSelected(string value, bool selected)
-    {
-        if (!capi.IsSinglePlayer) return;
-        if (!selected || !int.TryParse(value, out int radius)) return;
-        config.RadiusBlocks = Math.Clamp(
-            radius,
-            ModernAtlasConfig.MinimumRadius,
-            ModernAtlasConfig.MaximumRadius
-        );
-        BeginRadiusSafetyWindow();
-        FitLoadedTerrain();
-    }
-
-    private void BeginRadiusSafetyWindow()
-    {
-        config.AtlasSessionInProgress = true;
-        saveConfig();
-        int generation = ++radiusSafetyGeneration;
-        capi.Event.RegisterCallback(_ =>
-        {
-            if (generation != radiusSafetyGeneration) return;
-            config.AtlasSessionInProgress = false;
-            saveConfig();
-        }, 15000);
-    }
-
     private void OnFogToggled(bool enabled)
     {
         if (!capi.IsSinglePlayer) return;
@@ -477,39 +453,95 @@ public sealed class ModernAtlasDialog : GuiDialog
         saveConfig();
     }
 
-    private void OnPerformanceToggled(bool enabled)
-    {
-        config.PerformanceMode = enabled;
-        saveConfig();
-    }
-
     private void OnAnimationsToggled(bool enabled)
     {
+        if (!enabled && config.AnimationsEnabled)
+        {
+            CaptureAnimationFrame();
+        }
         config.AnimationsEnabled = enabled;
         saveConfig();
+        SyncSettingsControls();
     }
 
     private void SyncSettingsControls()
     {
         if (overlay == null) return;
-        int radiusIndex = Math.Max(
-            0,
-            Array.FindIndex(RadiusSteps, value => value == EffectiveRadius)
-        );
-        overlay.GetDropDown("radius")?.SetSelectedIndex(radiusIndex);
         overlay.GetSwitch("fog")?.SetValue(EffectiveFogEnabled);
-        overlay.GetDropDown("radius").Enabled = capi.IsSinglePlayer;
         overlay.GetSwitch("fog").Enabled = capi.IsSinglePlayer;
-        overlay.GetSwitch("performance")?.SetValue(config.PerformanceMode);
         overlay.GetSwitch("animations")?.SetValue(config.AnimationsEnabled);
+    }
+
+    private void FocusOnExteriorSurface()
+    {
+        int x = (int)Math.Floor(centerX);
+        int z = (int)Math.Floor(centerZ);
+        BlockPos position = new(x, 0, z);
+        if (capi.World.BlockAccessor.GetMapChunkAtBlockPos(position) == null) return;
+
+        int surfaceY = capi.World.BlockAccessor.GetRainMapHeightAt(position);
+        if (surfaceY > 0)
+        {
+            centerY = surfaceY + 0.5;
+        }
+    }
+
+    private void PauseSingleplayerForAtlas()
+    {
+        pausedGameForAtlas = capi.IsSinglePlayer && !capi.IsGamePaused;
+        if (pausedGameForAtlas)
+        {
+            capi.PauseGame(true);
+        }
+    }
+
+    private void ResumeSingleplayerAfterAtlas()
+    {
+        if (!pausedGameForAtlas) return;
+
+        pausedGameForAtlas = false;
+        if (capi.IsSinglePlayer)
+        {
+            capi.PauseGame(false);
+        }
+    }
+
+    private void AdvancePausedAnimation()
+    {
+        long now = capi.ElapsedMilliseconds;
+        float realDeltaTime = Math.Clamp(
+            (now - lastAtlasFrameMilliseconds) / 1000f,
+            0,
+            0.25f
+        );
+        lastAtlasFrameMilliseconds = now;
+
+        if (config.AnimationsEnabled && capi.IsSinglePlayer && capi.IsGamePaused)
+        {
+            atlasAnimationSeconds += realDeltaTime;
+        }
+    }
+
+    private void CaptureAnimationFrame()
+    {
+        DefaultShaderUniforms uniforms = capi.Render.ShaderUniforms;
+        float animationOffset = capi.IsSinglePlayer && capi.IsGamePaused
+            ? atlasAnimationSeconds
+            : 0;
+        frozenWindWaveCounter = uniforms.WindWaveCounter + animationOffset;
+        frozenWindWaveCounterHighFrequency = uniforms.WindWaveCounterHighFreq + animationOffset;
+        frozenWaterStillCounter = uniforms.WaterStillCounter + animationOffset;
+        frozenWaterFlowCounter = uniforms.WaterFlowCounter + animationOffset;
     }
 
     private void RenderFogMask()
     {
         if (!EffectiveFogEnabled) return;
 
-        int width = capi.Render.FrameWidth;
-        int height = capi.Render.FrameHeight;
+        int frameWidth = capi.Render.FrameWidth;
+        int frameHeight = capi.Render.FrameHeight;
+        int width = Math.Max(1, (frameWidth + FogTextureDownsample - 1) / FogTextureDownsample);
+        int height = Math.Max(1, (frameHeight + FogTextureDownsample - 1) / FogTextureDownsample);
         if (fogTexture == null
             || fogTextureWidth != width
             || fogTextureHeight != height
@@ -524,7 +556,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             capi.Render.GetEngineShader(EnumShaderProgram.Gui).Use();
             capi.Render.GLDisableDepthTest();
             capi.Render.GlToggleBlend(true, EnumBlendMode.Standard);
-            capi.Render.Render2DTexture(fogTexture.TextureId, 0, 0, width, height, 40);
+            capi.Render.Render2DTexture(fogTexture.TextureId, 0, 0, frameWidth, frameHeight, 40);
         }
     }
 
@@ -542,10 +574,10 @@ public sealed class ModernAtlasDialog : GuiDialog
         context.SetSourceRGBA(0.32, 0.38, 0.40, 0.90);
         context.Paint();
 
-        double radiusX = height * EffectiveRadius / (2.0 * zoom);
+        double radiusX = height * GameViewDistance / (2.0 * zoom);
         double pitchRadians = pitchDegrees * GameMath.DEG2RAD;
         double radiusY = radiusX * Math.Max(0.12, Math.Sin(pitchRadians));
-        double reliefAllowance = Math.Min(192, EffectiveRadius * 0.3);
+        double reliefAllowance = Math.Min(192, GameViewDistance * 0.3);
         radiusY += height * reliefAllowance * Math.Abs(Math.Cos(pitchRadians)) / (2.0 * zoom);
         // The revealed area belongs to the player's actual world position,
         // not to the movable atlas camera. Panning therefore moves the clear
@@ -566,7 +598,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         double centerScreenX = width / 2.0 + projectedRight * pixelsPerBlock;
         double centerScreenY = height / 2.0 - projectedUp * pixelsPerBlock;
 
-        // Keep the complete configured radius clear. The feather starts only
+        // Keep the complete game view distance clear. The feather starts only
         // outside that radius so tilted hills and buildings are not hidden by
         // the GUI fog mask.
         const int featherSteps = 18;
@@ -597,13 +629,6 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         fogTextureZoom = -1;
         fogTexturePitch = -1;
-    }
-
-    private void EndAtlasSession()
-    {
-        if (!config.AtlasSessionInProgress) return;
-        config.AtlasSessionInProgress = false;
-        saveConfig();
     }
 
     private void Rotate(float degrees, KeyEvent args)

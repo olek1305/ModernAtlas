@@ -3,10 +3,16 @@
 ModernAtlas is a client-side map enhancement for Vintage Story 1.22.6. Its
 public name is deliberately independent from Google trademarks.
 
-## Current 0.5.9 prototype
+## Current 0.6.0 prototype
 
 - keeps the vanilla map, discovered areas and waypoints intact;
 - opens a separate full-screen 3D atlas with `G` (rebindable in Controls);
+- pauses the game while the atlas is open in singleplayer and never attempts
+  to pause a multiplayer server;
+- provides an `Atlas animations` switch: enabled keeps atlas liquids and
+  graphics-enabled waving vegetation moving during a singleplayer pause with
+  a render-only clock, while disabled freezes water, leaves and grass on their
+  current atlas frame; world simulation and native game counters are untouched;
 - renders the game's completed terrain chunk meshes directly with the official
   world shaders on Vintage Story 1.22.6;
 - renders water and lava as stable, world-aligned block surfaces without
@@ -21,16 +27,26 @@ public name is deliberately independent from Google trademarks.
 - contains no generated per-block material fallback; the dedicated liquid
   shader samples the game's registered runtime block atlas;
 - does not generate unexplored chunks and does not write to a save file;
-- uses a configurable client-only radius (500 blocks by default, covering a
-  1000 by 1000 block diameter) without requesting distant chunks;
-- provides an optional fog mask beyond the atlas radius (`M`), radius steps on
-  `Page Up`/`Page Down`, and safe defaults on `Home`;
-- includes a top-right settings panel for radius, unexplored fog, performance
-  mode and animation preference;
-- locks multiplayer to a 500-block radius with unexplored fog enabled while
-  preserving separate singleplayer radius and fog preferences;
-- restores the safe 500-block radius after an atlas session that did not close
-  cleanly;
+- fits the atlas to Vintage Story's current view-distance setting and never
+  pretends that a second radius control can load more or fewer exact chunks;
+- provides an optional unexplored-area fog mask (`M`) and fog-off defaults on
+  `Home`; its reduced-resolution texture avoids a full-screen Cairo upload;
+- suppresses the normal camera-distance haze while rendering the atlas, then
+  restores the world's fog values before returning to the game;
+- removes player-local underwater, lava, fog-sphere, night-vision, perception
+  and held-light effects from the atlas pass, giving it stable neutral exposure;
+- disables player-camera shadow maps during the atlas pass and uses a fixed
+  neutral light direction, preventing dusk from drawing square chunk shadows;
+- leaves rendering quality, view distance and vegetation animation controlled
+  by Vintage Story's graphics options;
+- anchors the atlas camera to the live rain-height surface and keeps a
+  20-degree-or-higher tilt range so an underground player does not open a cave
+  cutaway instead of the exterior;
+- places a coarse neutral stone shell four blocks below natural terrain and
+  stone skirts at client-data boundaries, hiding caves and unfinished chunk
+  edges while exact loaded geometry is still streaming in;
+- forces the unexplored-area mask in multiplayer while using only exact chunk
+  data that the server has already sent to the client;
 - works as a client-only mod, so a vanilla multiplayer server does not need it.
 
 Entities, players, creatures, dropped items, equipment and particles are not

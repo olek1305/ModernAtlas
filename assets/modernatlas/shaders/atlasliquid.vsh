@@ -31,8 +31,12 @@ void main(void)
     vec4 worldPos = vec4(xyz + origin, 1.0);
     gl_Position = projectionMatrix * modelViewMatrix * worldPos;
     // Give the liquid surface deterministic depth priority without changing
-    // its world-space height or making it camera-relative.
-    gl_Position.z -= 0.0005 * gl_Position.w;
+    // its world-space height or making it camera-relative. Contained liquids
+    // must keep their real depth so barrel and bucket walls occlude them.
+    if ((waterFlagsIn & 2) != 0)
+    {
+        gl_Position.z -= 0.0005 * gl_Position.w;
+    }
     uv = uvIn;
     uvSize = vec2((waterFlagsIn >> 10) & 0xff, (waterFlagsIn >> 18) & 0xff)
         / 255.0 * blockTextureSize;
@@ -44,5 +48,12 @@ void main(void)
         2.0
     );
     stillFrameWeight = smoothstep(0.0, 1.0, abs(framePhase - 1.0));
+    // Vintage Story clears the texture-fade flag for contained liquids such
+    // as water inside a placed bucket. Keep that authored frame fixed instead
+    // of blending it with the adjacent water-atlas frame.
+    if ((waterFlagsIn & 2) == 0)
+    {
+        stillFrameWeight = 1.0;
+    }
     calcColorMapUvs(colormapData, worldPos + vec4(playerpos, 1.0), rgbaLightIn.a, false);
 }

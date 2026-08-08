@@ -24,9 +24,30 @@ that time and keep it in its own disposable per-world cache.
 ## Visibility policy
 
 The capture includes blocks and fluids that contribute to the visible exterior
-of the world. Fully enclosed blocks may be discarded. Entities and all transient
-render systems are never queried, which excludes players, mobs, armor, held or
-dropped items, weapons and particles by construction.
+of the world. Fully enclosed and subterranean cave geometry may be discarded.
+The default camera follows the client rain-height surface and does not provide
+an underground cutaway. Entities and all transient render systems are never
+queried, which excludes players, mobs, armor, held or dropped items, weapons and
+particles by construction.
+
+The planned strict cave mask is a closed exterior height-field shell extending
+four blocks below each surface column. A single global Y clip is not acceptable:
+it would cut valleys, mountain slopes and building walls at the wrong height.
+
+The live prototype implements a coarse version from the client-available
+`WorldGenTerrainHeightMap`. It sits four blocks below natural ground so exact
+terrain and above-ground structures cover it, and adds neutral stone skirts at
+the available-data boundary. This conceals unfinished chunk sides while the
+game streams and tessellates exact meshes.
+
+The atlas does not reuse shadow maps rendered for the normal player camera.
+Those maps do not align with the elevated orthographic atlas eye and produce
+chunk-sized dark squares near dusk. Atlas terrain instead keeps stable vertex
+lighting and normal-based directional shading from a fixed neutral light.
+
+The live exact-mesh prototype follows Vintage Story's own view-distance setting.
+It does not expose a second radius because only the game controls which chunk
+meshes are loaded and therefore available to the atlas.
 
 ## Compatibility policy
 

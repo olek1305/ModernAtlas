@@ -30,6 +30,10 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
   from blocks.
 - Preserve the game's live material appearance: texture-atlas coordinates,
   biome tint, sunlight, shadows and connected or multipart block geometry.
+- Keep atlas exposure neutral and stable. Player-local underwater, lava, fog
+  sphere, night vision, perception, held-light and world-warp effects must not
+  change atlas brightness, tint or haze. Restore every engine uniform after the
+  atlas draw so normal gameplay keeps its effects.
 - Render water and lava as stable world-aligned block surfaces using their
   registered atlas textures and biome tint. Exclude camera-dependent Fresnel,
   shadows and scene lighting from atlas fluids. Drive texture frames and flow
@@ -55,6 +59,10 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
 - Exact block geometry is available only while chunks are client-loaded.
   Cache useful atlas data as chunks are visited so the 3D atlas fills in over
   time; fall back to vanilla terrain colors/height where exact data is absent.
+- Draw a neutral client-only surface shell four blocks below natural terrain
+  and close its available-data boundary with artificial stone skirts. Exact
+  chunk geometry must cover this fallback where ready; the shell must hide cave
+  cutaways and unfinished mesh edges without requesting missing chunks.
 - Fog must conceal terrain that the client is not allowed to know. The clear
   radius is anchored to the player's actual world position; panning or rotating
   the atlas camera must never move or enlarge that revealed area.
@@ -70,15 +78,15 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
 - Keep atlas GUI controls clickable and prevent atlas input from leaking into
   the hotbar, inventories or dialogs underneath it.
 
-## Radius and multiplayer rules
+## View distance and multiplayer rules
 
-- Offer radii of 250, 500, 750, 1000 and 1500 blocks. Do not expose values
-  above 1500 because Vintage Story 1.22.6 has a 1536-block view-distance limit.
-- Default to a 500-block radius. Validate old or malformed configuration values
-  and clamp them to 1500 without crashing.
-- Singleplayer may expose radius, fog, performance and animation settings.
-  Multiplayer must keep conservative client-only limits and must not request
-  distant chunks or disclose activity outside data already sent by the server.
+- Do not expose a separate atlas radius. Fit and cull the atlas from Vintage
+  Story's current `viewDistance` graphics setting because that setting controls
+  which exact chunk meshes the client has loaded.
+- Fog may be configurable in singleplayer. Rendering performance, view distance
+  and waving vegetation remain controlled by Vintage Story's graphics settings.
+  Multiplayer must not request distant chunks or disclose activity outside data
+  already sent by the server.
 
 ## Performance and compatibility
 
@@ -111,15 +119,20 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
 
 ## Current verified baseline
 
-- The working public version remains `0.5.9`. Do not change the version number
+- The working public version remains `0.6.0`. Do not change the version number
   unless the project owner explicitly requests it. Package-content changes may
   continue under this version during the current test cycle.
 - The verified liquid implementation uses completed liquid chunk meshes and a
   dedicated stable shader. Water and lava must remain anchored to their block
   coordinates when the atlas camera pans, rotates or tilts.
 - Read `WaterStillCounter` and `WaterFlowCounter` from Vintage Story's live
-  shader uniforms. Do not advance a separate ModernAtlas liquid clock. Preserve
-  the water texture's authored alpha and keep lava opaque.
+  shader uniforms. While singleplayer is paused by the atlas, add a render-only
+  real-time offset to liquid and wind-wave shader uniforms so atlas liquids and
+  vegetation keep moving without changing the game's counters or simulation.
+  The atlas animation switch may instead hold those liquid and wind uniforms
+  on one captured frame, including in multiplayer, without pausing the server.
+  Honor Vintage Story's waving-vegetation graphics setting, preserve the water
+  texture's authored alpha and keep lava opaque.
 - Do not replace the stable liquid shader with the stock `chunkliquid` shader.
   A test of that approach reproduced camera-relative liquid displacement even
   though its animation and transparency matched the normal world more closely.
@@ -130,7 +143,7 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
 ## Build and in-game test workflow
 
 - For every rendering change, build `ModernAtlas.csproj` in Release mode,
-  create `Releases/modernatlas_0.5.9.zip`, validate the ZIP, and copy that exact
+  create `Releases/modernatlas_0.6.0.zip`, validate the ZIP, and copy that exact
   archive to the active Vintage Story `Mods` directory. Compare SHA-256 hashes
   so the release and active archives are demonstrably identical.
 - Close the running game cleanly before replacing or retesting the active mod.

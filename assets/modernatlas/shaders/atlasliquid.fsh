@@ -46,6 +46,15 @@ void main(void)
         );
     }
     color = getColorMapped(terrainTex, color);
+    bool isContained = (waterFlags & 2) == 0 && flowSpeed <= 0.001;
+    if (isContained && !isLava)
+    {
+        // A small exposed surface in a dark container otherwise becomes a
+        // bright cyan beacon at atlas distance. Keep it readable from above
+        // while matching the neutral, shaded appearance of its container.
+        color.rgb *= 0.58;
+        color.a *= 0.78;
+    }
     // Preserve the source texture's authored water alpha. Lava is natively
     // opaque. Geometry remains stable because no camera-dependent vertex warp
     // or depth reconstruction is used by this atlas shader.
