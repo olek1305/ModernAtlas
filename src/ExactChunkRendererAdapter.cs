@@ -23,7 +23,9 @@ internal sealed class ExactChunkRendererAdapter
     private readonly ICoreClientAPI capi;
     private readonly object chunkRenderer;
     private readonly object mainCamera;
+    private readonly object platform;
     private readonly MethodInfo renderOpaque;
+    private readonly MethodInfo clearDefaultFramebuffer;
     private readonly FieldInfo cameraMatrixOriginField;
     private readonly FieldInfo poolsByRenderPassField;
     private readonly FieldInfo poolFrustumField;
@@ -34,7 +36,9 @@ internal sealed class ExactChunkRendererAdapter
         ICoreClientAPI capi,
         object chunkRenderer,
         object mainCamera,
+        object platform,
         MethodInfo renderOpaque,
+        MethodInfo clearDefaultFramebuffer,
         FieldInfo cameraMatrixOriginField,
         FieldInfo poolsByRenderPassField,
         FieldInfo poolFrustumField
@@ -43,7 +47,9 @@ internal sealed class ExactChunkRendererAdapter
         this.capi = capi;
         this.chunkRenderer = chunkRenderer;
         this.mainCamera = mainCamera;
+        this.platform = platform;
         this.renderOpaque = renderOpaque;
+        this.clearDefaultFramebuffer = clearDefaultFramebuffer;
         this.cameraMatrixOriginField = cameraMatrixOriginField;
         this.poolsByRenderPassField = poolsByRenderPassField;
         this.poolFrustumField = poolFrustumField;
@@ -72,6 +78,9 @@ internal sealed class ExactChunkRendererAdapter
             FieldInfo cameraField = RequireField(game.GetType(), "MainCamera");
             object camera = cameraField.GetValue(game)
                 ?? throw new InvalidOperationException("Player camera is unavailable.");
+            FieldInfo platformField = RequireField(game.GetType(), "Platform");
+            object platform = platformField.GetValue(game)
+                ?? throw new InvalidOperationException("Client platform is unavailable.");
             MethodInfo opaque = renderer.GetType().GetMethod(
                 "RenderOpaque",
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
@@ -79,6 +88,16 @@ internal sealed class ExactChunkRendererAdapter
                 new[] { typeof(float) },
                 null
             ) ?? throw new MissingMethodException(renderer.GetType().FullName, "RenderOpaque(float)");
+            MethodInfo clearDefault = platform.GetType().GetMethod(
+                "ClearFrameBuffer",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                null,
+                new[] { typeof(EnumFrameBuffer) },
+                null
+            ) ?? throw new MissingMethodException(
+                platform.GetType().FullName,
+                "ClearFrameBuffer(EnumFrameBuffer)"
+            );
             FieldInfo cameraMatrix = RequireField(camera.GetType(), "CameraMatrixOrigin");
             FieldInfo pools = RequireField(renderer.GetType(), "poolsByRenderPass");
             FieldInfo poolFrustum = RequireField(typeof(MeshDataPoolManager), "frustumCuller");
@@ -90,7 +109,9 @@ internal sealed class ExactChunkRendererAdapter
                 capi,
                 renderer,
                 camera,
+                platform,
                 opaque,
+                clearDefault,
                 cameraMatrix,
                 pools,
                 poolFrustum
@@ -131,6 +152,21 @@ internal sealed class ExactChunkRendererAdapter
 
         try
         {
+            FrameBufferRef? target = render.CurrentFrameBuffer;
+            if (target != null)
+            {
+                render.ClearFrameBuffer(
+                    target,
+                    new[] { 0.035f, 0.075f, 0.11f, 1f },
+                    true,
+                    true
+                );
+            }
+            else
+            {
+                clearDefaultFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Default });
+            }
+
             const double distance = 180;
             double horizontal = Math.Cos(pitchRadians) * distance;
             double eyeX = centerX + Math.Sin(yawRadians) * horizontal;

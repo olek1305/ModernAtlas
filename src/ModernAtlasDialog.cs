@@ -13,8 +13,6 @@ namespace ModernAtlas;
 /// </summary>
 public sealed class ModernAtlasDialog : GuiDialog
 {
-    private static readonly float[] AtlasClearColor = { 0.035f, 0.075f, 0.11f, 1f };
-
     private ExactChunkRendererAdapter? exactChunkRenderer;
     private readonly float[] projection = Mat4f.Create();
 
@@ -59,6 +57,10 @@ public sealed class ModernAtlasDialog : GuiDialog
             capi.Logger.Notification("[ModernAtlas] First 3D atlas GUI frame rendered.");
         }
         bool rendered = RenderLiveWorld(deltaTime);
+        capi.Render.GetEngineShader(EnumShaderProgram.Gui).Use();
+        capi.Render.GLDepthMask(false);
+        capi.Render.GLDisableDepthTest();
+        capi.Render.GlToggleBlend(true, EnumBlendMode.Standard);
         string status = rendered
             ? "Live world chunks: exact game geometry, materials and lighting"
             : "Exact world renderer unavailable - no substitute materials are shown";
@@ -196,9 +198,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool RenderLiveWorld(float deltaTime)
     {
         IRenderAPI render = capi.Render;
-        FrameBufferRef target = render.CurrentFrameBuffer;
         render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
-        render.ClearFrameBuffer(target, AtlasClearColor, true, true);
 
         float aspect = render.FrameWidth / (float)Math.Max(1, render.FrameHeight);
         Mat4f.Ortho(projection, -zoom * aspect, zoom * aspect, -zoom, zoom, 0.1f, 800f);
