@@ -24,6 +24,7 @@ internal sealed class ExactChunkRendererAdapter
     private readonly object chunkRenderer;
     private readonly object mainCamera;
     private readonly object platform;
+    private readonly MethodInfo renderBefore;
     private readonly MethodInfo renderOpaque;
     private readonly MethodInfo renderOit;
     private readonly MethodInfo renderAfterOit;
@@ -46,6 +47,7 @@ internal sealed class ExactChunkRendererAdapter
         object chunkRenderer,
         object mainCamera,
         object platform,
+        MethodInfo renderBefore,
         MethodInfo renderOpaque,
         MethodInfo renderOit,
         MethodInfo renderAfterOit,
@@ -64,6 +66,7 @@ internal sealed class ExactChunkRendererAdapter
         this.chunkRenderer = chunkRenderer;
         this.mainCamera = mainCamera;
         this.platform = platform;
+        this.renderBefore = renderBefore;
         this.renderOpaque = renderOpaque;
         this.renderOit = renderOit;
         this.renderAfterOit = renderAfterOit;
@@ -104,6 +107,13 @@ internal sealed class ExactChunkRendererAdapter
             FieldInfo platformField = RequireField(game.GetType(), "Platform");
             object platform = platformField.GetValue(game)
                 ?? throw new InvalidOperationException("Client platform is unavailable.");
+            MethodInfo before = renderer.GetType().GetMethod(
+                "OnRenderBefore",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                null,
+                new[] { typeof(float) },
+                null
+            ) ?? throw new MissingMethodException(renderer.GetType().FullName, "OnRenderBefore(float)");
             MethodInfo opaque = renderer.GetType().GetMethod(
                 "RenderOpaque",
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
@@ -161,6 +171,7 @@ internal sealed class ExactChunkRendererAdapter
                 renderer,
                 camera,
                 platform,
+                before,
                 opaque,
                 oit,
                 afterOit,
@@ -290,6 +301,11 @@ internal sealed class ExactChunkRendererAdapter
             render.PMatrix.Push(projectionDouble);
             projectionPushed = true;
             render.CurrentActiveShader?.Stop();
+            // The liquid fragment shader compares every water/lava fragment
+            // against the dedicated quarter-resolution LiquidDepth buffer.
+            // Rebuild it with the atlas camera; the normal gameplay buffer has
+            // incompatible depths and makes the shader discard all liquids.
+            renderBefore.Invoke(chunkRenderer, new object[] { deltaTime });
             renderOpaque.Invoke(chunkRenderer, new object[] { deltaTime });
             if (!RenderTransparentChunks(deltaTime))
             {

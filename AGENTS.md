@@ -90,6 +90,9 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
   `ExactChunkRendererAdapter`. Opaque terrain uses Primary; liquid and
   transparent geometry uses the engine OIT buffers and must be composed onto
   the atlas GUI target without leaving the GUI on a world framebuffer.
+- Rebuild the engine's `LiquidDepth` pass with the atlas projection and camera
+  before rendering liquid OIT. Reusing the normal gameplay-camera depth buffer
+  makes the liquid shader discard water and lava while their shadows remain.
 - Test with an isolated Vintage Story data directory containing vanilla plus
   ModernAtlas. Do not delete or permanently disable the user's other mods.
 
