@@ -1,26 +1,22 @@
-using System;
-using System.Collections.Generic;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Config;
-using Vintagestory.GameContent;
 
 namespace ModernAtlas;
 
 /// <summary>
-/// Registers an additional client-side relief layer with the vanilla map.
-/// The vanilla map remains the owner of exploration data and waypoints.
+/// Owns the independent ModernAtlas 3D dialog. The vanilla map remains
+/// untouched and can still be opened through its own configured controls.
 /// </summary>
 public sealed class ModernAtlasSystem : ModSystem
 {
-    private WorldMapManager? worldMap;
+    private ModernAtlasDialog? dialog;
 
     public override bool ShouldLoad(EnumAppSide side) => side == EnumAppSide.Client;
 
     public override void StartClientSide(ICoreClientAPI api)
     {
-        worldMap = api.ModLoader.GetModSystem<WorldMapManager>();
-        RegisterReliefAfterVanillaTerrain(worldMap);
+        dialog = new ModernAtlasDialog(api);
 
         api.Input.RegisterHotKey(
             "modernatlas-open",
@@ -31,35 +27,20 @@ public sealed class ModernAtlasSystem : ModSystem
         api.Input.SetHotKeyHandler("modernatlas-open", OnOpenMap);
 
         api.Logger.Notification(
-            "[ModernAtlas] Registered non-destructive block surface layer. Vanilla map data remains unchanged."
+            "[ModernAtlas] Registered independent 3D atlas GUI. Vanilla map data remains unchanged."
         );
     }
 
     private bool OnOpenMap(KeyCombination keyCombination)
     {
-        worldMap?.ToggleMap(EnumDialogType.Dialog);
+        dialog?.Toggle();
         return true;
     }
 
-    private static void RegisterReliefAfterVanillaTerrain(WorldMapManager manager)
+    public override void Dispose()
     {
-        // WorldMapManager creates layer instances later, during LevelFinalize.
-        // Establish the render order now rather than mutating MapLayers while
-        // its tick loop is enumerating that collection.
-        Dictionary<string, Type> ordered = new();
-        foreach (KeyValuePair<string, Type> entry in manager.MapLayerRegistry)
-        {
-            ordered[entry.Key] = entry.Value;
-            if (entry.Key == "chunks")
-            {
-                ordered["modernatlasrelief"] = typeof(ModernAtlasReliefMapLayer);
-            }
-        }
-
-        manager.MapLayerRegistry.Clear();
-        foreach (KeyValuePair<string, Type> entry in ordered)
-        {
-            manager.MapLayerRegistry[entry.Key] = entry.Value;
-        }
+        dialog?.Dispose();
+        dialog = null;
+        base.Dispose();
     }
 }

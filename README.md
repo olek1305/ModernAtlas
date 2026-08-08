@@ -3,29 +3,29 @@
 ModernAtlas is a client-side map enhancement for Vintage Story 1.22.6. Its
 public name is deliberately independent from Google trademarks.
 
-## Current 0.2.0 prototype
+## Current 0.3.0 prototype
 
 - keeps the vanilla map, discovered areas and waypoints intact;
-- colors newly loaded map cells from their real topmost world block, including
-  registered blocks and color providers from other mods;
-- adds stronger hillshade and roof/cliff edge shading so structures and terrain
-  are easier to distinguish;
-- rebuilds a visible map tile after a block change;
-- displays terrain height under the cursor;
-- opens the enhanced world map with `G` (rebindable in Controls);
+- opens a separate full-screen 3D atlas with `G` (rebindable in Controls);
+- builds textured exterior block geometry from client-loaded chunks;
+- supports left-drag panning, right-drag 360-degree rotation and tilt, mouse
+  wheel zoom, keyboard navigation and middle-click reset;
+- uses registered block meshes and the runtime texture atlas, including blocks
+  supplied by other mods;
 - does not generate unexplored chunks and does not write to a save file;
 - works as a client-only mod, so a vanilla multiplayer server does not need it.
 
 Entities, players, creatures, dropped items, equipment and particles are not
-queried and therefore cannot appear on this layer. If precise block data is not
-currently client-loaded, ModernAtlas leaves the vanilla image visible and adds
-only translucent relief.
+queried and therefore cannot appear in the scene. Version 0.3 renders a local
+48-by-48-block scene and rebuilds it incrementally as the atlas camera moves.
+Persistent coverage of previously visited distant terrain is the next cache
+stage.
 
 The existing vanilla map database remains in
 `VintagestoryData/Maps/<world-id>.db`. ModernAtlas does not rename, replace,
 convert, purge or delete that database. Older explored areas stay visible via
-the vanilla terrain layer. The relief overlay becomes available wherever the
-client currently has height data.
+the separate vanilla map. ModernAtlas 3D reads only block columns currently
+available to the client and keeps its rendering independent from that database.
 
 ## Run on Linux
 
@@ -48,7 +48,7 @@ To open a particular existing world directly:
 The script adds `Releases/` as an additional mod path. It does not copy or
 overwrite anything in the normal Mods directory. A DLL is used because the
 1.22.6 in-game source compiler does not reliably reference
-`System.Collections` while compiling client-only map layers.
+the collections and client rendering APIs used by the 3D scene builder.
 
 ## Build a DLL on Linux
 
@@ -67,9 +67,10 @@ not bundle any Vintage Story binaries or assets.
 ## Planned architecture
 
 1. Persistent, world-specific ModernAtlas block cache (separate from saves).
-2. Exposed block geometry for terrain, trees, buildings, paths and ruins.
-3. Tilted 3D mesh view with rotation and pitch controls.
-4. Zoom-dependent level of detail and animated cloud overlay.
+2. More selective exposed-face geometry for terrain, trees, buildings, paths
+   and ruins.
+3. Zoom-dependent levels of detail and a larger navigable world area.
+4. Animated cloud overlay and visual polish matching the concept image.
 5. Optional server companion for multiplayer block tiles, respecting
    server map permissions and never revealing unexplored terrain by default.
 

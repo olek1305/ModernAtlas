@@ -11,6 +11,13 @@ structures, ruins and trees. It should resemble the approved ModernAtlas
 mock-up: a tilted, textured, softly lit map with optional live-looking cloud
 cover.
 
+## Project language
+
+- Use English only in source code, comments, documentation, filenames, logs,
+  configuration, UI labels and release metadata.
+- Do not add translated language files unless the project owner explicitly
+  changes this rule. Conversation with the project owner may use Polish.
+
 ## Rendering scope
 
 - Render world blocks and their actual block shapes and textures.
