@@ -15,7 +15,7 @@ namespace ModernAtlas;
 public sealed class ModernAtlasDialog : GuiDialog
 {
     private static readonly int[] RadiusSteps =
-        { 250, 500, 750, 1000, 1500, 2500, 5000, 10000, 15000, 25000 };
+        { 250, 500, 750, 1000, 1500 };
 
     private ExactChunkRendererAdapter? exactChunkRenderer;
     private readonly float[] projection = Mat4f.Create();
@@ -136,6 +136,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         {
             yawDegrees = NormalizeDegrees(yawDegrees + args.DeltaX * 0.42f);
             pitchDegrees = Math.Clamp(pitchDegrees - args.DeltaY * 0.32f, 18, 86);
+            InvalidateFogTexture();
             args.Handled = true;
         }
 
@@ -149,6 +150,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             double forwardZ = Math.Cos(yaw);
             centerX -= (args.DeltaX * rightX - args.DeltaY * forwardX) * worldPerPixel;
             centerZ -= (args.DeltaX * rightZ - args.DeltaY * forwardZ) * worldPerPixel;
+            InvalidateFogTexture();
             args.Handled = true;
         }
 
@@ -196,11 +198,13 @@ public sealed class ModernAtlasDialog : GuiDialog
         else if (args.KeyCode == (int)GlKeys.R)
         {
             pitchDegrees = Math.Clamp(pitchDegrees + 4, 18, 86);
+            InvalidateFogTexture();
             args.Handled = true;
         }
         else if (args.KeyCode == (int)GlKeys.F)
         {
             pitchDegrees = Math.Clamp(pitchDegrees - 4, 18, 86);
+            InvalidateFogTexture();
             args.Handled = true;
         }
         else if (args.KeyCode == (int)GlKeys.PageUp)
@@ -366,9 +370,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         float yaw = yawDegrees * GameMath.DEG2RAD;
         float pitch = pitchDegrees * GameMath.DEG2RAD;
 
-        float renderDeltaTime = config.AnimationsEnabled && !config.PerformanceMode
-            ? deltaTime
-            : 0;
+        float renderDeltaTime = config.AnimationsEnabled ? deltaTime : 0;
         bool rendered = exactChunkRenderer?.Render(
             renderDeltaTime,
             projection,
@@ -398,6 +400,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         centerX += x * amount;
         centerZ += z * amount;
+        InvalidateFogTexture();
         MaybeRecenterScene();
         args.Handled = true;
     }
@@ -539,8 +542,24 @@ public sealed class ModernAtlasDialog : GuiDialog
         double radiusY = radiusX * Math.Max(0.12, Math.Sin(pitchRadians));
         double reliefAllowance = Math.Min(192, EffectiveRadius * 0.3);
         radiusY += height * reliefAllowance * Math.Abs(Math.Cos(pitchRadians)) / (2.0 * zoom);
-        double centerScreenX = width / 2.0;
-        double centerScreenY = height / 2.0;
+        // The revealed area belongs to the player's actual world position,
+        // not to the movable atlas camera. Panning therefore moves the clear
+        // area across the screen instead of revealing distant terrain.
+        double playerDeltaX = capi.World.Player.Entity.Pos.X - centerX;
+        double playerDeltaY = capi.World.Player.Entity.Pos.Y - centerY;
+        double playerDeltaZ = capi.World.Player.Entity.Pos.Z - centerZ;
+        double yawRadians = yawDegrees * GameMath.DEG2RAD;
+        double sinYaw = Math.Sin(yawRadians);
+        double cosYaw = Math.Cos(yawRadians);
+        double sinPitch = Math.Sin(pitchRadians);
+        double cosPitch = Math.Cos(pitchRadians);
+        double projectedRight = playerDeltaX * cosYaw - playerDeltaZ * sinYaw;
+        double projectedUp = -playerDeltaX * sinYaw * sinPitch
+            + playerDeltaY * cosPitch
+            - playerDeltaZ * cosYaw * sinPitch;
+        double pixelsPerBlock = height / (2.0 * zoom);
+        double centerScreenX = width / 2.0 + projectedRight * pixelsPerBlock;
+        double centerScreenY = height / 2.0 - projectedUp * pixelsPerBlock;
 
         // Keep the complete configured radius clear. The feather starts only
         // outside that radius so tilted hills and buildings are not hidden by
@@ -585,6 +604,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private void Rotate(float degrees, KeyEvent args)
     {
         yawDegrees = NormalizeDegrees(yawDegrees + degrees);
+        InvalidateFogTexture();
         args.Handled = true;
     }
 

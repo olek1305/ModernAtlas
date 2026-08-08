@@ -8,7 +8,9 @@ public sealed class ModernAtlasConfig
 {
     public const int DefaultRadius = 500;
     public const int MinimumRadius = 250;
-    public const int MaximumRadius = 25000;
+    // Vintage Story 1.22.6 exposes at most 1536 blocks of client view
+    // distance. Keep the selectable atlas radius just below that boundary.
+    public const int MaximumRadius = 1500;
 
     public int RadiusBlocks { get; set; } = DefaultRadius;
     public bool FogEnabled { get; set; } = true;

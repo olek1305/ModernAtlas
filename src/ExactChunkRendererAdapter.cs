@@ -286,8 +286,12 @@ internal sealed class ExactChunkRendererAdapter
             projectionPushed = true;
             render.CurrentActiveShader?.Stop();
             renderOpaque.Invoke(chunkRenderer, new object[] { deltaTime });
-            blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
             RenderTransparentChunks(deltaTime);
+            // OIT composition and the after-OIT pass both target Primary when
+            // Vintage Story uses its off-screen world buffer. Copy only after
+            // those passes, otherwise the default target contains opaque
+            // terrain but cannot contain water, lava or transparent blocks.
+            blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
 
             if (!loggedSuccess)
             {
@@ -331,12 +335,9 @@ internal sealed class ExactChunkRendererAdapter
         bool framebufferLoaded = false;
         try
         {
-            // The opaque atlas has already been blitted to the GUI target.
-            // Compose OIT into that target afterwards; a later Primary blit
-            // would overwrite the water and make a successful pass invisible.
-            // Vintage Story represents the window/default framebuffer as
-            // null; EnumFrameBuffer.Default is not an entry in FrameBuffers.
-            capi.Render.CurrentFrameBuffer = null;
+            // The engine's OIT merge selects Primary when off-screen world
+            // rendering is active. The completed Primary buffer is blitted to
+            // the window only after this method returns.
             loadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
             framebufferLoaded = true;
             clearFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
