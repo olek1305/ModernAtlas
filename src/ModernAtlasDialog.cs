@@ -85,13 +85,20 @@ public sealed class ModernAtlasDialog : GuiDialog
             ? "exact loaded chunk geometry"
             : "exact renderer unavailable";
         string fogStatus = config.FogEnabled ? "fog on" : "fog off";
-        string status = $"Radius {config.RadiusBlocks} blocks ({config.RadiusBlocks * 2}×{config.RadiusBlocks * 2}) • {fogStatus} • {rendererStatus} • no distant chunk requests";
+        string performanceStatus = config.PerformanceMode ? "performance on" : "quality mode";
+        string animationStatus = !config.AnimationsEnabled
+            ? "animations off"
+            : config.PerformanceMode ? "animations reduced" : "animations on";
+        string status = $"Radius {config.RadiusBlocks} blocks ({config.RadiusBlocks * 2}×{config.RadiusBlocks * 2}) • {fogStatus} • {performanceStatus} • {animationStatus} • {rendererStatus} • no distant chunk requests";
         overlay?.GetDynamicText("status").SetNewText(status);
         overlay?.Render(deltaTime);
     }
 
     public override void OnMouseDown(MouseEvent args)
     {
+        base.OnMouseDown(args);
+        if (args.Handled) return;
+
         if (args.Button == EnumMouseButton.Left) leftDragging = true;
         if (args.Button == EnumMouseButton.Right) rightDragging = true;
         if (args.Button == EnumMouseButton.Middle) ResetView();
@@ -100,6 +107,9 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnMouseUp(MouseEvent args)
     {
+        base.OnMouseUp(args);
+        if (args.Handled) return;
+
         if (args.Button == EnumMouseButton.Left)
         {
             leftDragging = false;
@@ -111,6 +121,9 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnMouseMove(MouseEvent args)
     {
+        base.OnMouseMove(args);
+        if (args.Handled) return;
+
         if (rightDragging)
         {
             yawDegrees = NormalizeDegrees(yawDegrees + args.DeltaX * 0.42f);
@@ -138,6 +151,9 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnMouseWheel(MouseWheelEventArgs args)
     {
+        base.OnMouseWheel(args);
+        if (args.IsHandled) return;
+
         float wheel = args.deltaPrecise != 0 ? args.deltaPrecise : args.delta;
         zoom = Math.Clamp(zoom * MathF.Pow(0.84f, wheel), 8, 6000);
         InvalidateFogTexture();
@@ -191,14 +207,18 @@ public sealed class ModernAtlasDialog : GuiDialog
             config.FogEnabled = !config.FogEnabled;
             InvalidateFogTexture();
             saveConfig();
+            SyncSettingsControls();
             args.Handled = true;
         }
         else if (args.KeyCode == (int)GlKeys.Home)
         {
             config.RadiusBlocks = ModernAtlasConfig.DefaultRadius;
             config.FogEnabled = true;
+            config.PerformanceMode = true;
+            config.AnimationsEnabled = true;
             saveConfig();
             FitLoadedTerrain();
+            SyncSettingsControls();
             args.Handled = true;
         }
         else
@@ -232,6 +252,23 @@ public sealed class ModernAtlasDialog : GuiDialog
     private void ComposeOverlay()
     {
         ElementBounds root = ElementBounds.Fill;
+        ElementBounds settingsPanel = ElementBounds.FixedOffseted(
+            EnumDialogArea.RightTop,
+            -20,
+            18,
+            300,
+            230
+        );
+        string[] radiusValues = Array.ConvertAll(RadiusSteps, value => value.ToString());
+        string[] radiusNames = Array.ConvertAll(
+            RadiusSteps,
+            value => $"{value} block radius ({value * 2}×{value * 2})"
+        );
+        int selectedRadius = Math.Max(
+            0,
+            Array.FindIndex(RadiusSteps, value => value == config.RadiusBlocks)
+        );
+
         overlay = capi.Gui.CreateCompo("modernatlas-3d", root)
             .AddStaticText(
                 "ModernAtlas 3D",
@@ -249,7 +286,63 @@ public sealed class ModernAtlasDialog : GuiDialog
                 ElementBounds.Fixed(24, 88, 650, 34),
                 "status"
             )
+            .AddShadedDialogBG(settingsPanel, false, 8, 0.72f)
+            .AddStaticText(
+                "Atlas settings",
+                CairoFont.WhiteSmallishText().WithFontSize(20),
+                ElementBounds.FixedOffseted(EnumDialogArea.RightTop, -40, 30, 260, 30)
+            )
+            .AddStaticText(
+                "Visible radius",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.FixedOffseted(EnumDialogArea.RightTop, -40, 62, 260, 24)
+            )
+            .AddDropDown(
+                radiusValues,
+                radiusNames,
+                selectedRadius,
+                OnRadiusSelected,
+                ElementBounds.FixedOffseted(EnumDialogArea.RightTop, -40, 88, 260, 34),
+                "radius"
+            )
+            .AddStaticText(
+                "Unexplored fog",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.FixedOffseted(EnumDialogArea.RightTop, -120, 136, 180, 28)
+            )
+            .AddSwitch(
+                OnFogToggled,
+                ElementBounds.FixedOffseted(EnumDialogArea.RightTop, -40, 132, 46, 30),
+                "fog",
+                24,
+                4
+            )
+            .AddStaticText(
+                "Performance mode",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.FixedOffseted(EnumDialogArea.RightTop, -120, 172, 180, 28)
+            )
+            .AddSwitch(
+                OnPerformanceToggled,
+                ElementBounds.FixedOffseted(EnumDialogArea.RightTop, -40, 168, 46, 30),
+                "performance",
+                24,
+                4
+            )
+            .AddStaticText(
+                "Animations",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.FixedOffseted(EnumDialogArea.RightTop, -120, 208, 180, 28)
+            )
+            .AddSwitch(
+                OnAnimationsToggled,
+                ElementBounds.FixedOffseted(EnumDialogArea.RightTop, -40, 204, 46, 30),
+                "animations",
+                24,
+                4
+            )
             .Compose();
+        SyncSettingsControls();
     }
 
     private bool RenderLiveWorld(float deltaTime)
@@ -263,8 +356,11 @@ public sealed class ModernAtlasDialog : GuiDialog
         float yaw = yawDegrees * GameMath.DEG2RAD;
         float pitch = pitchDegrees * GameMath.DEG2RAD;
 
+        float renderDeltaTime = config.AnimationsEnabled && !config.PerformanceMode
+            ? deltaTime
+            : 0;
         bool rendered = exactChunkRenderer?.Render(
-            deltaTime,
+            renderDeltaTime,
             projection,
             centerX,
             centerY,
@@ -324,6 +420,51 @@ public sealed class ModernAtlasDialog : GuiDialog
         config.RadiusBlocks = RadiusSteps[nextIndex];
         saveConfig();
         FitLoadedTerrain();
+        SyncSettingsControls();
+    }
+
+    private void OnRadiusSelected(string value, bool selected)
+    {
+        if (!selected || !int.TryParse(value, out int radius)) return;
+        config.RadiusBlocks = Math.Clamp(
+            radius,
+            ModernAtlasConfig.MinimumRadius,
+            ModernAtlasConfig.MaximumRadius
+        );
+        saveConfig();
+        FitLoadedTerrain();
+    }
+
+    private void OnFogToggled(bool enabled)
+    {
+        config.FogEnabled = enabled;
+        InvalidateFogTexture();
+        saveConfig();
+    }
+
+    private void OnPerformanceToggled(bool enabled)
+    {
+        config.PerformanceMode = enabled;
+        saveConfig();
+    }
+
+    private void OnAnimationsToggled(bool enabled)
+    {
+        config.AnimationsEnabled = enabled;
+        saveConfig();
+    }
+
+    private void SyncSettingsControls()
+    {
+        if (overlay == null) return;
+        int radiusIndex = Math.Max(
+            0,
+            Array.FindIndex(RadiusSteps, value => value == config.RadiusBlocks)
+        );
+        overlay.GetDropDown("radius")?.SetSelectedIndex(radiusIndex);
+        overlay.GetSwitch("fog")?.SetValue(config.FogEnabled);
+        overlay.GetSwitch("performance")?.SetValue(config.PerformanceMode);
+        overlay.GetSwitch("animations")?.SetValue(config.AnimationsEnabled);
     }
 
     private void RenderFogMask()

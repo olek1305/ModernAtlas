@@ -12,6 +12,8 @@ public sealed class ModernAtlasConfig
 
     public int RadiusBlocks { get; set; } = DefaultRadius;
     public bool FogEnabled { get; set; } = true;
+    public bool PerformanceMode { get; set; } = true;
+    public bool AnimationsEnabled { get; set; } = true;
 
     // Written while the atlas is open. If the process ends before the dialog
     // closes cleanly, the next launch restores the safe default radius.
