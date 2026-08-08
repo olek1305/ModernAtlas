@@ -11,6 +11,9 @@ structures, ruins and trees. It should resemble the approved ModernAtlas
 mock-up: a tilted, textured, softly lit map with optional live-looking cloud
 cover.
 
+The atlas is a dedicated full-screen 3D GUI opened with `G`; it is not a skin
+for the vanilla blue 2D map. `G` and `Escape` must both close it.
+
 ## Project language
 
 - Use English only in source code, comments, documentation, filenames, logs,
@@ -25,6 +28,11 @@ cover.
   block and texture-atlas APIs. Do not hard-code only vanilla block IDs.
 - Render terrain, buildings, ruins, vegetation and fluids when they are made
   from blocks.
+- Preserve the game's live material appearance: texture-atlas coordinates,
+  biome tint, sunlight, shadows and connected or multipart block geometry.
+- Render water, lava and transparent block materials through the engine's OIT
+  path. Seeing only a fluid shadow is a rendering failure, not an acceptable
+  fallback.
 - Do not render entities, players, creatures, dropped items, held tools,
   weapons, armor, particles, damage effects or other transient scene objects.
 - Use a neutral stone material when a block or texture cannot be resolved.
@@ -44,6 +52,30 @@ cover.
 - Exact block geometry is available only while chunks are client-loaded.
   Cache useful atlas data as chunks are visited so the 3D atlas fills in over
   time; fall back to vanilla terrain colors/height where exact data is absent.
+- Fog must conceal terrain that the client is not allowed to know. The clear
+  radius is anchored to the player's actual world position; panning or rotating
+  the atlas camera must never move or enlarge that revealed area.
+
+## Camera and controls
+
+- Support zoom, a freely rotatable 360-degree yaw and a useful top-down to
+  tilted camera range without clipping the top or bottom of loaded terrain.
+- Left-drag pans in screen space: horizontal mouse motion stays horizontal and
+  vertical mouse motion stays vertical regardless of camera yaw. Do not map a
+  downward drag to an unexpected compass direction.
+- Right-drag rotates and tilts the camera. Middle-click resets the view.
+- Keep atlas GUI controls clickable and prevent atlas input from leaking into
+  the hotbar, inventories or dialogs underneath it.
+
+## Radius and multiplayer rules
+
+- Offer radii of 250, 500, 750, 1000 and 1500 blocks. Do not expose values
+  above 1500 because Vintage Story 1.22.6 has a 1536-block view-distance limit.
+- Default to a 500-block radius. Validate old or malformed configuration values
+  and clamp them to 1500 without crashing.
+- Singleplayer may expose radius, fog, performance and animation settings.
+  Multiplayer must keep conservative client-only limits and must not request
+  distant chunks or disclose activity outside data already sent by the server.
 
 ## Performance and compatibility
 
@@ -54,6 +86,10 @@ cover.
 - Invalidate cached atlas chunks after block changes and rebuild them lazily.
 - Prefer public Vintage Story APIs. Isolate any unavoidable game-content API
   integration behind a small adapter and document why it is needed.
+- For Vintage Story 1.22.6, exact live chunk rendering is isolated in
+  `ExactChunkRendererAdapter`. Opaque terrain uses Primary; liquid and
+  transparent geometry uses the engine OIT buffers and must be composed onto
+  the atlas GUI target without leaving the GUI on a world framebuffer.
 - Test with an isolated Vintage Story data directory containing vanilla plus
   ModernAtlas. Do not delete or permanently disable the user's other mods.
 
