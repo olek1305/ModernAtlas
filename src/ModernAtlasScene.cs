@@ -1,4 +1,5 @@
 using System;
+using System.Reflection;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Config;
@@ -15,11 +16,12 @@ public sealed class ModernAtlasScene : IDisposable
 {
     private const int Radius = 24;
     private const int Diameter = Radius * 2;
-    private const int MaxWallDepth = 20;
-    private const int MaxBlocks = 14000;
+    private const int MaxWallDepth = 32;
+    private const int MaxBlocks = 30000;
 
     private readonly ICoreClientAPI capi;
     private readonly int[] heights = new int[Diameter * Diameter];
+    private readonly int[] terrainHeights = new int[Diameter * Diameter];
     private readonly bool[] loaded = new bool[Diameter * Diameter];
 
     private MeshData? buildingMesh;
@@ -51,6 +53,7 @@ public sealed class ModernAtlasScene : IDisposable
     {
         DisposeMesh();
         Array.Clear(heights);
+        Array.Clear(terrainHeights);
         Array.Clear(loaded);
         originX = centerX - Radius;
         originZ = centerZ - Radius;
@@ -89,11 +92,8 @@ public sealed class ModernAtlasScene : IDisposable
             int worldX = originX + localX;
             int worldZ = originZ + localZ;
             int surfaceY = heights[index];
-            int neighborFloor = LowestNeighborHeight(localX, localZ, surfaceY);
-            int lowestVisibleY = Math.Min(
-                surfaceY,
-                Math.Max(baseY, Math.Max(surfaceY - MaxWallDepth, neighborFloor + 1))
-            );
+            int terrainY = terrainHeights[index];
+            int lowestVisibleY = Math.Max(terrainY, surfaceY - MaxWallDepth);
 
             for (int y = lowestVisibleY; y <= surfaceY && blocksAdded < MaxBlocks; y++)
             {
@@ -104,6 +104,14 @@ public sealed class ModernAtlasScene : IDisposable
                     BlockLayersAccess.FluidOrSolid
                 );
                 if (block == null || block.Id == 0) continue;
+                if (IsMultiblockPlaceholder(block)) continue;
+                bool mustKeepGround = y == terrainY;
+                bool mustKeepTop = y == surfaceY;
+                bool mustKeepDoorRoot = IsDoorBlock(block);
+                if (!mustKeepGround
+                    && !mustKeepTop
+                    && !mustKeepDoorRoot
+                    && !IsExposedToAir(worldX, y, worldZ)) continue;
 
                 AddBlockMesh(
                     block,
@@ -147,12 +155,15 @@ public sealed class ModernAtlasScene : IDisposable
                     + GameMath.Mod(worldX, chunkSize);
                 int rainHeight = mapChunk.RainHeightMap[mapIndex];
                 if (!TryFindSurface(worldX, rainHeight, worldZ, out int surfaceY)) continue;
+                int terrainY = mapChunk.WorldGenTerrainHeightMap[mapIndex];
+                if (terrainY <= 0 || terrainY > surfaceY) terrainY = surfaceY;
 
                 int index = localZ * Diameter + localX;
                 heights[index] = surfaceY;
+                terrainHeights[index] = terrainY;
                 loaded[index] = true;
                 LoadedColumns++;
-                baseY = Math.Min(baseY, surfaceY);
+                baseY = Math.Min(baseY, terrainY);
                 topY = Math.Max(topY, surfaceY);
             }
         }
@@ -184,21 +195,30 @@ public sealed class ModernAtlasScene : IDisposable
         return false;
     }
 
-    private int LowestNeighborHeight(int x, int z, int ownHeight)
+    private bool IsExposedToAir(int x, int y, int z)
     {
-        int result = ownHeight;
-        result = Math.Min(result, HeightOrOwn(x - 1, z, ownHeight));
-        result = Math.Min(result, HeightOrOwn(x + 1, z, ownHeight));
-        result = Math.Min(result, HeightOrOwn(x, z - 1, ownHeight));
-        result = Math.Min(result, HeightOrOwn(x, z + 1, ownHeight));
-        return result;
+        return IsAir(x - 1, y, z)
+            || IsAir(x + 1, y, z)
+            || IsAir(x, y, z - 1)
+            || IsAir(x, y, z + 1)
+            || IsAir(x, y + 1, z);
     }
 
-    private int HeightOrOwn(int x, int z, int ownHeight)
+    private bool IsAir(int x, int y, int z)
     {
-        if (x < 0 || z < 0 || x >= Diameter || z >= Diameter) return ownHeight;
-        int index = z * Diameter + x;
-        return loaded[index] ? heights[index] : ownHeight;
+        Block? neighbor = capi.World.BlockAccessor.GetBlockOrNull(
+            x,
+            y,
+            z,
+            BlockLayersAccess.FluidOrSolid
+        );
+        return neighbor != null && neighbor.Id == 0;
+    }
+
+    private static bool IsMultiblockPlaceholder(Block block)
+    {
+        string path = block.Code?.Path ?? string.Empty;
+        return path.StartsWith("multiblock-monolithic-", StringComparison.OrdinalIgnoreCase);
     }
 
     private void AddBlockMesh(
@@ -212,6 +232,12 @@ public sealed class ModernAtlasScene : IDisposable
     )
     {
         if (buildingMesh == null) return;
+
+        if (TryAddDoorMesh(block, worldX, worldY, worldZ, x, y, z))
+        {
+            blocksAdded++;
+            return;
+        }
 
         string path = block.Code?.Path ?? string.Empty;
         Block meshBlock = path.Length == 0
@@ -256,6 +282,83 @@ public sealed class ModernAtlasScene : IDisposable
                 );
             }
         }
+    }
+
+    private bool TryAddDoorMesh(
+        Block block,
+        int worldX,
+        int worldY,
+        int worldZ,
+        float x,
+        float y,
+        float z
+    )
+    {
+        if (buildingMesh == null || !IsDoorBlock(block)) return false;
+
+        BlockPos position = new(worldX, worldY, worldZ);
+        BlockEntity? blockEntity = capi.World.BlockAccessor.GetBlockEntity(position);
+        if (blockEntity == null) return false;
+
+        try
+        {
+            AtlasMeshCollector collector = new();
+            blockEntity.OnTesselation(collector, capi.Tesselator);
+            MeshData captured = collector.Mesh.VerticesCount > 0
+                ? collector.Mesh
+                : FindPreparedDoorMesh(blockEntity) ?? collector.Mesh;
+            if (captured.VerticesCount == 0) return false;
+
+            int firstVertex = buildingMesh.VerticesCount;
+            buildingMesh.AddMeshData(captured, x, y, z);
+            ApplyWorldColor(block, captured, firstVertex, worldX, worldY, worldZ);
+            return true;
+        }
+        catch (Exception exception)
+        {
+            capi.Logger.Debug(
+                "[ModernAtlas] Could not capture door mesh at {0}, {1}, {2}: {3}",
+                worldX,
+                worldY,
+                worldZ,
+                exception.Message
+            );
+            return false;
+        }
+    }
+
+    private static MeshData? FindPreparedDoorMesh(BlockEntity blockEntity)
+    {
+        foreach (BlockEntityBehavior behavior in blockEntity.Behaviors)
+        {
+            Type? type = behavior.GetType();
+            if (!type.Name.Contains("Door", StringComparison.OrdinalIgnoreCase)) continue;
+
+            while (type != null)
+            {
+                FieldInfo? field = type.GetField(
+                    "mesh",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
+                );
+                if (field?.GetValue(behavior) is MeshData mesh && mesh.VerticesCount > 0)
+                {
+                    return mesh.Clone();
+                }
+                type = type.BaseType;
+            }
+        }
+        return null;
+    }
+
+    private static bool IsDoorBlock(Block block)
+    {
+        if (block.GetType().Name.Contains("Door", StringComparison.OrdinalIgnoreCase)) return true;
+
+        foreach (BlockBehavior behavior in block.BlockBehaviors)
+        {
+            if (behavior.GetType().Name.Contains("Door", StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
     }
 
     private void ApplyWorldColor(
@@ -362,6 +465,28 @@ public sealed class ModernAtlasScene : IDisposable
     {
         meshRef?.Dispose();
         meshRef = null;
+    }
+
+    private sealed class AtlasMeshCollector : ITerrainMeshPool
+    {
+        public MeshData Mesh { get; } = new(256, 384, false, true, true, true);
+
+        public void AddMeshData(MeshData data, int lodLevel = 1)
+        {
+            if (data != null) Mesh.AddMeshData(data);
+        }
+
+        public void AddMeshData(MeshData data, float[] transformation, int lodLevel = 1)
+        {
+            if (data == null) return;
+            MeshData transformed = data.Clone().MatrixTransform(transformation);
+            Mesh.AddMeshData(transformed);
+        }
+
+        public void AddMeshData(MeshData data, ColorMapData colorMapData, int lodLevel = 1)
+        {
+            if (data != null) Mesh.AddMeshData(data);
+        }
     }
 
     private static int FloorDiv(int value, int divisor)

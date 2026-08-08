@@ -153,6 +153,13 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnKeyDown(KeyEvent args)
     {
+        if (args.KeyCode == (int)GlKeys.Escape || args.KeyCode == (int)GlKeys.G)
+        {
+            TryClose();
+            args.Handled = true;
+            return;
+        }
+
         float pan = Math.Max(1, zoom * 0.08f);
         double yaw = yawDegrees * GameMath.DEG2RAD;
         double forwardX = Math.Sin(yaw);
