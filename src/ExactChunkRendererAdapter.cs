@@ -470,8 +470,9 @@ internal sealed class ExactChunkRendererAdapter
         if (poolsByRenderPassField.GetValue(chunkRenderer)
             is not MeshDataPoolManager[][] passes) return;
 
-        foreach (MeshDataPoolManager manager in passes[(int)EnumChunkRenderPass.Liquid])
+        foreach (MeshDataPoolManager? manager in passes[(int)EnumChunkRenderPass.Liquid])
         {
+            if (manager == null) continue;
             object? pools = managerPoolsField.GetValue(manager);
             if (pools == null) continue;
             object emptyPools = Activator.CreateInstance(pools.GetType())
@@ -518,6 +519,7 @@ internal sealed class ExactChunkRendererAdapter
         MeshDataPoolManager[] managers = passes[(int)EnumChunkRenderPass.Liquid];
         for (int index = 0; index < managers.Length && index < textureIds.Length; index++)
         {
+            if (managers[index] == null) continue;
             stableLiquidShader.BindTexture2D("terrainTex", textureIds[index], 0);
             managers[index].Render(cameraPosition, "origin", EnumFrustumCullMode.CullInstant);
         }
