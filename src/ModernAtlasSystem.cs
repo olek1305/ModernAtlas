@@ -11,15 +11,12 @@ namespace ModernAtlas;
 public sealed class ModernAtlasSystem : ModSystem
 {
     private ModernAtlasDialog? dialog;
-    private IShaderProgram? atlasShader;
 
     public override bool ShouldLoad(EnumAppSide side) => side == EnumAppSide.Client;
 
     public override void StartClientSide(ICoreClientAPI api)
     {
         dialog = new ModernAtlasDialog(api);
-        api.Event.BlockTexturesLoaded += () => LoadShader(api);
-        api.Event.ReloadShader += () => LoadShader(api);
 
         api.Input.RegisterHotKey(
             "modernatlas-open",
@@ -34,25 +31,6 @@ public sealed class ModernAtlasSystem : ModSystem
         );
     }
 
-    private bool LoadShader(ICoreClientAPI api)
-    {
-        atlasShader?.Dispose();
-        atlasShader = api.Shader.NewShaderProgram();
-        atlasShader.AssetDomain = "modernatlas";
-        atlasShader.VertexShader = api.Shader.NewShader(EnumShaderType.VertexShader);
-        atlasShader.FragmentShader = api.Shader.NewShader(EnumShaderType.FragmentShader);
-        api.Shader.RegisterFileShaderProgram("modernatlasworld", atlasShader);
-
-        bool compiled = atlasShader.Compile();
-        dialog?.SetShader(compiled ? atlasShader : null);
-        api.Logger.Notification(
-            compiled
-                ? "[ModernAtlas] Atlas world shader compiled."
-                : "[ModernAtlas] Atlas world shader failed to compile."
-        );
-        return compiled;
-    }
-
     private bool OnOpenMap(KeyCombination keyCombination)
     {
         dialog?.Toggle();
@@ -63,8 +41,6 @@ public sealed class ModernAtlasSystem : ModSystem
     {
         dialog?.Dispose();
         dialog = null;
-        atlasShader?.Dispose();
-        atlasShader = null;
         base.Dispose();
     }
 }

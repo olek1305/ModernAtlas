@@ -6,7 +6,7 @@
     "arcylisz"
   ],
   "description": "Client-side interactive 3D block atlas with pan, 360-degree rotation, tilt and zoom. It reads client-available chunks without replacing or modifying vanilla map or save data.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "side": "Client",
   "requiredOnServer": false,
   "requiredOnClient": false,

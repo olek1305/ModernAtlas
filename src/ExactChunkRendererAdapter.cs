@@ -151,6 +151,11 @@ internal sealed class ExactChunkRendererAdapter
 
             FrustumCulling atlasFrustum = new();
             atlasFrustum.UpdateViewDistance(2048);
+            // A newly constructed culler has a zero LOD0 range. In that state
+            // Vintage Story rejects every full-detail terrain pool even when
+            // it is geometrically inside the atlas frustum.
+            atlasFrustum.lod0BiasSq = 2048f * 2048f;
+            atlasFrustum.lod2BiasSq = 2048d * 2048d;
             atlasFrustum.CalcFrustumEquations(
                 new BlockPos((int)Math.Floor(eyeX), (int)Math.Floor(eyeY), (int)Math.Floor(eyeZ)),
                 projectionDouble,

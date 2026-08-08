@@ -3,30 +3,26 @@
 ModernAtlas is a client-side map enhancement for Vintage Story 1.22.6. Its
 public name is deliberately independent from Google trademarks.
 
-## Current 0.4.0 prototype
+## Current 0.4.1 prototype
 
 - keeps the vanilla map, discovered areas and waypoints intact;
 - opens a separate full-screen 3D atlas with `G` (rebindable in Controls);
-- provides an unfiltered runtime-atlas texture layer and attempts to overlay
-  the game's completed terrain chunk meshes and official world shaders on
-  Vintage Story 1.22.6;
+- renders the game's completed terrain chunk meshes directly with the official
+  world shaders on Vintage Story 1.22.6;
 - supports left-drag panning, right-drag 360-degree rotation and tilt, mouse
   wheel zoom, keyboard navigation and middle-click reset;
-- uses registered block meshes and the runtime texture atlas, including blocks
-  supplied by other mods;
-- uses structural block-entity tessellation for stateful containers and doors
-  while excluding item-display storage, racks and shelves;
-- applies position-specific climate and seasonal colors without a synthetic
-  darkness or grid filter that would alter the original material pixels;
-- replaces unresolved material faces with granite instead of the unknown
-  question-mark texture;
+- uses the same runtime texture atlases, connected chunk geometry, biome color
+  maps, lighting uniforms and sun state as the live world renderer, including
+  terrain supplied by other mods;
+- contains no generated per-block material fallback or custom world-material
+  shader;
 - does not generate unexplored chunks and does not write to a save file;
 - works as a client-only mod, so a vanilla multiplayer server does not need it.
 
 Entities, players, creatures, dropped items, equipment and particles are not
 queried and therefore cannot appear in the scene. The exact renderer is an
-isolated 1.22.6 integration and automatically falls back to the portable local
-48-by-48-block renderer when the internal terrain renderer is unavailable.
+isolated 1.22.6 integration. If it is unavailable, ModernAtlas reports the
+failure instead of displaying substitute block models or invented materials.
 Persistent coverage of previously visited distant terrain is the next cache
 stage.
 
