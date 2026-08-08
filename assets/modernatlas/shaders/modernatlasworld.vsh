@@ -11,12 +11,11 @@ uniform mat4 modelMatrix;
 
 out vec2 uv;
 out vec4 color;
-out vec3 worldPosition;
 
 void main()
 {
     uv = uvIn;
     color = colorIn;
-    worldPosition = (modelMatrix * vec4(vertexPositionIn, 1.0)).xyz;
+    vec3 worldPosition = (modelMatrix * vec4(vertexPositionIn, 1.0)).xyz;
     gl_Position = projectionMatrix * viewMatrix * vec4(worldPosition, 1.0);
 }

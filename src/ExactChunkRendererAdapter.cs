@@ -1,0 +1,234 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Reflection;
+using Vintagestory.API.Client;
+using Vintagestory.API.Common;
+using Vintagestory.API.Config;
+using Vintagestory.API.MathTools;
+
+namespace ModernAtlas;
+
+/// <summary>
+/// Vintage Story does not expose its completed terrain GPU meshes through the
+/// public API. This small, version-checked adapter reuses the 1.22.6 terrain
+/// renderer so connected models, mod blocks, biome colors and engine lighting
+/// remain identical to the normal world view. It renders chunk geometry only;
+/// entities and particle renderers are never invoked.
+/// </summary>
+internal sealed class ExactChunkRendererAdapter
+{
+    private const string SupportedVersion = "1.22.6";
+
+    private readonly ICoreClientAPI capi;
+    private readonly object chunkRenderer;
+    private readonly object mainCamera;
+    private readonly MethodInfo renderOpaque;
+    private readonly FieldInfo cameraMatrixOriginField;
+    private readonly FieldInfo poolsByRenderPassField;
+    private readonly FieldInfo poolFrustumField;
+    private bool disabled;
+    private bool loggedSuccess;
+
+    private ExactChunkRendererAdapter(
+        ICoreClientAPI capi,
+        object chunkRenderer,
+        object mainCamera,
+        MethodInfo renderOpaque,
+        FieldInfo cameraMatrixOriginField,
+        FieldInfo poolsByRenderPassField,
+        FieldInfo poolFrustumField
+    )
+    {
+        this.capi = capi;
+        this.chunkRenderer = chunkRenderer;
+        this.mainCamera = mainCamera;
+        this.renderOpaque = renderOpaque;
+        this.cameraMatrixOriginField = cameraMatrixOriginField;
+        this.poolsByRenderPassField = poolsByRenderPassField;
+        this.poolFrustumField = poolFrustumField;
+    }
+
+    public static ExactChunkRendererAdapter? TryCreate(ICoreClientAPI capi)
+    {
+        if (!GameVersion.ShortGameVersion.StartsWith(SupportedVersion, StringComparison.Ordinal))
+        {
+            capi.Logger.Warning(
+                "[ModernAtlas] Exact chunk rendering supports Vintage Story {0}; using the compatible atlas renderer on {1}.",
+                SupportedVersion,
+                GameVersion.ShortGameVersion
+            );
+            return null;
+        }
+
+        try
+        {
+            FieldInfo gameField = RequireField(capi.GetType(), "game");
+            object game = gameField.GetValue(capi)
+                ?? throw new InvalidOperationException("Client game instance is unavailable.");
+            FieldInfo rendererField = RequireField(game.GetType(), "chunkRenderer");
+            object renderer = rendererField.GetValue(game)
+                ?? throw new InvalidOperationException("Chunk renderer is unavailable.");
+            FieldInfo cameraField = RequireField(game.GetType(), "MainCamera");
+            object camera = cameraField.GetValue(game)
+                ?? throw new InvalidOperationException("Player camera is unavailable.");
+            MethodInfo opaque = renderer.GetType().GetMethod(
+                "RenderOpaque",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                null,
+                new[] { typeof(float) },
+                null
+            ) ?? throw new MissingMethodException(renderer.GetType().FullName, "RenderOpaque(float)");
+            FieldInfo cameraMatrix = RequireField(camera.GetType(), "CameraMatrixOrigin");
+            FieldInfo pools = RequireField(renderer.GetType(), "poolsByRenderPass");
+            FieldInfo poolFrustum = RequireField(typeof(MeshDataPoolManager), "frustumCuller");
+
+            capi.Logger.Notification(
+                "[ModernAtlas] Vintage Story 1.22.6 exact chunk renderer is available."
+            );
+            return new ExactChunkRendererAdapter(
+                capi,
+                renderer,
+                camera,
+                opaque,
+                cameraMatrix,
+                pools,
+                poolFrustum
+            );
+        }
+        catch (Exception exception)
+        {
+            capi.Logger.Warning(
+                "[ModernAtlas] Exact chunk renderer is unavailable; using the compatible atlas renderer: {0}",
+                exception.Message
+            );
+            return null;
+        }
+    }
+
+    public bool Render(
+        float deltaTime,
+        float[] projection,
+        double centerX,
+        double centerY,
+        double centerZ,
+        float yawRadians,
+        float pitchRadians
+    )
+    {
+        if (disabled) return false;
+
+        IRenderAPI render = capi.Render;
+        Vec3d cameraPosition = capi.World.Player.Entity.CameraPos;
+        double oldCameraX = cameraPosition.X;
+        double oldCameraY = cameraPosition.Y;
+        double oldCameraZ = cameraPosition.Z;
+        double[] cameraMatrix = (double[])(cameraMatrixOriginField.GetValue(mainCamera)
+            ?? throw new InvalidOperationException("Camera origin matrix is unavailable."));
+        double[] savedCameraMatrix = (double[])cameraMatrix.Clone();
+        List<(object Pool, object? Frustum)> changedPools = new();
+        bool projectionPushed = false;
+
+        try
+        {
+            const double distance = 180;
+            double horizontal = Math.Cos(pitchRadians) * distance;
+            double eyeX = centerX + Math.Sin(yawRadians) * horizontal;
+            double eyeY = centerY + Math.Sin(pitchRadians) * distance;
+            double eyeZ = centerZ + Math.Cos(yawRadians) * horizontal;
+
+            double[] view = Mat4d.Create();
+            Mat4d.LookAt(
+                view,
+                new[] { 0d, 0d, 0d },
+                new[] { centerX - eyeX, centerY - eyeY, centerZ - eyeZ },
+                new[] { 0d, 1d, 0d }
+            );
+            double[] projectionDouble = Array.ConvertAll(projection, value => (double)value);
+
+            cameraPosition.Set(eyeX, eyeY, eyeZ);
+            Array.Copy(view, cameraMatrix, 16);
+
+            FrustumCulling atlasFrustum = new();
+            atlasFrustum.UpdateViewDistance(2048);
+            atlasFrustum.CalcFrustumEquations(
+                new BlockPos((int)Math.Floor(eyeX), (int)Math.Floor(eyeY), (int)Math.Floor(eyeZ)),
+                projectionDouble,
+                view
+            );
+            ReplacePoolFrustums(atlasFrustum, changedPools);
+
+            render.PMatrix.Push(projectionDouble);
+            projectionPushed = true;
+            render.CurrentActiveShader?.Stop();
+            renderOpaque.Invoke(chunkRenderer, new object[] { deltaTime });
+
+            if (!loggedSuccess)
+            {
+                loggedSuccess = true;
+                capi.Logger.Notification(
+                    "[ModernAtlas] Rendering the atlas from the game's completed chunk meshes and materials."
+                );
+            }
+            return true;
+        }
+        catch (Exception exception)
+        {
+            disabled = true;
+            Exception cause = exception is TargetInvocationException { InnerException: not null }
+                ? exception.InnerException
+                : exception;
+            capi.Logger.Error(
+                "[ModernAtlas] Exact chunk rendering failed and was disabled for this session: {0}",
+                cause.Message
+            );
+            return false;
+        }
+        finally
+        {
+            for (int index = changedPools.Count - 1; index >= 0; index--)
+            {
+                (object pool, object? frustum) = changedPools[index];
+                poolFrustumField.SetValue(pool, frustum);
+            }
+            Array.Copy(savedCameraMatrix, cameraMatrix, 16);
+            cameraPosition.Set(oldCameraX, oldCameraY, oldCameraZ);
+            if (projectionPushed) render.PMatrix.Pop();
+            render.CurrentActiveShader?.Stop();
+        }
+    }
+
+    private void ReplacePoolFrustums(
+        FrustumCulling atlasFrustum,
+        List<(object Pool, object? Frustum)> changedPools
+    )
+    {
+        if (poolsByRenderPassField.GetValue(chunkRenderer) is not IEnumerable passes) return;
+
+        HashSet<object> visited = new(ReferenceEqualityComparer.Instance);
+        foreach (object? pass in passes)
+        {
+            if (pass is not IEnumerable managers) continue;
+            foreach (object? manager in managers)
+            {
+                if (manager == null || !visited.Add(manager)) continue;
+                object? previous = poolFrustumField.GetValue(manager);
+                changedPools.Add((manager, previous));
+                poolFrustumField.SetValue(manager, atlasFrustum);
+            }
+        }
+    }
+
+    private static FieldInfo RequireField(Type type, string name)
+    {
+        for (Type? current = type; current != null; current = current.BaseType)
+        {
+            FieldInfo? field = current.GetField(
+                name,
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
+            );
+            if (field != null) return field;
+        }
+        throw new MissingFieldException(type.FullName, name);
+    }
+}

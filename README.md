@@ -3,27 +3,30 @@
 ModernAtlas is a client-side map enhancement for Vintage Story 1.22.6. Its
 public name is deliberately independent from Google trademarks.
 
-## Current 0.3.6 prototype
+## Current 0.4.0 prototype
 
 - keeps the vanilla map, discovered areas and waypoints intact;
 - opens a separate full-screen 3D atlas with `G` (rebindable in Controls);
-- builds textured exterior block geometry from client-loaded chunks;
+- provides an unfiltered runtime-atlas texture layer and attempts to overlay
+  the game's completed terrain chunk meshes and official world shaders on
+  Vintage Story 1.22.6;
 - supports left-drag panning, right-drag 360-degree rotation and tilt, mouse
   wheel zoom, keyboard navigation and middle-click reset;
 - uses registered block meshes and the runtime texture atlas, including blocks
   supplied by other mods;
 - uses structural block-entity tessellation for stateful containers and doors
   while excluding item-display storage, racks and shelves;
-- applies position-specific climate and seasonal colors plus live sun and moon
-  lighting, with the visual grid fixed to exact one-block boundaries;
+- applies position-specific climate and seasonal colors without a synthetic
+  darkness or grid filter that would alter the original material pixels;
 - replaces unresolved material faces with granite instead of the unknown
   question-mark texture;
 - does not generate unexplored chunks and does not write to a save file;
 - works as a client-only mod, so a vanilla multiplayer server does not need it.
 
 Entities, players, creatures, dropped items, equipment and particles are not
-queried and therefore cannot appear in the scene. Version 0.3 renders a local
-48-by-48-block scene and rebuilds it incrementally as the atlas camera moves.
+queried and therefore cannot appear in the scene. The exact renderer is an
+isolated 1.22.6 integration and automatically falls back to the portable local
+48-by-48-block renderer when the internal terrain renderer is unavailable.
 Persistent coverage of previously visited distant terrain is the next cache
 stage.
 

@@ -13,7 +13,10 @@ namespace ModernAtlas;
 /// </summary>
 public sealed class ModernAtlasDialog : GuiDialog
 {
+    private static readonly float[] TransparentBlack = { 0f, 0f, 0f, 0f };
+
     private readonly ModernAtlasScene scene;
+    private ExactChunkRendererAdapter? exactChunkRenderer;
     private readonly float[] projection = Mat4f.Create();
     private readonly float[] view = Mat4f.Create();
     private readonly float[] model = Mat4f.Create();
@@ -54,6 +57,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     public override void OnGuiOpened()
     {
         base.OnGuiOpened();
+        exactChunkRenderer ??= ExactChunkRendererAdapter.TryCreate(capi);
         centerX = capi.World.Player.Entity.Pos.X;
         centerZ = capi.World.Player.Entity.Pos.Z;
         BeginScene();
@@ -278,7 +282,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         render.ClearFrameBuffer(target, new[] { 0.035f, 0.075f, 0.11f, 1f }, true, true);
 
         MultiTextureMeshRef? mesh = scene.MeshRef;
-        if (mesh != null && atlasShader != null)
+        if (mesh != null)
         {
             float aspect = target.Width / (float)Math.Max(1, target.Height);
             Mat4f.Ortho(projection, -zoom * aspect, zoom * aspect, -zoom, zoom, 0.1f, 800f);
@@ -304,28 +308,44 @@ public sealed class ModernAtlasDialog : GuiDialog
                 (float)(scene.CenterZ - centerZ)
             );
 
-            render.GLEnableDepthTest();
-            render.GLDepthMask(true);
-            // Default block meshes can contain double-sided or non-cube faces
-            // and the off-screen projection may invert winding. Match the
-            // official loose-block renderer and do not cull atlas faces.
-            render.GlDisableCullFace();
-            render.GlToggleBlend(false);
-            render.CurrentActiveShader?.Stop();
+            if (atlasShader != null)
+            {
+                render.GLEnableDepthTest();
+                render.GLDepthMask(true);
+                // Default block meshes can contain double-sided or non-cube faces
+                // and the off-screen projection may invert winding. Match the
+                // official loose-block renderer and do not cull atlas faces.
+                render.GlDisableCullFace();
+                render.GlToggleBlend(false);
+                render.CurrentActiveShader?.Stop();
 
-            IShaderProgram shader = atlasShader;
-            shader.Use();
-            shader.UniformMatrix("projectionMatrix", projection);
-            shader.UniformMatrix("viewMatrix", view);
-            shader.UniformMatrix("modelMatrix", model);
-            shader.Uniform("sunDirection", capi.World.Calendar.SunPositionNormalized);
-            shader.Uniform("dayLight", Math.Clamp(capi.World.Calendar.DayLightStrength, 0, 1));
-            shader.Uniform("moonLight", Math.Clamp(capi.World.Calendar.MoonLightStrength, 0, 1));
-            render.RenderMultiTextureMesh(mesh, "tex");
-            shader.Stop();
+                IShaderProgram shader = atlasShader;
+                shader.Use();
+                shader.UniformMatrix("projectionMatrix", projection);
+                shader.UniformMatrix("viewMatrix", view);
+                shader.UniformMatrix("modelMatrix", model);
+                render.RenderMultiTextureMesh(mesh, "tex");
+                shader.Stop();
 
-            render.GLDepthMask(false);
-            render.GLDisableDepthTest();
+                render.GLDepthMask(false);
+                render.GLDisableDepthTest();
+            }
+
+            // Preserve the portable block image underneath the 1.22.6 engine
+            // pass. Some graphics configurations accept the chunk draw call
+            // but do not expose its deferred color attachment to this FBO.
+            // Clearing depth only lets exact chunk pixels replace the fallback
+            // without ever turning the atlas into an empty blue frame.
+            render.ClearFrameBuffer(target, TransparentBlack, true, false);
+            exactChunkRenderer?.Render(
+                0,
+                projection,
+                centerX,
+                scene.WorldVerticalCenter,
+                centerZ,
+                yaw,
+                pitch
+            );
         }
 
         render.CurrentFrameBuffer = previous;

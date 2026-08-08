@@ -44,6 +44,7 @@ public sealed class ModernAtlasScene : IDisposable
     public int CenterX => originX + Radius;
     public int CenterZ => originZ + Radius;
     public float VerticalCenter => (topY - baseY) * 0.38f;
+    public float WorldVerticalCenter => baseY + VerticalCenter;
     public MultiTextureMeshRef? MeshRef => meshRef;
 
     public ModernAtlasScene(ICoreClientAPI capi)
