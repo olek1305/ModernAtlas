@@ -37,6 +37,10 @@ public sealed class ModernAtlasSystem : ModSystem
         stableLiquidShader = api.Shader.NewShaderProgram();
         stableLiquidShader.AssetDomain = "modernatlas";
         api.Shader.RegisterFileShaderProgram("atlasliquid", stableLiquidShader);
+        if (!stableLiquidShader.Compile())
+        {
+            api.Logger.Error("[ModernAtlas] Failed to compile the stable liquid shader.");
+        }
 
         dialog = new ModernAtlasDialog(api, config, SaveConfig, stableLiquidShader);
 
