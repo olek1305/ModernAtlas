@@ -328,15 +328,13 @@ internal sealed class ExactChunkRendererAdapter
     {
         if (transparentPassDisabled) return;
 
-        bool defaultFramebufferLoaded = false;
         bool framebufferLoaded = false;
         try
         {
             // The opaque atlas has already been blitted to the GUI target.
             // Compose OIT into that target afterwards; a later Primary blit
             // would overwrite the water and make a successful pass invisible.
-            loadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Default });
-            defaultFramebufferLoaded = true;
+            capi.Render.CurrentFrameBuffer = capi.Render.FrameBuffers[(int)EnumFrameBuffer.Default];
             loadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
             framebufferLoaded = true;
             clearFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
@@ -345,8 +343,6 @@ internal sealed class ExactChunkRendererAdapter
             framebufferLoaded = false;
             mergeTransparentRenderPass.Invoke(platform, Array.Empty<object>());
             renderAfterOit.Invoke(chunkRenderer, new object[] { deltaTime });
-            unloadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Default });
-            defaultFramebufferLoaded = false;
 
             if (!loggedTransparentSuccess)
             {
@@ -379,18 +375,6 @@ internal sealed class ExactChunkRendererAdapter
                 {
                     // Preserve the opaque atlas even if framebuffer cleanup is
                     // unavailable after an OIT failure.
-                }
-            }
-            if (defaultFramebufferLoaded)
-            {
-                try
-                {
-                    unloadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Default });
-                }
-                catch
-                {
-                    // The GUI target remains valid even if the framebuffer
-                    // stack cannot be restored after a failed OIT pass.
                 }
             }
         }
