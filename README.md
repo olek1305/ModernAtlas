@@ -10,9 +10,12 @@ public name is deliberately independent from Google trademarks.
 - pauses the game while the atlas is open in singleplayer and never attempts
   to pause a multiplayer server;
 - provides an `Atlas animations` switch: enabled keeps atlas liquids and
-  graphics-enabled waving vegetation moving during a singleplayer pause with
-  a render-only clock, while disabled freezes water, leaves and grass on their
-  current atlas frame; world simulation and native game counters are untouched;
+  graphics-enabled waving vegetation and live clouds moving during a
+  singleplayer pause with a render-only clock, while disabled freezes the
+  atlas animation phase; world simulation and native game counters are untouched;
+- provides a separate `Live clouds` switch and reuses Vintage Story's current
+  volumetric cloud map, weather phase, world coordinates and game time over the
+  atlas depth buffer; it respects the game's own cloud-quality setting;
 - renders the game's completed terrain chunk meshes directly with the official
   world shaders on Vintage Story 1.22.6;
 - renders water and lava as stable, world-aligned block surfaces without
@@ -104,7 +107,7 @@ not bundle any Vintage Story binaries or assets.
 2. More selective exposed-face geometry for terrain, trees, buildings, paths
    and ruins.
 3. Zoom-dependent levels of detail and a larger navigable world area.
-4. Animated cloud overlay and visual polish matching the concept image.
+4. Additional visual polish matching the concept image.
 5. Optional server companion for multiplayer block tiles, respecting
    server map permissions and never revealing unexplored terrain by default.
 

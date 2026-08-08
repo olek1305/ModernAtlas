@@ -24,6 +24,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private readonly ModernAtlasConfig config;
     private readonly Action saveConfig;
     private readonly Func<IShaderProgram?> stableLiquidShaderProvider;
+    private readonly Func<IShaderProgram?> atlasCloudShaderProvider;
 
     private GuiComposer? overlay;
     private LoadedTexture? fogTexture;
@@ -47,6 +48,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private float frozenWaterStillCounter;
     private float frozenWaterFlowCounter;
     private long lastAtlasFrameMilliseconds;
+    private float atlasRealDeltaTime;
 
     private int GameViewDistance
     {
@@ -72,12 +74,14 @@ public sealed class ModernAtlasDialog : GuiDialog
         ICoreClientAPI capi,
         ModernAtlasConfig config,
         Action saveConfig,
-        Func<IShaderProgram?> stableLiquidShaderProvider
+        Func<IShaderProgram?> stableLiquidShaderProvider,
+        Func<IShaderProgram?> atlasCloudShaderProvider
     ) : base(capi)
     {
         this.config = config;
         this.saveConfig = saveConfig;
         this.stableLiquidShaderProvider = stableLiquidShaderProvider;
+        this.atlasCloudShaderProvider = atlasCloudShaderProvider;
         ComposeOverlay();
     }
 
@@ -90,7 +94,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         lastAtlasFrameMilliseconds = capi.ElapsedMilliseconds;
         exactChunkRenderer ??= ExactChunkRendererAdapter.TryCreate(
             capi,
-            stableLiquidShaderProvider
+            stableLiquidShaderProvider,
+            atlasCloudShaderProvider
         );
         centerX = capi.World.Player.Entity.Pos.X;
         centerZ = capi.World.Player.Entity.Pos.Z;
@@ -124,9 +129,10 @@ public sealed class ModernAtlasDialog : GuiDialog
             : "exact renderer unavailable";
         string fogStatus = EffectiveFogEnabled ? "fog on" : "fog off";
         string animationStatus = config.AnimationsEnabled ? "animations on" : "animations paused";
+        string cloudStatus = config.CloudsEnabled ? "clouds on" : "clouds off";
         string multiplayerStatus = capi.IsSinglePlayer ? "singleplayer controls" : "multiplayer safe limits locked";
         string pauseStatus = capi.IsSinglePlayer ? "game paused" : "live server";
-        string status = $"Game view distance {GameViewDistance} blocks • {fogStatus} • {animationStatus} • exterior surface • {pauseStatus} • {multiplayerStatus} • {rendererStatus} • no distant chunk requests";
+        string status = $"Game view distance {GameViewDistance} blocks • {fogStatus} • {animationStatus} • {cloudStatus} • exterior surface • {pauseStatus} • {multiplayerStatus} • {rendererStatus} • no distant chunk requests";
         overlay?.GetDynamicText("status").SetNewText(status);
         overlay?.Render(deltaTime);
     }
@@ -350,6 +356,18 @@ public sealed class ModernAtlasDialog : GuiDialog
                 24,
                 4
             )
+            .AddStaticText(
+                "Live clouds",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(settingsX + 20, 150, 180, 28)
+            )
+            .AddSwitch(
+                OnCloudsToggled,
+                ElementBounds.Fixed(settingsX + 234, 146, 46, 30),
+                "clouds",
+                24,
+                4
+            )
             .Compose();
         SyncSettingsControls();
     }
@@ -394,7 +412,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             windWaveCounter,
             windWaveCounterHighFrequency,
             waterStillCounter,
-            waterFlowCounter
+            waterFlowCounter,
+            config.CloudsEnabled,
+            config.AnimationsEnabled && capi.IsSinglePlayer && capi.IsGamePaused
+                ? atlasRealDeltaTime
+                : 0
         ) == true;
         render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
         return rendered;
@@ -460,12 +482,20 @@ public sealed class ModernAtlasDialog : GuiDialog
         SyncSettingsControls();
     }
 
+    private void OnCloudsToggled(bool enabled)
+    {
+        config.CloudsEnabled = enabled;
+        saveConfig();
+        SyncSettingsControls();
+    }
+
     private void SyncSettingsControls()
     {
         if (overlay == null) return;
         overlay.GetSwitch("fog")?.SetValue(EffectiveFogEnabled);
         overlay.GetSwitch("fog").Enabled = capi.IsSinglePlayer;
         overlay.GetSwitch("animations")?.SetValue(config.AnimationsEnabled);
+        overlay.GetSwitch("clouds")?.SetValue(config.CloudsEnabled);
     }
 
     private void FocusOnExteriorSurface()
@@ -510,6 +540,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             0,
             0.25f
         );
+        atlasRealDeltaTime = realDeltaTime;
         lastAtlasFrameMilliseconds = now;
 
         if (config.AnimationsEnabled && capi.IsSinglePlayer && capi.IsGamePaused)

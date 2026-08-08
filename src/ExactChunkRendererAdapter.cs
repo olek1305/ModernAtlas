@@ -26,6 +26,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private readonly object platform;
     private readonly object beforeOitRenderer;
     private readonly object afterOitRenderer;
+    private readonly VolumetricCloudRendererAdapter? cloudRenderer;
     private readonly Func<IShaderProgram?> stableLiquidShaderProvider;
     private readonly MethodInfo renderOpaque;
     private readonly MethodInfo renderOit;
@@ -60,6 +61,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         object platform,
         object beforeOitRenderer,
         object afterOitRenderer,
+        VolumetricCloudRendererAdapter? cloudRenderer,
         Func<IShaderProgram?> stableLiquidShaderProvider,
         MethodInfo renderOpaque,
         MethodInfo renderOit,
@@ -89,6 +91,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         this.platform = platform;
         this.beforeOitRenderer = beforeOitRenderer;
         this.afterOitRenderer = afterOitRenderer;
+        this.cloudRenderer = cloudRenderer;
         this.stableLiquidShaderProvider = stableLiquidShaderProvider;
         this.renderOpaque = renderOpaque;
         this.renderOit = renderOit;
@@ -114,7 +117,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
 
     public static ExactChunkRendererAdapter? TryCreate(
         ICoreClientAPI capi,
-        Func<IShaderProgram?> stableLiquidShaderProvider
+        Func<IShaderProgram?> stableLiquidShaderProvider,
+        Func<IShaderProgram?> atlasCloudShaderProvider
     )
     {
         if (!GameVersion.ShortGameVersion.StartsWith(SupportedVersion, StringComparison.Ordinal))
@@ -149,6 +153,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 game,
                 "Vintagestory.Client.NoObf.SystemRenderOITLayers+AfterOIT"
             );
+            VolumetricCloudRendererAdapter? cloudRenderer =
+                VolumetricCloudRendererAdapter.TryCreate(capi, game, atlasCloudShaderProvider);
             MethodInfo opaque = renderer.GetType().GetMethod(
                 "RenderOpaque",
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
@@ -241,6 +247,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 platform,
                 beforeOitRenderer,
                 afterOitRenderer,
+                cloudRenderer,
                 stableLiquidShaderProvider,
                 opaque,
                 oit,
@@ -287,7 +294,9 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         float windWaveCounter,
         float windWaveCounterHighFrequency,
         float waterStillCounter,
-        float waterFlowCounter
+        float waterFlowCounter,
+        bool cloudsEnabled,
+        float pausedCloudAnimationDeltaTime
     )
     {
         if (disabled) return false;
@@ -449,7 +458,9 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 view,
                 cameraPosition,
                 waterStillCounter,
-                waterFlowCounter
+                waterFlowCounter,
+                cloudsEnabled,
+                pausedCloudAnimationDeltaTime
             ))
             {
                 blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
@@ -512,6 +523,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
 
     public void Dispose()
     {
+        cloudRenderer?.Dispose();
     }
 
     private bool RenderTransparentChunks(
@@ -520,7 +532,9 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         double[] view,
         Vec3d cameraPosition,
         float waterStillCounter,
-        float waterFlowCounter
+        float waterFlowCounter,
+        bool cloudsEnabled,
+        float pausedCloudAnimationDeltaTime
     )
     {
         if (transparentPassDisabled) return false;
@@ -566,6 +580,10 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             mergeTransparentRenderPass.Invoke(platform, Array.Empty<object>());
             renderAfterOit.Invoke(chunkRenderer, new object[] { deltaTime });
             blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
+            if (cloudsEnabled)
+            {
+                cloudRenderer?.Render(projection, view, pausedCloudAnimationDeltaTime);
+            }
 
             if (!loggedTransparentSuccess)
             {

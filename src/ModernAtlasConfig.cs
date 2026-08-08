@@ -5,4 +5,5 @@ public sealed class ModernAtlasConfig
 {
     public bool FogEnabled { get; set; }
     public bool AnimationsEnabled { get; set; } = true;
+    public bool CloudsEnabled { get; set; } = true;
 }
