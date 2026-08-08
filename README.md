@@ -15,7 +15,8 @@ public name is deliberately independent from Google trademarks.
   atlas animation phase; world simulation and native game counters are untouched;
 - provides a separate `Live clouds` switch and reuses Vintage Story's current
   volumetric cloud map, weather phase, world coordinates and game time over the
-  atlas depth buffer; it respects the game's own cloud-quality setting;
+  atlas depth buffer as a stable 64-block 3D layer with soft cloud-only
+  shadows; it respects the game's own cloud-quality setting;
 - renders the game's completed terrain chunk meshes directly with the official
   world shaders on Vintage Story 1.22.6;
 - renders water and lava as stable, world-aligned block surfaces without

@@ -19,8 +19,9 @@ that time and keep it in its own disposable per-world cache.
 5. Build atlas meshes or raster tiles incrementally outside the render loop.
 6. Upload a bounded number of completed resources per frame.
 7. Draw them with an orthographic camera that supports pan, zoom, rotation and
-   tilt. Draw the game's live clouds afterward as a non-persistent, optional
-   overlay using their current weather phase and world position.
+   tilt. Draw the game's live clouds afterward as a non-persistent, optional,
+   bounded 3D layer with soft independent shadows, using their current weather
+   phase and world position.
 
 ## Visibility policy
 

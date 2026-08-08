@@ -7,11 +7,11 @@ using Vintagestory.API.MathTools;
 namespace ModernAtlas;
 
 /// <summary>
-/// Draws a thin atlas-only projection of the live cloud map prepared by
+/// Draws a bounded atlas-only cloud volume from the live cloud map prepared by
 /// VSEssentials. The normal volumetric renderer can be hundreds of blocks
 /// thick; viewed from the atlas eye that becomes a wall instead of readable
 /// cloud cover. This bridge preserves its X/Z weather pattern and motion while
-/// deliberately flattening only its atlas presentation.
+/// keeping the atlas presentation in a short, stable layer above the world.
 /// </summary>
 internal sealed class VolumetricCloudRendererAdapter : IDisposable
 {
@@ -21,7 +21,6 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
     private readonly object map;
     private readonly Func<IShaderProgram?> shaderProvider;
     private readonly MeshRef quad;
-    private readonly MethodInfo renderCloudMap;
     private readonly MethodInfo tickCloudMap;
     private readonly FieldInfo textureMapField;
     private readonly FieldInfo textureColorField;
@@ -36,7 +35,6 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
         object map,
         Func<IShaderProgram?> shaderProvider,
         MeshRef quad,
-        MethodInfo renderCloudMap,
         MethodInfo tickCloudMap,
         FieldInfo textureMapField,
         FieldInfo textureColorField,
@@ -48,7 +46,6 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
         this.map = map;
         this.shaderProvider = shaderProvider;
         this.quad = quad;
-        this.renderCloudMap = renderCloudMap;
         this.tickCloudMap = tickCloudMap;
         this.textureMapField = textureMapField;
         this.textureColorField = textureColorField;
@@ -74,7 +71,6 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
                 map,
                 shaderProvider,
                 quad,
-                RequireMethod(map.GetType(), "OnRenderFrame", typeof(float), typeof(EnumRenderStage)),
                 RequireMethod(map.GetType(), "CloudTick", typeof(float)),
                 RequireField(map.GetType(), "TextureMap"),
                 RequireField(map.GetType(), "TextureCol"),
@@ -82,7 +78,7 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
                 RequireField(map.GetType(), "CloudTileLength")
             );
             capi.Logger.Notification(
-                "[ModernAtlas] Vintage Story live volumetric cloud map is available for the flattened atlas overlay."
+                "[ModernAtlas] Vintage Story live volumetric cloud map is available for the bounded atlas cloud layer."
             );
             return adapter;
         }
@@ -116,13 +112,14 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
 
         try
         {
-            // During a singleplayer pause only the cloud wind is advanced.
-            // Keeping the map's internal undulation clock fixed avoids the
-            // distracting breathing/pulsing seen from a top-down camera.
+            // During a singleplayer pause only the already generated cloud
+            // map's wind offset is advanced. Regenerating TextureMap here
+            // replaces weather tiles every few seconds, which is perceived as
+            // pixels popping in and out. The native snapshot stays fixed while
+            // its whole shape moves smoothly, with no undulation clock.
             if (pausedAnimationDeltaTime > 0)
             {
                 tickCloudMap.Invoke(map, new object[] { pausedAnimationDeltaTime });
-                renderCloudMap.Invoke(map, new object[] { 0f, EnumRenderStage.Opaque });
             }
 
             int textureMap = (int)(textureMapField.GetValue(map) ?? 0);
@@ -135,7 +132,7 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
             IRenderAPI render = capi.Render;
             FrameBufferRef primary = render.FrameBuffers[(int)EnumFrameBuffer.Primary];
             Vec3d playerCamera = capi.World.Player.Entity.CameraPos;
-            float cloudWorldY = Math.Max(
+            float cloudBaseWorldY = Math.Max(
                 offset.Y + (float)playerCamera.Y,
                 capi.World.BlockAccessor.MapSizeY + 24f
             );
@@ -149,7 +146,8 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
             shader.UniformMatrix("projectionMatrix", projection);
             shader.UniformMatrix("modelViewMatrix", Array.ConvertAll(view, value => (float)value));
             shader.Uniform("cloudOffset", offset);
-            shader.Uniform("cloudPlaneY", cloudWorldY - (float)playerCamera.Y);
+            shader.Uniform("cloudBaseY", cloudBaseWorldY - (float)playerCamera.Y);
+            shader.Uniform("cloudThickness", 64f);
             shader.Uniform("cloudMapWidth", (float)cloudMapWidth);
             shader.Uniform(
                 "depthScale",
@@ -168,7 +166,7 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
             {
                 loggedSuccess = true;
                 capi.Logger.Notification(
-                    "[ModernAtlas] Rendering flattened live cloud cover from the game's native weather map and world coordinates."
+                    "[ModernAtlas] Rendering a bounded 3D cloud layer from the game's native weather map and world coordinates."
                 );
             }
             return true;
