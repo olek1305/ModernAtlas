@@ -6,7 +6,7 @@ game_dir="${VINTAGE_STORY_PATH:-/opt/vintagestory}"
 dotnet_cmd="${DOTNET_CMD:-dotnet}"
 
 if ! command -v "$dotnet_cmd" >/dev/null 2>&1; then
-  local_dotnet="${HOME}/.local/share/guglemap-dotnet/dotnet"
+  local_dotnet="${HOME}/.local/share/modernatlas-dotnet/dotnet"
   if [[ -x "$local_dotnet" ]]; then
     dotnet_cmd="$local_dotnet"
   else
@@ -15,7 +15,7 @@ if ! command -v "$dotnet_cmd" >/dev/null 2>&1; then
   fi
 fi
 
-"$dotnet_cmd" build "$project_dir/VoxelAtlas.csproj" -c Release \
+"$dotnet_cmd" build "$project_dir/ModernAtlas.csproj" -c Release \
   -p:VintageStoryPath="$game_dir"
 "$project_dir/scripts/package.sh"
 exec "$game_dir/Vintagestory" --addModPath "$project_dir/Releases" "$@"

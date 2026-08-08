@@ -5,13 +5,13 @@ using Vintagestory.API.Common;
 using Vintagestory.API.Config;
 using Vintagestory.GameContent;
 
-namespace VoxelAtlas;
+namespace ModernAtlas;
 
 /// <summary>
 /// Registers an additional client-side relief layer with the vanilla map.
 /// The vanilla map remains the owner of exploration data and waypoints.
 /// </summary>
-public sealed class VoxelAtlasSystem : ModSystem
+public sealed class ModernAtlasSystem : ModSystem
 {
     private WorldMapManager? worldMap;
 
@@ -23,15 +23,15 @@ public sealed class VoxelAtlasSystem : ModSystem
         RegisterReliefAfterVanillaTerrain(worldMap);
 
         api.Input.RegisterHotKey(
-            "voxelatlas-open",
-            Lang.Get("voxelatlas:hotkey-open-map"),
+            "modernatlas-open",
+            Lang.Get("modernatlas:hotkey-open-map"),
             GlKeys.G,
             HotkeyType.HelpAndOverlays
         );
-        api.Input.SetHotKeyHandler("voxelatlas-open", OnOpenMap);
+        api.Input.SetHotKeyHandler("modernatlas-open", OnOpenMap);
 
         api.Logger.Notification(
-            "[VoxelAtlas] Registered non-destructive relief layer. Vanilla map data remains unchanged."
+            "[ModernAtlas] Registered non-destructive relief layer. Vanilla map data remains unchanged."
         );
     }
 
@@ -52,7 +52,7 @@ public sealed class VoxelAtlasSystem : ModSystem
             ordered[entry.Key] = entry.Value;
             if (entry.Key == "chunks")
             {
-                ordered["voxelatlasrelief"] = typeof(ReliefMapLayer);
+                ordered["modernatlasrelief"] = typeof(ModernAtlasReliefMapLayer);
             }
         }
 

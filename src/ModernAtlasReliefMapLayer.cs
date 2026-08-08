@@ -8,13 +8,13 @@ using Vintagestory.API.Config;
 using Vintagestory.API.MathTools;
 using Vintagestory.GameContent;
 
-namespace VoxelAtlas;
+namespace ModernAtlas;
 
 /// <summary>
 /// A lightweight hillshade overlay. It reads height maps already available to
 /// the client, so it neither generates unexplored terrain nor writes save data.
 /// </summary>
-public sealed class ReliefMapLayer : MapLayer
+public sealed class ModernAtlasReliefMapLayer : MapLayer
 {
     private const int ChunkSize = GlobalConstants.ChunkSize;
     private const int TileGroupSize = MultiChunkMapComponent.ChunkLen;
@@ -26,12 +26,12 @@ public sealed class ReliefMapLayer : MapLayer
     private readonly HashSet<FastVec2i> requested = new();
     private readonly object requestedLock = new();
 
-    public override string Title => Lang.Get("voxelatlas:map-layer-title");
+    public override string Title => Lang.Get("modernatlas:map-layer-title");
     public override string LayerGroupCode => "terrain";
     public override EnumMapAppSide DataSide => EnumMapAppSide.Client;
     public override bool RequireChunkLoaded => false;
 
-    public ReliefMapLayer(ICoreAPI api, IWorldMapManager mapSink) : base(api, mapSink)
+    public ModernAtlasReliefMapLayer(ICoreAPI api, IWorldMapManager mapSink) : base(api, mapSink)
     {
         clientApi = (ICoreClientAPI)api;
         ZIndex = 2;
@@ -135,7 +135,7 @@ public sealed class ReliefMapLayer : MapLayer
         int localX = GameMath.Mod(blockX, ChunkSize);
         int localZ = GameMath.Mod(blockZ, ChunkSize);
         int height = mapChunk.RainHeightMap[localZ * ChunkSize + localX];
-        hoverText.AppendLine($"VoxelAtlas — {height} m");
+        hoverText.AppendLine($"ModernAtlas — {height} m");
     }
 
     public override void Dispose()

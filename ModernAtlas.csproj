@@ -3,8 +3,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <AssemblyName>VoxelAtlas</AssemblyName>
-    <RootNamespace>VoxelAtlas</RootNamespace>
+    <AssemblyName>ModernAtlas</AssemblyName>
+    <RootNamespace>ModernAtlas</RootNamespace>
     <VintageStoryPath Condition="'$(VintageStoryPath)' == ''">/opt/vintagestory</VintageStoryPath>
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
   </PropertyGroup>

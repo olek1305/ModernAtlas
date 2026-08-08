@@ -1,6 +1,6 @@
 # Legal and attribution notice
 
-VoxelAtlas is an independent community mod for Vintage Story. It is not
+ModernAtlas is an independent community mod for Vintage Story. It is not
 affiliated with, endorsed by, or sponsored by Anego Studios or Google LLC.
 
 - "Vintage Story" is used only to identify compatibility with the game.
