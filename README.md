@@ -42,9 +42,8 @@ public name is deliberately independent from Google trademarks.
 - anchors the atlas camera to the live rain-height surface and keeps a
   20-degree-or-higher tilt range so an underground player does not open a cave
   cutaway instead of the exterior;
-- places a coarse neutral stone shell four blocks below natural terrain and
-  stone skirts at client-data boundaries, hiding caves and unfinished chunk
-  edges while exact loaded geometry is still streaming in;
+- draws only the game's exact loaded chunk geometry and does not generate an
+  artificial textured surface or wall around the atlas radius;
 - forces the unexplored-area mask in multiplayer while using only exact chunk
   data that the server has already sent to the client;
 - works as a client-only mod, so a vanilla multiplayer server does not need it.

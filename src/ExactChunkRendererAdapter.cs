@@ -27,7 +27,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private readonly object beforeOitRenderer;
     private readonly object afterOitRenderer;
     private readonly Func<IShaderProgram?> stableLiquidShaderProvider;
-    private readonly SurfaceShellRenderer surfaceShellRenderer;
     private readonly MethodInfo renderOpaque;
     private readonly MethodInfo renderOit;
     private readonly MethodInfo renderAfterOit;
@@ -62,7 +61,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         object beforeOitRenderer,
         object afterOitRenderer,
         Func<IShaderProgram?> stableLiquidShaderProvider,
-        Func<IShaderProgram?> surfaceShellShaderProvider,
         MethodInfo renderOpaque,
         MethodInfo renderOit,
         MethodInfo renderAfterOit,
@@ -92,7 +90,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         this.beforeOitRenderer = beforeOitRenderer;
         this.afterOitRenderer = afterOitRenderer;
         this.stableLiquidShaderProvider = stableLiquidShaderProvider;
-        surfaceShellRenderer = new SurfaceShellRenderer(capi, surfaceShellShaderProvider);
         this.renderOpaque = renderOpaque;
         this.renderOit = renderOit;
         this.renderAfterOit = renderAfterOit;
@@ -117,8 +114,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
 
     public static ExactChunkRendererAdapter? TryCreate(
         ICoreClientAPI capi,
-        Func<IShaderProgram?> stableLiquidShaderProvider,
-        Func<IShaderProgram?> surfaceShellShaderProvider
+        Func<IShaderProgram?> stableLiquidShaderProvider
     )
     {
         if (!GameVersion.ShortGameVersion.StartsWith(SupportedVersion, StringComparison.Ordinal))
@@ -246,7 +242,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 beforeOitRenderer,
                 afterOitRenderer,
                 stableLiquidShaderProvider,
-                surfaceShellShaderProvider,
                 opaque,
                 oit,
                 afterOit,
@@ -447,14 +442,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             render.PMatrix.Push(projectionDouble);
             projectionPushed = true;
             render.CurrentActiveShader?.Stop();
-            surfaceShellRenderer.Render(
-                projection,
-                view,
-                cameraPosition,
-                centerX,
-                centerZ,
-                viewDistanceBlocks
-            );
             renderOpaque.Invoke(chunkRenderer, new object[] { deltaTime });
             if (!RenderTransparentChunks(
                 deltaTime,
@@ -525,7 +512,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
 
     public void Dispose()
     {
-        surfaceShellRenderer.Dispose();
     }
 
     private bool RenderTransparentChunks(

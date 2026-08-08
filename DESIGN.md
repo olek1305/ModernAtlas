@@ -30,15 +30,11 @@ an underground cutaway. Entities and all transient render systems are never
 queried, which excludes players, mobs, armor, held or dropped items, weapons and
 particles by construction.
 
-The planned strict cave mask is a closed exterior height-field shell extending
-four blocks below each surface column. A single global Y clip is not acceptable:
-it would cut valleys, mountain slopes and building walls at the wrong height.
-
-The live prototype implements a coarse version from the client-available
-`WorldGenTerrainHeightMap`. It sits four blocks below natural ground so exact
-terrain and above-ground structures cover it, and adds neutral stone skirts at
-the available-data boundary. This conceals unfinished chunk sides while the
-game streams and tessellates exact meshes.
+The live prototype does not generate a height-field shell or textured boundary
+wall. It draws only exact client-loaded chunk geometry and uses the existing
+unexplored-area fog where data is unavailable. Any future cave mask must avoid
+inventing visible blocks or cutting valleys, slopes and building walls at a
+single global height.
 
 The atlas does not reuse shadow maps rendered for the normal player camera.
 Those maps do not align with the elevated orthographic atlas eye and produce

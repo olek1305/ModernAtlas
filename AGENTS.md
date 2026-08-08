@@ -59,10 +59,9 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
 - Exact block geometry is available only while chunks are client-loaded.
   Cache useful atlas data as chunks are visited so the 3D atlas fills in over
   time; fall back to vanilla terrain colors/height where exact data is absent.
-- Draw a neutral client-only surface shell four blocks below natural terrain
-  and close its available-data boundary with artificial stone skirts. Exact
-  chunk geometry must cover this fallback where ready; the shell must hide cave
-  cutaways and unfinished mesh edges without requesting missing chunks.
+- Do not generate an artificial textured surface, stone shell or boundary wall
+  around the atlas radius. Draw only client-loaded world geometry; conceal
+  unavailable terrain with the existing fog rather than invented blocks.
 - Fog must conceal terrain that the client is not allowed to know. The clear
   radius is anchored to the player's actual world position; panning or rotating
   the atlas camera must never move or enlarge that revealed area.

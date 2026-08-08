@@ -24,7 +24,6 @@ public sealed class ModernAtlasDialog : GuiDialog
     private readonly ModernAtlasConfig config;
     private readonly Action saveConfig;
     private readonly Func<IShaderProgram?> stableLiquidShaderProvider;
-    private readonly Func<IShaderProgram?> surfaceShellShaderProvider;
 
     private GuiComposer? overlay;
     private LoadedTexture? fogTexture;
@@ -73,14 +72,12 @@ public sealed class ModernAtlasDialog : GuiDialog
         ICoreClientAPI capi,
         ModernAtlasConfig config,
         Action saveConfig,
-        Func<IShaderProgram?> stableLiquidShaderProvider,
-        Func<IShaderProgram?> surfaceShellShaderProvider
+        Func<IShaderProgram?> stableLiquidShaderProvider
     ) : base(capi)
     {
         this.config = config;
         this.saveConfig = saveConfig;
         this.stableLiquidShaderProvider = stableLiquidShaderProvider;
-        this.surfaceShellShaderProvider = surfaceShellShaderProvider;
         ComposeOverlay();
     }
 
@@ -93,8 +90,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         lastAtlasFrameMilliseconds = capi.ElapsedMilliseconds;
         exactChunkRenderer ??= ExactChunkRendererAdapter.TryCreate(
             capi,
-            stableLiquidShaderProvider,
-            surfaceShellShaderProvider
+            stableLiquidShaderProvider
         );
         centerX = capi.World.Player.Entity.Pos.X;
         centerZ = capi.World.Player.Entity.Pos.Z;
