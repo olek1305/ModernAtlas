@@ -93,6 +93,10 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
 - Rebuild the engine's `LiquidDepth` pass with the atlas projection and camera
   before rendering liquid OIT. Reusing the normal gameplay-camera depth buffer
   makes the liquid shader discard water and lava while their shadows remain.
+- Vintage Story 1.22.6 also requires its registered `SystemRenderOITLayers`
+  before/after setup renderers around chunk OIT. Invoke those setup renderers
+  directly; never trigger the global OIT stage because that would also render
+  entities and particles outside the atlas scope.
 - Test with an isolated Vintage Story data directory containing vanilla plus
   ModernAtlas. Do not delete or permanently disable the user's other mods.
 

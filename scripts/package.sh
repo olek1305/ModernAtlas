@@ -3,7 +3,7 @@ set -euo pipefail
 
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 release_dir="$project_dir/Releases"
-package_path="$release_dir/modernatlas_0.5.6.zip"
+package_path="$release_dir/modernatlas_0.5.7.zip"
 
 mkdir -p "$release_dir"
 rm -f "$package_path"

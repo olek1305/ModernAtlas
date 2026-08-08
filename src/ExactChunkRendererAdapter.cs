@@ -24,10 +24,14 @@ internal sealed class ExactChunkRendererAdapter
     private readonly object chunkRenderer;
     private readonly object mainCamera;
     private readonly object platform;
+    private readonly object beforeOitRenderer;
+    private readonly object afterOitRenderer;
     private readonly MethodInfo renderBefore;
     private readonly MethodInfo renderOpaque;
     private readonly MethodInfo renderOit;
     private readonly MethodInfo renderAfterOit;
+    private readonly MethodInfo runBeforeOit;
+    private readonly MethodInfo runAfterOit;
     private readonly MethodInfo clearFramebuffer;
     private readonly MethodInfo loadFramebuffer;
     private readonly MethodInfo unloadFramebuffer;
@@ -47,10 +51,14 @@ internal sealed class ExactChunkRendererAdapter
         object chunkRenderer,
         object mainCamera,
         object platform,
+        object beforeOitRenderer,
+        object afterOitRenderer,
         MethodInfo renderBefore,
         MethodInfo renderOpaque,
         MethodInfo renderOit,
         MethodInfo renderAfterOit,
+        MethodInfo runBeforeOit,
+        MethodInfo runAfterOit,
         MethodInfo clearFramebuffer,
         MethodInfo loadFramebuffer,
         MethodInfo unloadFramebuffer,
@@ -66,10 +74,14 @@ internal sealed class ExactChunkRendererAdapter
         this.chunkRenderer = chunkRenderer;
         this.mainCamera = mainCamera;
         this.platform = platform;
+        this.beforeOitRenderer = beforeOitRenderer;
+        this.afterOitRenderer = afterOitRenderer;
         this.renderBefore = renderBefore;
         this.renderOpaque = renderOpaque;
         this.renderOit = renderOit;
         this.renderAfterOit = renderAfterOit;
+        this.runBeforeOit = runBeforeOit;
+        this.runAfterOit = runAfterOit;
         this.clearFramebuffer = clearFramebuffer;
         this.loadFramebuffer = loadFramebuffer;
         this.unloadFramebuffer = unloadFramebuffer;
@@ -107,6 +119,14 @@ internal sealed class ExactChunkRendererAdapter
             FieldInfo platformField = RequireField(game.GetType(), "Platform");
             object platform = platformField.GetValue(game)
                 ?? throw new InvalidOperationException("Client platform is unavailable.");
+            object beforeOitRenderer = FindRegisteredRenderer(
+                game,
+                "Vintagestory.Client.NoObf.SystemRenderOITLayers+BeforeOIT"
+            );
+            object afterOitRenderer = FindRegisteredRenderer(
+                game,
+                "Vintagestory.Client.NoObf.SystemRenderOITLayers+AfterOIT"
+            );
             MethodInfo before = renderer.GetType().GetMethod(
                 "OnRenderBefore",
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
@@ -135,6 +155,18 @@ internal sealed class ExactChunkRendererAdapter
                 new[] { typeof(float) },
                 null
             ) ?? throw new MissingMethodException(renderer.GetType().FullName, "RenderAfterOIT(float)");
+            MethodInfo runBeforeOit = RequireMethod(
+                beforeOitRenderer.GetType(),
+                "OnRenderFrame",
+                typeof(float),
+                typeof(EnumRenderStage)
+            );
+            MethodInfo runAfterOit = RequireMethod(
+                afterOitRenderer.GetType(),
+                "OnRenderFrame",
+                typeof(float),
+                typeof(EnumRenderStage)
+            );
             MethodInfo clear = platform.GetType().GetMethod(
                 "ClearFrameBuffer",
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
@@ -171,10 +203,14 @@ internal sealed class ExactChunkRendererAdapter
                 renderer,
                 camera,
                 platform,
+                beforeOitRenderer,
+                afterOitRenderer,
                 before,
                 opaque,
                 oit,
                 afterOit,
+                runBeforeOit,
+                runAfterOit,
                 clear,
                 load,
                 unload,
@@ -358,7 +394,19 @@ internal sealed class ExactChunkRendererAdapter
             loadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
             framebufferLoaded = true;
             clearFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
+            // VS 1.22.6 adds layered OIT attachments beyond the legacy
+            // accumulation/reveal buffers. Invoke only the engine's two OIT
+            // setup renderers around chunk liquids; do not trigger the global
+            // render stage, which would also draw entities and particles.
+            runBeforeOit.Invoke(
+                beforeOitRenderer,
+                new object[] { deltaTime, EnumRenderStage.OIT }
+            );
             renderOit.Invoke(chunkRenderer, new object[] { deltaTime });
+            runAfterOit.Invoke(
+                afterOitRenderer,
+                new object[] { deltaTime, EnumRenderStage.OIT }
+            );
             unloadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
             framebufferLoaded = false;
 
@@ -450,6 +498,30 @@ internal sealed class ExactChunkRendererAdapter
             if (field != null) return field;
         }
         throw new MissingFieldException(type.FullName, name);
+    }
+
+    private static object FindRegisteredRenderer(object game, string fullTypeName)
+    {
+        object eventManager = RequireField(game.GetType(), "eventManager").GetValue(game)
+            ?? throw new InvalidOperationException("Client event manager is unavailable.");
+        if (RequireField(eventManager.GetType(), "renderersByStage").GetValue(eventManager)
+            is not IEnumerable stages)
+        {
+            throw new InvalidOperationException("Client render-stage registry is unavailable.");
+        }
+
+        foreach (object? stage in stages)
+        {
+            if (stage is not IEnumerable handlers) continue;
+            foreach (object? handler in handlers)
+            {
+                if (handler == null) continue;
+                object? renderer = RequireField(handler.GetType(), "Renderer").GetValue(handler);
+                if (renderer?.GetType().FullName == fullTypeName) return renderer;
+            }
+        }
+
+        throw new InvalidOperationException($"Required engine renderer {fullTypeName} is unavailable.");
     }
 
     private static MethodInfo RequireMethod(Type type, string name, params Type[] parameterTypes)
