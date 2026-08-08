@@ -28,9 +28,10 @@ that time and keep it in its own disposable per-world cache.
 The capture includes blocks and fluids that contribute to the visible exterior
 of the world. Fully enclosed and subterranean cave geometry may be discarded.
 The default camera follows the client rain-height surface and does not provide
-an underground cutaway. Entities and all transient render systems are never
-queried, which excludes players, mobs, armor, held or dropped items, weapons and
-particles by construction.
+an underground cutaway. Server-authorized 3D models may render already loaded
+players, animals, hostile mobs and NPCs. They are drawn before fog so the fog
+still conceals them. Model renderers and all other transient systems remain
+excluded, including armor, held or dropped items, weapons and particles.
 
 The live prototype does not generate a height-field shell or textured boundary
 wall. It draws only exact client-loaded chunk geometry and uses the existing

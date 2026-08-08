@@ -2,9 +2,10 @@
 
 ## Product goal
 
-ModernAtlas is a client-side Vintage Story 1.22.6 mod that should turn the
-world map into a readable, Google-Earth-like 3D atlas while remaining an
-independent product with its own name and visual identity.
+ModernAtlas is a Vintage Story 1.22.6 mod that should turn the world map into a
+readable, Google-Earth-like 3D atlas while remaining an independent product
+with its own name and visual identity. Rendering is client-side; the optional
+server side owns multiplayer fog and living-entity disclosure policy.
 
 The target view contains terrain relief, mountains, water, block-built
 structures, ruins and trees. It should resemble the approved ModernAtlas
@@ -40,8 +41,11 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
   from the engine's native water counters, preserve authored water alpha, and
   keep lava opaque. Other transparent block materials may continue through the
   engine OIT path.
-- Do not render entities, players, creatures, dropped items, held tools,
-  weapons, armor, particles, damage effects or other transient scene objects.
+- Reuse the game's live animated 3D models for already client-loaded players,
+  animals, hostile mobs and NPCs only when allowed by the server policy. Invoke
+  only the selected entities' renderers inside the atlas world framebuffer;
+  never invoke the global entity render stage or render dropped items,
+  particles, labels, damage effects and other unrelated transient objects.
 - Use a neutral stone material when a block or texture cannot be resolved.
   Never intentionally display the missing-texture question-mark material.
 - Clouds are a separate visual overlay. They must not become cached world
@@ -65,6 +69,10 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
 - Fog must conceal terrain that the client is not allowed to know. The clear
   radius is anchored to the player's actual world position; panning or rotating
   the atlas camera must never move or enlarge that revealed area.
+- Living models must iterate only the client's `LoadedEntities`; never send,
+  request, cache or infer hidden entity positions for the atlas. Render them
+  into the same depth buffer as terrain before fluids and fog so blocks and the
+  disclosure boundary conceal them correctly.
 
 ## Camera and controls
 
@@ -86,6 +94,14 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
   and waving vegetation remain controlled by Vintage Story's graphics settings.
   Multiplayer must not request distant chunks or disclose activity outside data
   already sent by the server.
+- `ModernAtlasServer.json` is authoritative in multiplayer. Its defaults are
+  `FogEnabled: true` and `LivingEntitiesEnabled: false`. Players, animals,
+  hostile mobs and NPCs have independent allow flags after the master entity
+  switch is enabled. A missing server policy channel must use the same safe
+  defaults, and clients must not override them. Client settings may hide all
+  living models or any individual allowed category, but may never enable a
+  category denied by the multiplayer server. Singleplayer uses those client
+  visibility switches without the multiplayer server restriction.
 
 ## Performance and compatibility
 
@@ -135,9 +151,9 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
 - Do not replace the stable liquid shader with the stock `chunkliquid` shader.
   A test of that approach reproduced camera-relative liquid displacement even
   though its animation and transparency matched the normal world more closely.
-- The current confirmed Git baseline is commit `3b2ba29` (`Match native liquid
-  timing and transparency`). Treat changes after it as new work that requires
-  a fresh build and in-game verification.
+- The current confirmed Git baseline is commit `b2932d4` (`Fix atlas camera
+  drag jumps`). Treat changes after it as new work that requires a fresh build
+  and in-game verification.
 
 ## Build and in-game test workflow
 
@@ -161,6 +177,9 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
   Record unrelated failures separately; for example, `immersivelight@0.2.5`
   has produced an intermittent server-side `AccessViolationException` during
   test-world startup.
+- Test both the safe server defaults and a policy with living models enabled.
+  Confirm the generated server JSON, received policy log, per-category filter,
+  fog lock and fallback behavior when the server has no policy channel.
 
 ## Legal and repository rules
 

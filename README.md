@@ -1,7 +1,8 @@
 # ModernAtlas
 
-ModernAtlas is a client-side map enhancement for Vintage Story 1.22.6. Its
-public name is deliberately independent from Google trademarks.
+ModernAtlas is a 3D map enhancement for Vintage Story 1.22.6. Its public name
+is deliberately independent from Google trademarks. The renderer remains
+client-side; an optional server component supplies fog and living-entity policy.
 
 ## Current 0.6.0 prototype
 
@@ -50,20 +51,52 @@ public name is deliberately independent from Google trademarks.
   artificial textured surface or wall around the atlas radius;
 - forces the unexplored-area mask in multiplayer while using only exact chunk
   data that the server has already sent to the client;
-- works as a client-only mod, so a vanilla multiplayer server does not need it.
+- can render the game's live animated 3D models for already client-loaded
+  players, animals, hostile mobs and NPCs only when the server enables them;
+- keeps multiplayer living models off and fog on when the server has no
+  ModernAtlas policy channel, so a vanilla multiplayer server remains safe.
 
-Entities, players, creatures, dropped items, equipment and particles are not
-queried and therefore cannot appear in the scene. The exact renderer is an
+Dropped items, particles, labels and unrelated transient objects are never
+queried. Optional living models iterate only `LoadedEntities`, so the atlas
+does not request or receive hidden entity positions. Models use the same world
+depth buffer as terrain and fluids, so walls and fog conceal them. The renderer is an
 isolated 1.22.6 integration. If it is unavailable, ModernAtlas reports the
 failure instead of displaying substitute block models or invented materials.
-Persistent coverage of previously visited distant terrain is the next cache
-stage.
+Persistent coverage of previously visited distant terrain is the next cache stage.
+
+The atlas settings include a `Living entities` master switch and separate
+`Players`, `Animals`, `Hostile mobs`, and `NPCs` switches. These are normal
+visibility preferences in singleplayer. In multiplayer they may hide a server-
+allowed category but cannot enable one that the server has disabled.
 
 The existing vanilla map database remains in
 `VintagestoryData/Maps/<world-id>.db`. ModernAtlas does not rename, replace,
 convert, purge or delete that database. Older explored areas stay visible via
 the separate vanilla map. ModernAtlas 3D reads only block columns currently
 available to the client and keeps its rendering independent from that database.
+
+## Server policy
+
+When ModernAtlas is installed on a server it creates
+`VintagestoryData/ModConfig/ModernAtlasServer.json`. Defaults are deliberately
+safe: fog is enabled and all living models are disabled by the master switch.
+
+```json
+{
+  "FogEnabled": true,
+  "LivingEntitiesEnabled": false,
+  "ShowPlayers": true,
+  "ShowAnimals": true,
+  "ShowMobs": true,
+  "ShowNpcs": true
+}
+```
+
+Set `LivingEntitiesEnabled` to `true` to opt in. Category flags are then applied
+independently; for example, `ShowNpcs: false` hides only NPCs while the other
+enabled categories remain visible. Restart the server after editing the file.
+Clients cannot override this policy. A server without ModernAtlas is treated as
+fog on and every entity category off.
 
 ## Run on Linux
 
@@ -109,8 +142,8 @@ not bundle any Vintage Story binaries or assets.
    and ruins.
 3. Zoom-dependent levels of detail and a larger navigable world area.
 4. Additional visual polish matching the concept image.
-5. Optional server companion for multiplayer block tiles, respecting
-   server map permissions and never revealing unexplored terrain by default.
+5. Optional server-provided block tiles, respecting server map permissions and
+   never revealing unexplored terrain by default.
 
 See `DESIGN.md` for the renderer and compatibility design. `AGENTS.md` records
 the product goal and safety rules for future Codex sessions.

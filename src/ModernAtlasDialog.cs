@@ -22,6 +22,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     private ExactChunkRendererAdapter? exactChunkRenderer;
     private readonly float[] projection = Mat4f.Create();
     private readonly ModernAtlasConfig config;
+    private readonly ModernAtlasServerPolicy serverPolicy;
+    private readonly ModernAtlasServerPolicy visibleEntityPolicy = new();
     private readonly Action saveConfig;
     private readonly Func<IShaderProgram?> stableLiquidShaderProvider;
     private readonly Func<IShaderProgram?> atlasCloudShaderProvider;
@@ -49,6 +51,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private float frozenWaterFlowCounter;
     private long lastAtlasFrameMilliseconds;
     private float atlasRealDeltaTime;
+    private bool loggedEntityModels;
 
     private int GameViewDistance
     {
@@ -60,8 +63,9 @@ public sealed class ModernAtlasDialog : GuiDialog
                 : DefaultViewDistance;
         }
     }
-    private bool EffectiveFogEnabled => capi.IsSinglePlayer && config.FogEnabled
-        || !capi.IsSinglePlayer;
+    private bool EffectiveFogEnabled => capi.IsSinglePlayer
+        ? config.FogEnabled
+        : serverPolicy.FogEnabled;
 
     public override string ToggleKeyCombinationCode => "modernatlas-open";
     public override EnumDialogType DialogType => EnumDialogType.HUD;
@@ -73,15 +77,18 @@ public sealed class ModernAtlasDialog : GuiDialog
     public ModernAtlasDialog(
         ICoreClientAPI capi,
         ModernAtlasConfig config,
+        ModernAtlasServerPolicy serverPolicy,
         Action saveConfig,
         Func<IShaderProgram?> stableLiquidShaderProvider,
         Func<IShaderProgram?> atlasCloudShaderProvider
     ) : base(capi)
     {
         this.config = config;
+        this.serverPolicy = serverPolicy;
         this.saveConfig = saveConfig;
         this.stableLiquidShaderProvider = stableLiquidShaderProvider;
         this.atlasCloudShaderProvider = atlasCloudShaderProvider;
+        RefreshVisibleEntityPolicy();
         ComposeOverlay();
     }
 
@@ -91,6 +98,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         ResetPointerDrag();
         PauseSingleplayerForAtlas();
         atlasAnimationSeconds = 0;
+        loggedEntityModels = false;
         CaptureAnimationFrame();
         lastAtlasFrameMilliseconds = capi.ElapsedMilliseconds;
         exactChunkRenderer ??= ExactChunkRendererAdapter.TryCreate(
@@ -120,6 +128,14 @@ public sealed class ModernAtlasDialog : GuiDialog
             capi.Logger.Notification("[ModernAtlas] First 3D atlas GUI frame rendered.");
         }
         bool rendered = RenderLiveWorld(deltaTime);
+        if (rendered && !loggedEntityModels && visibleEntityPolicy.AnyEntityModels)
+        {
+            loggedEntityModels = true;
+            capi.Logger.Notification(
+                "[ModernAtlas] Rendered {0} live 3D living entity models from client-loaded entities.",
+                exactChunkRenderer?.LastRenderedEntityCount ?? 0
+            );
+        }
         RenderFogMask();
         capi.Render.GetEngineShader(EnumShaderProgram.Gui).Use();
         capi.Render.GLDepthMask(false);
@@ -131,9 +147,14 @@ public sealed class ModernAtlasDialog : GuiDialog
         string fogStatus = EffectiveFogEnabled ? "fog on" : "fog off";
         string animationStatus = config.AnimationsEnabled ? "animations on" : "animations paused";
         string cloudStatus = config.CloudsEnabled ? "clouds on" : "clouds off";
+        string entityStatus = visibleEntityPolicy.AnyEntityModels
+            ? "living models on"
+            : capi.IsSinglePlayer || serverPolicy.AnyEntityModels
+                ? "living models off"
+                : "living models blocked by server";
         string multiplayerStatus = capi.IsSinglePlayer ? "singleplayer controls" : "multiplayer safe limits locked";
         string pauseStatus = capi.IsSinglePlayer ? "game paused" : "live server";
-        string status = $"Game view distance {GameViewDistance} blocks • {fogStatus} • {animationStatus} • {cloudStatus} • exterior surface • {pauseStatus} • {multiplayerStatus} • {rendererStatus} • no distant chunk requests";
+        string status = $"Game view distance {GameViewDistance} blocks • {fogStatus} • {animationStatus} • {cloudStatus} • {entityStatus} • exterior surface • {pauseStatus} • {multiplayerStatus} • {rendererStatus} • no distant chunk requests";
         overlay?.GetDynamicText("status").SetNewText(status);
         overlay?.Render(deltaTime);
     }
@@ -314,6 +335,13 @@ public sealed class ModernAtlasDialog : GuiDialog
         base.OnGuiClosed();
     }
 
+    public void OnServerPolicyChanged()
+    {
+        RefreshVisibleEntityPolicy();
+        InvalidateFogTexture();
+        SyncSettingsControls();
+    }
+
     public override void Dispose()
     {
         ResumeSingleplayerAfterAtlas();
@@ -390,6 +418,66 @@ public sealed class ModernAtlasDialog : GuiDialog
                 24,
                 4
             )
+            .AddStaticText(
+                "Living entities",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(settingsX + 20, 190, 180, 28)
+            )
+            .AddSwitch(
+                OnLivingEntitiesToggled,
+                ElementBounds.Fixed(settingsX + 234, 186, 46, 30),
+                "entities",
+                24,
+                4
+            )
+            .AddStaticText(
+                "Players",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(settingsX + 40, 230, 160, 28)
+            )
+            .AddSwitch(
+                OnPlayersToggled,
+                ElementBounds.Fixed(settingsX + 234, 226, 46, 30),
+                "players",
+                24,
+                4
+            )
+            .AddStaticText(
+                "Animals",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(settingsX + 40, 270, 160, 28)
+            )
+            .AddSwitch(
+                OnAnimalsToggled,
+                ElementBounds.Fixed(settingsX + 234, 266, 46, 30),
+                "animals",
+                24,
+                4
+            )
+            .AddStaticText(
+                "Hostile mobs",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(settingsX + 40, 310, 160, 28)
+            )
+            .AddSwitch(
+                OnMobsToggled,
+                ElementBounds.Fixed(settingsX + 234, 306, 46, 30),
+                "mobs",
+                24,
+                4
+            )
+            .AddStaticText(
+                "NPCs",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(settingsX + 40, 350, 160, 28)
+            )
+            .AddSwitch(
+                OnNpcsToggled,
+                ElementBounds.Fixed(settingsX + 234, 346, 46, 30),
+                "npcs",
+                24,
+                4
+            )
             .Compose();
         SyncSettingsControls();
     }
@@ -438,7 +526,8 @@ public sealed class ModernAtlasDialog : GuiDialog
             config.CloudsEnabled,
             config.AnimationsEnabled && capi.IsSinglePlayer && capi.IsGamePaused
                 ? atlasRealDeltaTime
-                : 0
+                : 0,
+            visibleEntityPolicy
         ) == true;
         render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
         return rendered;
@@ -511,6 +600,60 @@ public sealed class ModernAtlasDialog : GuiDialog
         SyncSettingsControls();
     }
 
+    private void OnLivingEntitiesToggled(bool enabled)
+    {
+        config.LivingEntitiesEnabled = enabled;
+        SaveEntitySettings();
+    }
+
+    private void OnPlayersToggled(bool enabled)
+    {
+        config.ShowPlayers = enabled;
+        SaveEntitySettings();
+    }
+
+    private void OnAnimalsToggled(bool enabled)
+    {
+        config.ShowAnimals = enabled;
+        SaveEntitySettings();
+    }
+
+    private void OnMobsToggled(bool enabled)
+    {
+        config.ShowMobs = enabled;
+        SaveEntitySettings();
+    }
+
+    private void OnNpcsToggled(bool enabled)
+    {
+        config.ShowNpcs = enabled;
+        SaveEntitySettings();
+    }
+
+    private void SaveEntitySettings()
+    {
+        RefreshVisibleEntityPolicy();
+        saveConfig();
+        SyncSettingsControls();
+    }
+
+    private void RefreshVisibleEntityPolicy()
+    {
+        bool masterEnabled = config.LivingEntitiesEnabled;
+        visibleEntityPolicy.ShowPlayers = masterEnabled
+            && config.ShowPlayers
+            && (capi.IsSinglePlayer || serverPolicy.ShowPlayers);
+        visibleEntityPolicy.ShowAnimals = masterEnabled
+            && config.ShowAnimals
+            && (capi.IsSinglePlayer || serverPolicy.ShowAnimals);
+        visibleEntityPolicy.ShowMobs = masterEnabled
+            && config.ShowMobs
+            && (capi.IsSinglePlayer || serverPolicy.ShowMobs);
+        visibleEntityPolicy.ShowNpcs = masterEnabled
+            && config.ShowNpcs
+            && (capi.IsSinglePlayer || serverPolicy.ShowNpcs);
+    }
+
     private void SyncSettingsControls()
     {
         if (overlay == null) return;
@@ -518,6 +661,20 @@ public sealed class ModernAtlasDialog : GuiDialog
         overlay.GetSwitch("fog").Enabled = capi.IsSinglePlayer;
         overlay.GetSwitch("animations")?.SetValue(config.AnimationsEnabled);
         overlay.GetSwitch("clouds")?.SetValue(config.CloudsEnabled);
+        bool serverAllowsAny = capi.IsSinglePlayer || serverPolicy.AnyEntityModels;
+        overlay.GetSwitch("entities")?.SetValue(config.LivingEntitiesEnabled && serverAllowsAny);
+        overlay.GetSwitch("entities").Enabled = serverAllowsAny;
+        SyncEntityCategorySwitch("players", config.ShowPlayers, serverPolicy.ShowPlayers);
+        SyncEntityCategorySwitch("animals", config.ShowAnimals, serverPolicy.ShowAnimals);
+        SyncEntityCategorySwitch("mobs", config.ShowMobs, serverPolicy.ShowMobs);
+        SyncEntityCategorySwitch("npcs", config.ShowNpcs, serverPolicy.ShowNpcs);
+    }
+
+    private void SyncEntityCategorySwitch(string key, bool clientEnabled, bool serverEnabled)
+    {
+        bool categoryAllowed = capi.IsSinglePlayer || serverEnabled;
+        overlay?.GetSwitch(key)?.SetValue(clientEnabled && categoryAllowed);
+        overlay.GetSwitch(key).Enabled = config.LivingEntitiesEnabled && categoryAllowed;
     }
 
     private void FocusOnExteriorSurface()

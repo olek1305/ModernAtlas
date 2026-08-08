@@ -5,9 +5,9 @@
   "authors": [
     "arcylisz"
   ],
-  "description": "Client-side interactive 3D block atlas with pan, 360-degree rotation, tilt and zoom. It reads client-available chunks without replacing or modifying vanilla map or save data.",
+  "description": "Interactive 3D block atlas with live clouds, animated living models and server-controlled fog and entity policy.",
   "version": "0.6.0",
-  "side": "Client",
+  "side": "Universal",
   "requiredOnServer": false,
   "requiredOnClient": false,
   "dependencies": {

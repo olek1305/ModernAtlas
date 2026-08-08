@@ -13,8 +13,9 @@ namespace ModernAtlas;
 /// Vintage Story does not expose its completed terrain GPU meshes through the
 /// public API. This small, version-checked adapter reuses the 1.22.6 terrain
 /// renderer so connected models, mod blocks, biome colors and engine lighting
-/// remain identical to the normal world view. It renders chunk geometry only;
-/// entities and particle renderers are never invoked.
+/// remain identical to the normal world view. The global entity and particle
+/// stages are never invoked; a separate adapter draws only selected living
+/// models that are already loaded and authorized for the atlas.
 /// </summary>
 internal sealed class ExactChunkRendererAdapter : IDisposable
 {
@@ -27,6 +28,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private readonly object beforeOitRenderer;
     private readonly object afterOitRenderer;
     private readonly VolumetricCloudRendererAdapter? cloudRenderer;
+    private readonly AtlasEntityModelRendererAdapter entityModelRenderer;
     private readonly Func<IShaderProgram?> stableLiquidShaderProvider;
     private readonly MethodInfo renderOpaque;
     private readonly MethodInfo renderOit;
@@ -53,6 +55,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private bool loggedSuccess;
     private bool loggedTransparentSuccess;
     private bool loggedStableLiquidDiagnostics;
+
+    public int LastRenderedEntityCount { get; private set; }
 
     private ExactChunkRendererAdapter(
         ICoreClientAPI capi,
@@ -92,6 +96,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         this.beforeOitRenderer = beforeOitRenderer;
         this.afterOitRenderer = afterOitRenderer;
         this.cloudRenderer = cloudRenderer;
+        entityModelRenderer = new AtlasEntityModelRendererAdapter(capi);
         this.stableLiquidShaderProvider = stableLiquidShaderProvider;
         this.renderOpaque = renderOpaque;
         this.renderOit = renderOit;
@@ -296,7 +301,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         float waterStillCounter,
         float waterFlowCounter,
         bool cloudsEnabled,
-        float pausedCloudAnimationDeltaTime
+        float pausedCloudAnimationDeltaTime,
+        ModernAtlasServerPolicy entityPolicy
     )
     {
         if (disabled) return false;
@@ -452,6 +458,14 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             projectionPushed = true;
             render.CurrentActiveShader?.Stop();
             renderOpaque.Invoke(chunkRenderer, new object[] { deltaTime });
+            LastRenderedEntityCount = entityModelRenderer.Render(
+                deltaTime,
+                view,
+                projection,
+                viewDistanceBlocks,
+                entityPolicy,
+                pausedCloudAnimationDeltaTime
+            );
             if (!RenderTransparentChunks(
                 deltaTime,
                 projection,
