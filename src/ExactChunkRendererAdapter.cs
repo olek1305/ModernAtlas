@@ -25,13 +25,20 @@ internal sealed class ExactChunkRendererAdapter
     private readonly object mainCamera;
     private readonly object platform;
     private readonly MethodInfo renderOpaque;
+    private readonly MethodInfo renderOit;
+    private readonly MethodInfo renderAfterOit;
     private readonly MethodInfo clearFramebuffer;
+    private readonly MethodInfo loadFramebuffer;
+    private readonly MethodInfo unloadFramebuffer;
+    private readonly MethodInfo mergeTransparentRenderPass;
     private readonly MethodInfo blitPrimaryToDefault;
     private readonly FieldInfo cameraMatrixOriginField;
     private readonly FieldInfo poolsByRenderPassField;
     private readonly FieldInfo poolFrustumField;
     private bool disabled;
+    private bool transparentPassDisabled;
     private bool loggedSuccess;
+    private bool loggedTransparentSuccess;
 
     private ExactChunkRendererAdapter(
         ICoreClientAPI capi,
@@ -39,7 +46,12 @@ internal sealed class ExactChunkRendererAdapter
         object mainCamera,
         object platform,
         MethodInfo renderOpaque,
+        MethodInfo renderOit,
+        MethodInfo renderAfterOit,
         MethodInfo clearFramebuffer,
+        MethodInfo loadFramebuffer,
+        MethodInfo unloadFramebuffer,
+        MethodInfo mergeTransparentRenderPass,
         MethodInfo blitPrimaryToDefault,
         FieldInfo cameraMatrixOriginField,
         FieldInfo poolsByRenderPassField,
@@ -51,7 +63,12 @@ internal sealed class ExactChunkRendererAdapter
         this.mainCamera = mainCamera;
         this.platform = platform;
         this.renderOpaque = renderOpaque;
+        this.renderOit = renderOit;
+        this.renderAfterOit = renderAfterOit;
         this.clearFramebuffer = clearFramebuffer;
+        this.loadFramebuffer = loadFramebuffer;
+        this.unloadFramebuffer = unloadFramebuffer;
+        this.mergeTransparentRenderPass = mergeTransparentRenderPass;
         this.blitPrimaryToDefault = blitPrimaryToDefault;
         this.cameraMatrixOriginField = cameraMatrixOriginField;
         this.poolsByRenderPassField = poolsByRenderPassField;
@@ -91,6 +108,20 @@ internal sealed class ExactChunkRendererAdapter
                 new[] { typeof(float) },
                 null
             ) ?? throw new MissingMethodException(renderer.GetType().FullName, "RenderOpaque(float)");
+            MethodInfo oit = renderer.GetType().GetMethod(
+                "RenderOIT",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                null,
+                new[] { typeof(float) },
+                null
+            ) ?? throw new MissingMethodException(renderer.GetType().FullName, "RenderOIT(float)");
+            MethodInfo afterOit = renderer.GetType().GetMethod(
+                "RenderAfterOIT",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                null,
+                new[] { typeof(float) },
+                null
+            ) ?? throw new MissingMethodException(renderer.GetType().FullName, "RenderAfterOIT(float)");
             MethodInfo clear = platform.GetType().GetMethod(
                 "ClearFrameBuffer",
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
@@ -101,6 +132,9 @@ internal sealed class ExactChunkRendererAdapter
                 platform.GetType().FullName,
                 "ClearFrameBuffer(EnumFrameBuffer)"
             );
+            MethodInfo load = RequireMethod(platform.GetType(), "LoadFrameBuffer", typeof(EnumFrameBuffer));
+            MethodInfo unload = RequireMethod(platform.GetType(), "UnloadFrameBuffer", typeof(EnumFrameBuffer));
+            MethodInfo mergeTransparent = RequireMethod(platform.GetType(), "MergeTransparentRenderPass");
             MethodInfo blit = platform.GetType().GetMethod(
                 "BlitPrimaryToDefault",
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
@@ -124,7 +158,12 @@ internal sealed class ExactChunkRendererAdapter
                 camera,
                 platform,
                 opaque,
+                oit,
+                afterOit,
                 clear,
+                load,
+                unload,
+                mergeTransparent,
                 blit,
                 cameraMatrix,
                 pools,
@@ -242,6 +281,7 @@ internal sealed class ExactChunkRendererAdapter
             projectionPushed = true;
             render.CurrentActiveShader?.Stop();
             renderOpaque.Invoke(chunkRenderer, new object[] { deltaTime });
+            RenderTransparentChunks(deltaTime);
             blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
 
             if (!loggedSuccess)
@@ -279,6 +319,58 @@ internal sealed class ExactChunkRendererAdapter
         }
     }
 
+    private void RenderTransparentChunks(float deltaTime)
+    {
+        if (transparentPassDisabled) return;
+
+        bool framebufferLoaded = false;
+        try
+        {
+            loadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
+            framebufferLoaded = true;
+            clearFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
+            renderOit.Invoke(chunkRenderer, new object[] { deltaTime });
+            unloadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
+            framebufferLoaded = false;
+            mergeTransparentRenderPass.Invoke(platform, Array.Empty<object>());
+            renderAfterOit.Invoke(chunkRenderer, new object[] { deltaTime });
+
+            if (!loggedTransparentSuccess)
+            {
+                loggedTransparentSuccess = true;
+                capi.Logger.Notification(
+                    "[ModernAtlas] Rendering animated liquids and transparent chunk materials through the game's OIT pass."
+                );
+            }
+        }
+        catch (Exception exception)
+        {
+            transparentPassDisabled = true;
+            Exception cause = exception is TargetInvocationException { InnerException: not null }
+                ? exception.InnerException
+                : exception;
+            capi.Logger.Error(
+                "[ModernAtlas] Liquid and transparent rendering failed and was disabled for this session: {0}",
+                cause.Message
+            );
+        }
+        finally
+        {
+            if (framebufferLoaded)
+            {
+                try
+                {
+                    unloadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
+                }
+                catch
+                {
+                    // Preserve the opaque atlas even if framebuffer cleanup is
+                    // unavailable after an OIT failure.
+                }
+            }
+        }
+    }
+
     private void ReplacePoolFrustums(
         FrustumCulling atlasFrustum,
         List<(object Pool, object? Frustum)> changedPools
@@ -311,5 +403,16 @@ internal sealed class ExactChunkRendererAdapter
             if (field != null) return field;
         }
         throw new MissingFieldException(type.FullName, name);
+    }
+
+    private static MethodInfo RequireMethod(Type type, string name, params Type[] parameterTypes)
+    {
+        return type.GetMethod(
+            name,
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            null,
+            parameterTypes,
+            null
+        ) ?? throw new MissingMethodException(type.FullName, name);
     }
 }

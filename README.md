@@ -3,12 +3,14 @@
 ModernAtlas is a client-side map enhancement for Vintage Story 1.22.6. Its
 public name is deliberately independent from Google trademarks.
 
-## Current 0.4.7 prototype
+## Current 0.4.8 prototype
 
 - keeps the vanilla map, discovered areas and waypoints intact;
 - opens a separate full-screen 3D atlas with `G` (rebindable in Controls);
 - renders the game's completed terrain chunk meshes directly with the official
   world shaders on Vintage Story 1.22.6;
+- renders water, lava and transparent chunk materials through the engine's OIT
+  framebuffer and composition pass;
 - supports left-drag panning, right-drag 360-degree rotation and tilt, mouse
   wheel zoom, keyboard navigation and middle-click reset;
 - uses the same runtime texture atlases, connected chunk geometry, biome color
