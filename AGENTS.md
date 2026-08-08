@@ -109,6 +109,47 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
 - Test with an isolated Vintage Story data directory containing vanilla plus
   ModernAtlas. Do not delete or permanently disable the user's other mods.
 
+## Current verified baseline
+
+- The working public version remains `0.5.9`. Do not change the version number
+  unless the project owner explicitly requests it. Package-content changes may
+  continue under this version during the current test cycle.
+- The verified liquid implementation uses completed liquid chunk meshes and a
+  dedicated stable shader. Water and lava must remain anchored to their block
+  coordinates when the atlas camera pans, rotates or tilts.
+- Read `WaterStillCounter` and `WaterFlowCounter` from Vintage Story's live
+  shader uniforms. Do not advance a separate ModernAtlas liquid clock. Preserve
+  the water texture's authored alpha and keep lava opaque.
+- Do not replace the stable liquid shader with the stock `chunkliquid` shader.
+  A test of that approach reproduced camera-relative liquid displacement even
+  though its animation and transparency matched the normal world more closely.
+- The current confirmed Git baseline is commit `3b2ba29` (`Match native liquid
+  timing and transparency`). Treat changes after it as new work that requires
+  a fresh build and in-game verification.
+
+## Build and in-game test workflow
+
+- For every rendering change, build `ModernAtlas.csproj` in Release mode,
+  create `Releases/modernatlas_0.5.9.zip`, validate the ZIP, and copy that exact
+  archive to the active Vintage Story `Mods` directory. Compare SHA-256 hashes
+  so the release and active archives are demonstrably identical.
+- Close the running game cleanly before replacing or retesting the active mod.
+  Launch Vintage Story again with the user's normal data path, wait for the
+  world to finish loading, open the atlas with `G`, and inspect the new
+  `client-main.log` rather than relying on an older session.
+- Check for ModernAtlas shader compilation failures, disposed shaders, OpenGL
+  errors, exceptions, and the stable-liquid geometry diagnostic. A successful
+  log is necessary but does not prove visual correctness; ask the project owner
+  to confirm camera stability, animation speed and transparency on screen.
+- Vintage Story's unpack cache is keyed by package contents. A new cache suffix
+  after replacing the ZIP proves the new package was read; do not delete world
+  saves or the vanilla map database to force an update.
+- The user's other mods may remain installed. If one prevents a focused test,
+  it may be disabled temporarily only when needed and must never be deleted.
+  Record unrelated failures separately; for example, `immersivelight@0.2.5`
+  has produced an intermittent server-side `AccessViolationException` during
+  test-world startup.
+
 ## Legal and repository rules
 
 - Do not include Google names, logos, map tiles, imagery or other Google
