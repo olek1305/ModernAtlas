@@ -3,7 +3,7 @@
 ModernAtlas is a client-side map enhancement for Vintage Story 1.22.6. Its
 public name is deliberately independent from Google trademarks.
 
-## Current 0.4.4 prototype
+## Current 0.4.5 prototype
 
 - keeps the vanilla map, discovered areas and waypoints intact;
 - opens a separate full-screen 3D atlas with `G` (rebindable in Controls);
@@ -23,6 +23,8 @@ public name is deliberately independent from Google trademarks.
   `Page Up`/`Page Down`, and safe defaults on `Home`;
 - includes a top-right settings panel for radius, unexplored fog, performance
   mode and animation preference;
+- locks multiplayer to a 500-block radius with unexplored fog enabled while
+  preserving separate singleplayer radius and fog preferences;
 - restores the safe 500-block radius after an atlas session that did not close
   cleanly;
 - works as a client-only mod, so a vanilla multiplayer server does not need it.
