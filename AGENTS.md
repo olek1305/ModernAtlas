@@ -41,11 +41,14 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
   from the engine's native water counters, preserve authored water alpha, and
   keep lava opaque. Other transparent block materials may continue through the
   engine OIT path.
-- Reuse the game's live animated 3D models for already client-loaded players,
+- Reuse the game's 3D models and current animation poses for already client-loaded players,
   animals, hostile mobs and NPCs only when allowed by the server policy. Invoke
   only the selected entities' renderers inside the atlas world framebuffer;
   never invoke the global entity render stage or render dropped items,
   particles, labels, damage effects and other unrelated transient objects.
+- Hold each living model on the animation pose present when the atlas opens.
+  Running, walking and gesture poses may remain visible, but the atlas must not
+  advance their skeleton animation while singleplayer is paused.
 - Use a neutral stone material when a block or texture cannot be resolved.
   Never intentionally display the missing-texture question-mark material.
 - Clouds are a separate visual overlay. They must not become cached world

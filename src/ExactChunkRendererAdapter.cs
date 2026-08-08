@@ -463,8 +463,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 view,
                 projection,
                 viewDistanceBlocks,
-                entityPolicy,
-                pausedCloudAnimationDeltaTime
+                entityPolicy
             );
             if (!RenderTransparentChunks(
                 deltaTime,

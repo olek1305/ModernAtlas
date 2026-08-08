@@ -59,7 +59,9 @@ client-side; an optional server component supplies fog and living-entity policy.
 Dropped items, particles, labels and unrelated transient objects are never
 queried. Optional living models iterate only `LoadedEntities`, so the atlas
 does not request or receive hidden entity positions. Models use the same world
-depth buffer as terrain and fluids, so walls and fog conceal them. The renderer is an
+depth buffer as terrain and fluids, so walls and fog conceal them. In paused
+singleplayer they hold the pose captured when the atlas opens instead of
+continuing run, walk or gesture animation. The renderer is an
 isolated 1.22.6 integration. If it is unavailable, ModernAtlas reports the
 failure instead of displaying substitute block models or invented materials.
 Persistent coverage of previously visited distant terrain is the next cache stage.

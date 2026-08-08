@@ -31,23 +31,23 @@ internal sealed class AtlasEntityModelRendererAdapter
         double[] view,
         float[] projection,
         int viewDistanceBlocks,
-        ModernAtlasServerPolicy policy,
-        float pausedAnimationDeltaTime
+        ModernAtlasServerPolicy policy
     )
     {
         if (disabled || !policy.AnyEntityModels) return 0;
 
+        List<RenderEntry>? entries = null;
         try
         {
-            List<RenderEntry> entries = CollectEntries(viewDistanceBlocks, policy);
+            entries = CollectEntries(viewDistanceBlocks, policy);
             if (entries.Count == 0) return 0;
 
             foreach (RenderEntry entry in entries)
             {
-                AdvancePausedAnimation(entry.Entity, pausedAnimationDeltaTime);
                 entry.Renderer.BeforeRender(deltaTime);
                 entry.ForceThirdPerson(capi.World.Player.Entity);
                 entry.Renderer.DoRender3DOpaque(deltaTime, false);
+                entry.UseThirdPersonAnimator(capi.World.Player.Entity);
             }
 
             IRenderAPI render = capi.Render;
@@ -95,10 +95,6 @@ internal sealed class AtlasEntityModelRendererAdapter
             {
                 render.GlPopMatrix();
                 shader.Stop();
-                foreach (RenderEntry entry in entries)
-                {
-                    entry.RestoreRenderMode();
-                }
             }
 
             return entries.Count;
@@ -111,6 +107,16 @@ internal sealed class AtlasEntityModelRendererAdapter
                 exception.Message
             );
             return 0;
+        }
+        finally
+        {
+            if (entries != null)
+            {
+                foreach (RenderEntry entry in entries)
+                {
+                    entry.RestorePlayerState();
+                }
+            }
         }
     }
 
@@ -145,25 +151,6 @@ internal sealed class AtlasEntityModelRendererAdapter
         }
 
         return entries;
-    }
-
-    private static void AdvancePausedAnimation(Entity entity, float deltaTime)
-    {
-        if (deltaTime <= 0 || entity.AnimManager is not AnimationManager animationManager) return;
-
-        bool oldRunWhilePaused = animationManager.RunWhilePaused;
-        bool oldIsRendered = entity.IsRendered;
-        try
-        {
-            animationManager.RunWhilePaused = true;
-            entity.IsRendered = true;
-            animationManager.OnClientFrame(deltaTime);
-        }
-        finally
-        {
-            entity.IsRendered = oldIsRendered;
-            animationManager.RunWhilePaused = oldRunWhilePaused;
-        }
     }
 
     private static EntityKind Classify(Entity entity)
@@ -212,6 +199,8 @@ internal sealed class AtlasEntityModelRendererAdapter
     {
         private FieldInfo? renderModeField;
         private object? savedRenderMode;
+        private EntityPlayer? localPlayer;
+        private bool savedSelfNowShadowPass;
 
         public Entity Entity { get; }
         public EntityRenderer Renderer { get; }
@@ -234,14 +223,31 @@ internal sealed class AtlasEntityModelRendererAdapter
             renderModeField.SetValue(Renderer, thirdPerson);
         }
 
-        public void RestoreRenderMode()
+        public void UseThirdPersonAnimator(Entity localPlayerEntity)
+        {
+            if (Entity != localPlayerEntity || Entity is not EntityPlayer player) return;
+
+            localPlayer = player;
+            savedSelfNowShadowPass = player.selfNowShadowPass;
+            // EntityPlayer.AnimManager returns the third-person manager while
+            // this flag is set. The full third-person mesh must not receive
+            // the first-person arm matrices used by the normal player camera.
+            player.selfNowShadowPass = true;
+        }
+
+        public void RestorePlayerState()
         {
             if (renderModeField != null && savedRenderMode != null)
             {
                 renderModeField.SetValue(Renderer, savedRenderMode);
             }
+            if (localPlayer != null)
+            {
+                localPlayer.selfNowShadowPass = savedSelfNowShadowPass;
+            }
             renderModeField = null;
             savedRenderMode = null;
+            localPlayer = null;
         }
 
         private static FieldInfo? FindField(Type type, string name)
