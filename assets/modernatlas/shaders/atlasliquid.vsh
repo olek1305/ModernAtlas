@@ -21,6 +21,9 @@ void main(void)
 {
     vec4 worldPos = vec4(xyz + origin, 1.0);
     gl_Position = projectionMatrix * modelViewMatrix * worldPos;
+    // Give the liquid surface deterministic depth priority without changing
+    // its world-space height or making it camera-relative.
+    gl_Position.z -= 0.0005 * gl_Position.w;
     uv = uvIn;
     calcColorMapUvs(colormapData, worldPos + vec4(playerpos, 1.0), rgbaLightIn.a, false);
 }

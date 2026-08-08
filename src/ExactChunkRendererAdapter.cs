@@ -46,6 +46,7 @@ internal sealed class ExactChunkRendererAdapter
     private bool transparentPassDisabled;
     private bool loggedSuccess;
     private bool loggedTransparentSuccess;
+    private bool loggedStableLiquidDiagnostics;
 
     private ExactChunkRendererAdapter(
         ICoreClientAPI capi,
@@ -498,7 +499,15 @@ internal sealed class ExactChunkRendererAdapter
         Vec3d cameraPosition
     )
     {
-        if (stableLiquidShader.Disposed) return;
+        if (stableLiquidShader.Disposed)
+        {
+            if (!loggedStableLiquidDiagnostics)
+            {
+                loggedStableLiquidDiagnostics = true;
+                capi.Logger.Error("[ModernAtlas] Stable liquid shader is not loaded.");
+            }
+            return;
+        }
         if (poolsByRenderPassField.GetValue(chunkRenderer)
             is not MeshDataPoolManager[][] passes) return;
         if (textureIdsField.GetValue(chunkRenderer) is not int[] textureIds) return;
@@ -508,6 +517,7 @@ internal sealed class ExactChunkRendererAdapter
         render.GLEnableDepthTest();
         render.GLDepthMask(true);
         render.GlToggleBlend(false, EnumBlendMode.Standard);
+        render.GlDisableCullFace();
 
         stableLiquidShader.Use();
         stableLiquidShader.UniformMatrix("projectionMatrix", projection);
@@ -517,13 +527,40 @@ internal sealed class ExactChunkRendererAdapter
         );
 
         MeshDataPoolManager[] managers = passes[(int)EnumChunkRenderPass.Liquid];
+        long renderedTriangles = 0;
+        long allocatedTriangles = 0;
+        int activeManagers = 0;
         for (int index = 0; index < managers.Length && index < textureIds.Length; index++)
         {
             if (managers[index] == null) continue;
+            activeManagers++;
             stableLiquidShader.BindTexture2D("terrainTex", textureIds[index], 0);
             managers[index].Render(cameraPosition, "origin", EnumFrustumCullMode.CullInstant);
+            long usedVideoMemory = 0;
+            long managerRenderedTriangles = 0;
+            long managerAllocatedTriangles = 0;
+            managers[index].GetStats(
+                ref usedVideoMemory,
+                ref managerRenderedTriangles,
+                ref managerAllocatedTriangles
+            );
+            renderedTriangles += managerRenderedTriangles;
+            allocatedTriangles += managerAllocatedTriangles;
         }
         stableLiquidShader.Stop();
+        render.GlEnableCullFace();
+
+        if (!loggedStableLiquidDiagnostics)
+        {
+            loggedStableLiquidDiagnostics = true;
+            capi.Logger.Notification(
+                "[ModernAtlas] Stable liquid draw: shader pass {0}, {1} atlas managers, {2} rendered triangles, {3} allocated triangles.",
+                stableLiquidShader.PassId,
+                activeManagers,
+                renderedTriangles,
+                allocatedTriangles
+            );
+        }
     }
 
     private void ReplacePoolFrustums(
