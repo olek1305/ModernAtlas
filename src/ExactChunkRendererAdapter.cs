@@ -37,7 +37,6 @@ internal sealed class ExactChunkRendererAdapter
     private readonly MethodInfo unloadFramebuffer;
     private readonly MethodInfo mergeTransparentRenderPass;
     private readonly MethodInfo blitPrimaryToDefault;
-    private readonly FieldInfo offscreenBufferField;
     private readonly FieldInfo cameraMatrixOriginField;
     private readonly FieldInfo poolsByRenderPassField;
     private readonly FieldInfo poolFrustumField;
@@ -64,7 +63,6 @@ internal sealed class ExactChunkRendererAdapter
         MethodInfo unloadFramebuffer,
         MethodInfo mergeTransparentRenderPass,
         MethodInfo blitPrimaryToDefault,
-        FieldInfo offscreenBufferField,
         FieldInfo cameraMatrixOriginField,
         FieldInfo poolsByRenderPassField,
         FieldInfo poolFrustumField
@@ -87,7 +85,6 @@ internal sealed class ExactChunkRendererAdapter
         this.unloadFramebuffer = unloadFramebuffer;
         this.mergeTransparentRenderPass = mergeTransparentRenderPass;
         this.blitPrimaryToDefault = blitPrimaryToDefault;
-        this.offscreenBufferField = offscreenBufferField;
         this.cameraMatrixOriginField = cameraMatrixOriginField;
         this.poolsByRenderPassField = poolsByRenderPassField;
         this.poolFrustumField = poolFrustumField;
@@ -191,7 +188,6 @@ internal sealed class ExactChunkRendererAdapter
                 "BlitPrimaryToDefault()"
             );
             FieldInfo cameraMatrix = RequireField(camera.GetType(), "CameraMatrixOrigin");
-            FieldInfo offscreenBuffer = RequireField(platform.GetType(), "OffscreenBuffer");
             FieldInfo pools = RequireField(renderer.GetType(), "poolsByRenderPass");
             FieldInfo poolFrustum = RequireField(typeof(MeshDataPoolManager), "frustumCuller");
 
@@ -216,7 +212,6 @@ internal sealed class ExactChunkRendererAdapter
                 unload,
                 mergeTransparent,
                 blit,
-                offscreenBuffer,
                 cameraMatrix,
                 pools,
                 poolFrustum
@@ -388,7 +383,6 @@ internal sealed class ExactChunkRendererAdapter
         if (transparentPassDisabled) return false;
 
         bool framebufferLoaded = false;
-        bool? savedOffscreenBuffer = null;
         float savedCameraUnderwater = capi.Render.ShaderUniforms.CameraUnderwater;
         try
         {
@@ -419,16 +413,13 @@ internal sealed class ExactChunkRendererAdapter
             unloadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
             framebufferLoaded = false;
 
-            // Water plants still need Primary's depth buffer. Draw them there,
-            // copy the completed opaque scene to the GUI target, then compose
-            // liquid OIT directly onto that target. During GUI rendering the
-            // engine's regular Primary composition can produce liquid shadows
-            // without the liquid color reaching the window.
+            // Compose at the Primary framebuffer's own resolution before the
+            // final blit. OIT uses texelFetch(gl_FragCoord), so composing it
+            // directly onto a differently sized window target under SSAA
+            // makes fluids slide relative to blocks while the camera pans.
+            mergeTransparentRenderPass.Invoke(platform, Array.Empty<object>());
             renderAfterOit.Invoke(chunkRenderer, new object[] { deltaTime });
             blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
-            savedOffscreenBuffer = (bool)offscreenBufferField.GetValue(platform)!;
-            offscreenBufferField.SetValue(platform, false);
-            mergeTransparentRenderPass.Invoke(platform, Array.Empty<object>());
 
             if (!loggedTransparentSuccess)
             {
@@ -454,10 +445,6 @@ internal sealed class ExactChunkRendererAdapter
         finally
         {
             capi.Render.ShaderUniforms.CameraUnderwater = savedCameraUnderwater;
-            if (savedOffscreenBuffer.HasValue)
-            {
-                offscreenBufferField.SetValue(platform, savedOffscreenBuffer.Value);
-            }
             if (framebufferLoaded)
             {
                 try

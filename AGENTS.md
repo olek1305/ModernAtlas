@@ -101,6 +101,10 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
   depth. The atlas uses an orthographic camera, so bypass that discard only
   during atlas liquid rendering while retaining Primary depth occlusion. Water
   and lava surfaces must remain complete at every supported camera angle.
+- Compose layered OIT into `Primary` at its native framebuffer resolution and
+  only then blit the completed atlas to the window. Direct composition onto the
+  window breaks `texelFetch(gl_FragCoord)` when SSAA changes framebuffer size
+  and makes fluids slide relative to terrain during camera movement.
 - Test with an isolated Vintage Story data directory containing vanilla plus
   ModernAtlas. Do not delete or permanently disable the user's other mods.
 
