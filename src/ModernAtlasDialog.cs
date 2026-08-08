@@ -104,7 +104,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnMouseDown(MouseEvent args)
     {
-        base.OnMouseDown(args);
+        overlay?.OnMouseDown(args);
         if (args.Handled) return;
 
         if (args.Button == EnumMouseButton.Left) leftDragging = true;
@@ -115,7 +115,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnMouseUp(MouseEvent args)
     {
-        base.OnMouseUp(args);
+        overlay?.OnMouseUp(args);
         if (args.Handled) return;
 
         if (args.Button == EnumMouseButton.Left)
@@ -129,7 +129,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnMouseMove(MouseEvent args)
     {
-        base.OnMouseMove(args);
+        overlay?.OnMouseMove(args);
         if (args.Handled) return;
 
         if (rightDragging)
@@ -159,7 +159,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnMouseWheel(MouseWheelEventArgs args)
     {
-        base.OnMouseWheel(args);
+        overlay?.OnMouseWheel(args);
         if (args.IsHandled) return;
 
         float wheel = args.deltaPrecise != 0 ? args.deltaPrecise : args.delta;
@@ -170,6 +170,9 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnKeyDown(KeyEvent args)
     {
+        overlay?.OnKeyDown(args, false);
+        if (args.Handled) return;
+
         if (args.KeyCode == (int)GlKeys.Escape || args.KeyCode == (int)GlKeys.G)
         {
             TryClose();
