@@ -8,7 +8,7 @@ public sealed class ModernAtlasConfig
 {
     public const int DefaultRadius = 500;
     public const int MinimumRadius = 250;
-    public const int MaximumRadius = 5000;
+    public const int MaximumRadius = 25000;
 
     public int RadiusBlocks { get; set; } = DefaultRadius;
     public bool FogEnabled { get; set; } = true;

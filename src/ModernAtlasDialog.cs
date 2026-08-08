@@ -14,7 +14,8 @@ namespace ModernAtlas;
 /// </summary>
 public sealed class ModernAtlasDialog : GuiDialog
 {
-    private static readonly int[] RadiusSteps = { 250, 500, 750, 1000, 1500, 2000, 3000, 5000 };
+    private static readonly int[] RadiusSteps =
+        { 250, 500, 750, 1000, 1500, 2500, 5000, 10000, 15000, 25000 };
 
     private ExactChunkRendererAdapter? exactChunkRenderer;
     private readonly float[] projection = Mat4f.Create();
@@ -36,6 +37,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private int fogTextureHeight;
     private float fogTextureZoom = -1;
     private float fogTexturePitch = -1;
+    private int radiusSafetyGeneration;
 
     private int EffectiveRadius => capi.IsSinglePlayer
         ? config.RadiusBlocks
@@ -68,8 +70,6 @@ public sealed class ModernAtlasDialog : GuiDialog
         centerX = capi.World.Player.Entity.Pos.X;
         centerY = capi.World.Player.Entity.Pos.Y;
         centerZ = capi.World.Player.Entity.Pos.Z;
-        config.AtlasSessionInProgress = true;
-        saveConfig();
         FitLoadedTerrain();
         SyncSettingsControls();
         capi.Logger.Notification("[ModernAtlas] Opened independent 3D atlas GUI.");
@@ -163,7 +163,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (args.IsHandled) return;
 
         float wheel = args.deltaPrecise != 0 ? args.deltaPrecise : args.delta;
-        zoom = Math.Clamp(zoom * MathF.Pow(0.84f, wheel), 8, 6000);
+        zoom = Math.Clamp(zoom * MathF.Pow(0.84f, wheel), 8, 30000);
         InvalidateFogTexture();
         args.SetHandled();
     }
@@ -419,7 +419,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         float horizontalFit = radius / Math.Max(0.5f, aspect);
         float verticalFit = radius * Math.Abs(MathF.Sin(pitch))
             + Math.Min(192, radius * 0.3f) * Math.Abs(MathF.Cos(pitch));
-        zoom = Math.Clamp(Math.Max(horizontalFit, verticalFit) * 1.08f, 80, 6000);
+        zoom = Math.Clamp(Math.Max(horizontalFit, verticalFit) * 1.08f, 80, 30000);
         InvalidateFogTexture();
     }
 
@@ -430,7 +430,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (currentIndex < 0) currentIndex = RadiusSteps.Length - 1;
         int nextIndex = Math.Clamp(currentIndex + direction, 0, RadiusSteps.Length - 1);
         config.RadiusBlocks = RadiusSteps[nextIndex];
-        saveConfig();
+        BeginRadiusSafetyWindow();
         FitLoadedTerrain();
         SyncSettingsControls();
     }
@@ -444,8 +444,21 @@ public sealed class ModernAtlasDialog : GuiDialog
             ModernAtlasConfig.MinimumRadius,
             ModernAtlasConfig.MaximumRadius
         );
-        saveConfig();
+        BeginRadiusSafetyWindow();
         FitLoadedTerrain();
+    }
+
+    private void BeginRadiusSafetyWindow()
+    {
+        config.AtlasSessionInProgress = true;
+        saveConfig();
+        int generation = ++radiusSafetyGeneration;
+        capi.Event.RegisterCallback(_ =>
+        {
+            if (generation != radiusSafetyGeneration) return;
+            config.AtlasSessionInProgress = false;
+            saveConfig();
+        }, 15000);
     }
 
     private void OnFogToggled(bool enabled)
