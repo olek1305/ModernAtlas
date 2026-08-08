@@ -88,6 +88,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     public override void OnGuiOpened()
     {
         base.OnGuiOpened();
+        ResetPointerDrag();
         PauseSingleplayerForAtlas();
         atlasAnimationSeconds = 0;
         CaptureAnimationFrame();
@@ -142,64 +143,84 @@ public sealed class ModernAtlasDialog : GuiDialog
         overlay?.OnMouseDown(args);
         if (args.Handled) return;
 
-        if (args.Button == EnumMouseButton.Left) leftDragging = true;
-        if (args.Button == EnumMouseButton.Right) rightDragging = true;
+        if (args.Button == EnumMouseButton.Left)
+        {
+            leftDragging = true;
+        }
+        if (args.Button == EnumMouseButton.Right)
+        {
+            rightDragging = true;
+        }
         if (args.Button == EnumMouseButton.Middle) ResetView();
         args.Handled = true;
     }
 
     public override void OnMouseUp(MouseEvent args)
     {
-        overlay?.OnMouseUp(args);
-        if (args.Handled) return;
-
-        if (args.Button == EnumMouseButton.Left)
+        // Once a map drag begins, keep ownership of the gesture even if the
+        // pointer crosses the settings panel. Letting the overlay consume the
+        // release leaves the drag latched and the next move jumps the camera.
+        if (args.Button == EnumMouseButton.Left && leftDragging)
         {
             leftDragging = false;
-            MaybeRecenterScene();
             InvalidateFogTexture();
+            args.Handled = true;
+            return;
         }
-        if (args.Button == EnumMouseButton.Right)
+        if (args.Button == EnumMouseButton.Right && rightDragging)
         {
             rightDragging = false;
             InvalidateFogTexture();
+            args.Handled = true;
+            return;
         }
+
+        overlay?.OnMouseUp(args);
+        if (args.Handled) return;
         args.Handled = true;
     }
 
     public override void OnMouseMove(MouseEvent args)
     {
+        if (leftDragging || rightDragging)
+        {
+            // Preserve the engine's relative delta so long pulls are not
+            // truncated at a window edge. Gesture ownership below prevents a
+            // settings control from leaving this relative drag latched.
+            double deltaX = args.DeltaX;
+            double deltaY = args.DeltaY;
+
+            if (rightDragging)
+            {
+                yawDegrees = NormalizeDegrees(yawDegrees + (float)deltaX * 0.42f);
+                pitchDegrees = Math.Clamp(
+                    pitchDegrees - (float)deltaY * 0.32f,
+                    MinimumPitchDegrees,
+                    86
+                );
+                InvalidateFogTexture();
+            }
+
+            if (leftDragging)
+            {
+                double worldPerPixel = zoom * 2.0 / Math.Max(1, capi.Render.FrameHeight);
+                double yaw = yawDegrees * GameMath.DEG2RAD;
+                double rightX = Math.Cos(yaw);
+                double rightZ = -Math.Sin(yaw);
+                double forwardX = Math.Sin(yaw);
+                double forwardZ = Math.Cos(yaw);
+                // Drag the map in the same screen-space direction as the mouse.
+                // The vertical sign must not flip when the camera yaw changes.
+                centerX -= (deltaX * rightX + deltaY * forwardX) * worldPerPixel;
+                centerZ -= (deltaX * rightZ + deltaY * forwardZ) * worldPerPixel;
+                InvalidateFogTexture();
+            }
+
+            args.Handled = true;
+            return;
+        }
+
         overlay?.OnMouseMove(args);
-        if (args.Handled) return;
-
-        if (rightDragging)
-        {
-            yawDegrees = NormalizeDegrees(yawDegrees + args.DeltaX * 0.42f);
-            pitchDegrees = Math.Clamp(
-                pitchDegrees - args.DeltaY * 0.32f,
-                MinimumPitchDegrees,
-                86
-            );
-            InvalidateFogTexture();
-            args.Handled = true;
-        }
-
-        if (leftDragging)
-        {
-            double worldPerPixel = zoom * 2.0 / Math.Max(1, capi.Render.FrameHeight);
-            double yaw = yawDegrees * GameMath.DEG2RAD;
-            double rightX = Math.Cos(yaw);
-            double rightZ = -Math.Sin(yaw);
-            double forwardX = Math.Sin(yaw);
-            double forwardZ = Math.Cos(yaw);
-            // Drag the map in the same screen-space direction as the mouse.
-            // The vertical sign must not flip when the camera yaw changes.
-            centerX -= (args.DeltaX * rightX + args.DeltaY * forwardX) * worldPerPixel;
-            centerZ -= (args.DeltaX * rightZ + args.DeltaY * forwardZ) * worldPerPixel;
-            InvalidateFogTexture();
-            args.Handled = true;
-        }
-
         // The atlas covers the entire screen. Do not leak hover interaction to
         // hotbar slots, creative inventory elements or dialogs underneath it.
         args.Handled = true;
@@ -288,6 +309,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnGuiClosed()
     {
+        ResetPointerDrag();
         ResumeSingleplayerAfterAtlas();
         base.OnGuiClosed();
     }
@@ -438,13 +460,13 @@ public sealed class ModernAtlasDialog : GuiDialog
         centerX += x * amount;
         centerZ += z * amount;
         InvalidateFogTexture();
-        MaybeRecenterScene();
         args.Handled = true;
     }
 
-    private void MaybeRecenterScene()
+    private void ResetPointerDrag()
     {
-        FocusOnExteriorSurface();
+        leftDragging = false;
+        rightDragging = false;
     }
 
     private void FitLoadedTerrain()
