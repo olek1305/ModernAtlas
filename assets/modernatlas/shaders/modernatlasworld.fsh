@@ -28,7 +28,9 @@ void main()
     }
 
     vec2 cell = abs(fract(planePosition) - 0.5);
-    vec2 edgeWidth = max(fwidth(planePosition) * 1.2, vec2(0.002));
+    // One screen pixel centered exactly on each integer block boundary.
+    // Geometry remains one world unit per block at every zoom level.
+    vec2 edgeWidth = max(fwidth(planePosition) * 0.5, vec2(0.0001));
     float blockInterior = smoothstep(0.5 - edgeWidth.x, 0.5, cell.x)
         + smoothstep(0.5 - edgeWidth.y, 0.5, cell.y);
     float gridShade = mix(1.0, 0.78, clamp(blockInterior, 0.0, 1.0));
