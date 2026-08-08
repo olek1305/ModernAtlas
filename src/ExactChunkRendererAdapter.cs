@@ -32,6 +32,7 @@ internal sealed class ExactChunkRendererAdapter
     private readonly MethodInfo unloadFramebuffer;
     private readonly MethodInfo mergeTransparentRenderPass;
     private readonly MethodInfo blitPrimaryToDefault;
+    private readonly FieldInfo offscreenBufferField;
     private readonly FieldInfo cameraMatrixOriginField;
     private readonly FieldInfo poolsByRenderPassField;
     private readonly FieldInfo poolFrustumField;
@@ -53,6 +54,7 @@ internal sealed class ExactChunkRendererAdapter
         MethodInfo unloadFramebuffer,
         MethodInfo mergeTransparentRenderPass,
         MethodInfo blitPrimaryToDefault,
+        FieldInfo offscreenBufferField,
         FieldInfo cameraMatrixOriginField,
         FieldInfo poolsByRenderPassField,
         FieldInfo poolFrustumField
@@ -70,6 +72,7 @@ internal sealed class ExactChunkRendererAdapter
         this.unloadFramebuffer = unloadFramebuffer;
         this.mergeTransparentRenderPass = mergeTransparentRenderPass;
         this.blitPrimaryToDefault = blitPrimaryToDefault;
+        this.offscreenBufferField = offscreenBufferField;
         this.cameraMatrixOriginField = cameraMatrixOriginField;
         this.poolsByRenderPassField = poolsByRenderPassField;
         this.poolFrustumField = poolFrustumField;
@@ -146,6 +149,7 @@ internal sealed class ExactChunkRendererAdapter
                 "BlitPrimaryToDefault()"
             );
             FieldInfo cameraMatrix = RequireField(camera.GetType(), "CameraMatrixOrigin");
+            FieldInfo offscreenBuffer = RequireField(platform.GetType(), "OffscreenBuffer");
             FieldInfo pools = RequireField(renderer.GetType(), "poolsByRenderPass");
             FieldInfo poolFrustum = RequireField(typeof(MeshDataPoolManager), "frustumCuller");
 
@@ -165,6 +169,7 @@ internal sealed class ExactChunkRendererAdapter
                 unload,
                 mergeTransparent,
                 blit,
+                offscreenBuffer,
                 cameraMatrix,
                 pools,
                 poolFrustum
@@ -286,12 +291,10 @@ internal sealed class ExactChunkRendererAdapter
             projectionPushed = true;
             render.CurrentActiveShader?.Stop();
             renderOpaque.Invoke(chunkRenderer, new object[] { deltaTime });
-            RenderTransparentChunks(deltaTime);
-            // OIT composition and the after-OIT pass both target Primary when
-            // Vintage Story uses its off-screen world buffer. Copy only after
-            // those passes, otherwise the default target contains opaque
-            // terrain but cannot contain water, lava or transparent blocks.
-            blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
+            if (!RenderTransparentChunks(deltaTime))
+            {
+                blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
+            }
 
             if (!loggedSuccess)
             {
@@ -328,24 +331,31 @@ internal sealed class ExactChunkRendererAdapter
         }
     }
 
-    private void RenderTransparentChunks(float deltaTime)
+    private bool RenderTransparentChunks(float deltaTime)
     {
-        if (transparentPassDisabled) return;
+        if (transparentPassDisabled) return false;
 
         bool framebufferLoaded = false;
+        bool? savedOffscreenBuffer = null;
         try
         {
-            // The engine's OIT merge selects Primary when off-screen world
-            // rendering is active. The completed Primary buffer is blitted to
-            // the window only after this method returns.
             loadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
             framebufferLoaded = true;
             clearFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
             renderOit.Invoke(chunkRenderer, new object[] { deltaTime });
             unloadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
             framebufferLoaded = false;
-            mergeTransparentRenderPass.Invoke(platform, Array.Empty<object>());
+
+            // Water plants still need Primary's depth buffer. Draw them there,
+            // copy the completed opaque scene to the GUI target, then compose
+            // liquid OIT directly onto that target. During GUI rendering the
+            // engine's regular Primary composition can produce liquid shadows
+            // without the liquid color reaching the window.
             renderAfterOit.Invoke(chunkRenderer, new object[] { deltaTime });
+            blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
+            savedOffscreenBuffer = (bool)offscreenBufferField.GetValue(platform)!;
+            offscreenBufferField.SetValue(platform, false);
+            mergeTransparentRenderPass.Invoke(platform, Array.Empty<object>());
 
             if (!loggedTransparentSuccess)
             {
@@ -354,6 +364,7 @@ internal sealed class ExactChunkRendererAdapter
                     "[ModernAtlas] Rendering animated liquids and transparent chunk materials through the game's OIT pass."
                 );
             }
+            return true;
         }
         catch (Exception exception)
         {
@@ -365,9 +376,14 @@ internal sealed class ExactChunkRendererAdapter
                 "[ModernAtlas] Liquid and transparent rendering failed and was disabled for this session: {0}",
                 cause.Message
             );
+            return false;
         }
         finally
         {
+            if (savedOffscreenBuffer.HasValue)
+            {
+                offscreenBufferField.SetValue(platform, savedOffscreenBuffer.Value);
+            }
             if (framebufferLoaded)
             {
                 try

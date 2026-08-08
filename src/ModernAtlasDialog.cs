@@ -148,8 +148,10 @@ public sealed class ModernAtlasDialog : GuiDialog
             double rightZ = -Math.Sin(yaw);
             double forwardX = Math.Sin(yaw);
             double forwardZ = Math.Cos(yaw);
-            centerX -= (args.DeltaX * rightX - args.DeltaY * forwardX) * worldPerPixel;
-            centerZ -= (args.DeltaX * rightZ - args.DeltaY * forwardZ) * worldPerPixel;
+            // Drag the map in the same screen-space direction as the mouse.
+            // The vertical sign must not flip when the camera yaw changes.
+            centerX -= (args.DeltaX * rightX + args.DeltaY * forwardX) * worldPerPixel;
+            centerZ -= (args.DeltaX * rightZ + args.DeltaY * forwardZ) * worldPerPixel;
             InvalidateFogTexture();
             args.Handled = true;
         }
