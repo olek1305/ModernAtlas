@@ -252,13 +252,6 @@ public sealed class ModernAtlasDialog : GuiDialog
     private void ComposeOverlay()
     {
         ElementBounds root = ElementBounds.Fill;
-        ElementBounds settingsPanel = ElementBounds.FixedOffseted(
-            EnumDialogArea.RightTop,
-            -20,
-            18,
-            300,
-            230
-        );
         string[] radiusValues = Array.ConvertAll(RadiusSteps, value => value.ToString());
         string[] radiusNames = Array.ConvertAll(
             RadiusSteps,
@@ -286,7 +279,6 @@ public sealed class ModernAtlasDialog : GuiDialog
                 ElementBounds.Fixed(24, 88, 650, 34),
                 "status"
             )
-            .AddShadedDialogBG(settingsPanel, false, 8, 0.72f)
             .AddStaticText(
                 "Atlas settings",
                 CairoFont.WhiteSmallishText().WithFontSize(20),
