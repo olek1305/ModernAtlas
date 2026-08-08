@@ -27,12 +27,14 @@ public sealed class ModernAtlasScene : IDisposable
     private MeshData? buildingMesh;
     private MultiTextureMeshRef? meshRef;
     private Block? fallbackBlock;
+    private TextureAtlasPosition? fallbackTexture;
     private int nextColumn;
     private int blocksAdded;
     private int originX;
     private int originZ;
     private int baseY;
     private int topY;
+    private int missingTexturesReplaced;
 
     public bool IsBuilding => buildingMesh != null;
     public bool IsReady => meshRef != null;
@@ -59,10 +61,15 @@ public sealed class ModernAtlasScene : IDisposable
         originZ = centerZ - Radius;
         nextColumn = 0;
         blocksAdded = 0;
+        missingTexturesReplaced = 0;
         LoadedColumns = 0;
         baseY = int.MaxValue;
         topY = int.MinValue;
         fallbackBlock = capi.World.GetBlock(new AssetLocation("game:rock-granite"));
+        fallbackTexture = fallbackBlock == null
+            ? null
+            : capi.BlockTextureAtlas.GetPosition(fallbackBlock, "up", true)
+                ?? capi.BlockTextureAtlas.GetPosition(fallbackBlock, "all", true);
 
         CaptureColumnHeights();
         if (baseY == int.MaxValue)
@@ -233,7 +240,7 @@ public sealed class ModernAtlasScene : IDisposable
     {
         if (buildingMesh == null) return;
 
-        if (TryAddDoorMesh(block, worldX, worldY, worldZ, x, y, z))
+        if (TryAddBlockEntityMesh(block, worldX, worldY, worldZ, x, y, z))
         {
             blocksAdded++;
             return;
@@ -253,6 +260,7 @@ public sealed class ModernAtlasScene : IDisposable
                 source = capi.TesselatorManager.GetDefaultBlockMesh(fallbackBlock);
             }
             if (source.VerticesCount == 0) return;
+            source = ReplaceUnknownTextures(source);
 
             int firstVertex = buildingMesh.VerticesCount;
             buildingMesh.AddMeshData(source, x, y, z);
@@ -271,6 +279,7 @@ public sealed class ModernAtlasScene : IDisposable
             try
             {
                 MeshData fallback = capi.TesselatorManager.GetDefaultBlockMesh(fallbackBlock);
+                fallback = ReplaceUnknownTextures(fallback);
                 buildingMesh.AddMeshData(fallback, x, y, z);
                 blocksAdded++;
             }
@@ -284,7 +293,7 @@ public sealed class ModernAtlasScene : IDisposable
         }
     }
 
-    private bool TryAddDoorMesh(
+    private bool TryAddBlockEntityMesh(
         Block block,
         int worldX,
         int worldY,
@@ -294,20 +303,23 @@ public sealed class ModernAtlasScene : IDisposable
         float z
     )
     {
-        if (buildingMesh == null || !IsDoorBlock(block)) return false;
+        if (buildingMesh == null) return false;
 
         BlockPos position = new(worldX, worldY, worldZ);
         BlockEntity? blockEntity = capi.World.BlockAccessor.GetBlockEntity(position);
-        if (blockEntity == null) return false;
+        if (blockEntity == null || IsContentDisplayBlockEntity(blockEntity)) return false;
 
         try
         {
             AtlasMeshCollector collector = new();
-            blockEntity.OnTesselation(collector, capi.Tesselator);
+            bool replacesDefaultMesh = blockEntity.OnTesselation(collector, capi.Tesselator);
+            if (!replacesDefaultMesh) return false;
+
             MeshData captured = collector.Mesh.VerticesCount > 0
                 ? collector.Mesh
                 : FindPreparedDoorMesh(blockEntity) ?? collector.Mesh;
             if (captured.VerticesCount == 0) return false;
+            captured = ReplaceUnknownTextures(captured);
 
             int firstVertex = buildingMesh.VerticesCount;
             buildingMesh.AddMeshData(captured, x, y, z);
@@ -317,7 +329,7 @@ public sealed class ModernAtlasScene : IDisposable
         catch (Exception exception)
         {
             capi.Logger.Debug(
-                "[ModernAtlas] Could not capture door mesh at {0}, {1}, {2}: {3}",
+                "[ModernAtlas] Could not capture block-entity mesh at {0}, {1}, {2}: {3}",
                 worldX,
                 worldY,
                 worldZ,
@@ -325,6 +337,18 @@ public sealed class ModernAtlasScene : IDisposable
             );
             return false;
         }
+    }
+
+    private static bool IsContentDisplayBlockEntity(BlockEntity blockEntity)
+    {
+        string typeName = blockEntity.GetType().Name;
+        return typeName.Contains("GroundStorage", StringComparison.OrdinalIgnoreCase)
+            || typeName.Contains("Display", StringComparison.OrdinalIgnoreCase)
+            || typeName.Contains("Toolrack", StringComparison.OrdinalIgnoreCase)
+            || typeName.Contains("ToolRack", StringComparison.OrdinalIgnoreCase)
+            || typeName.Contains("Shelf", StringComparison.OrdinalIgnoreCase)
+            || typeName.Contains("ArmorStand", StringComparison.OrdinalIgnoreCase)
+            || typeName.Contains("ItemFrame", StringComparison.OrdinalIgnoreCase);
     }
 
     private static MeshData? FindPreparedDoorMesh(BlockEntity blockEntity)
@@ -359,6 +383,81 @@ public sealed class ModernAtlasScene : IDisposable
             if (behavior.GetType().Name.Contains("Door", StringComparison.OrdinalIgnoreCase)) return true;
         }
         return false;
+    }
+
+    private MeshData ReplaceUnknownTextures(MeshData source)
+    {
+        TextureAtlasPosition unknown = capi.BlockTextureAtlas.UnknownTexturePosition;
+        TextureAtlasPosition? replacement = fallbackTexture;
+        if (replacement == null
+            || source.TextureIndicesCount == 0
+            || source.VerticesPerFace <= 0) return source;
+
+        int faceCount = Math.Min(
+            source.TextureIndicesCount,
+            source.VerticesCount / source.VerticesPerFace
+        );
+        MeshData? repaired = null;
+
+        for (int face = 0; face < faceCount; face++)
+        {
+            int firstVertex = face * source.VerticesPerFace;
+            int lastVertex = firstVertex + source.VerticesPerFace;
+            bool allUnknown = true;
+            for (int vertex = firstVertex; vertex < lastVertex; vertex++)
+            {
+                int uvIndex = vertex * 2;
+                if (!unknown.ContainsUV(source.Uv[uvIndex], source.Uv[uvIndex + 1]))
+                {
+                    allUnknown = false;
+                    break;
+                }
+            }
+            if (!allUnknown) continue;
+
+            repaired ??= source.Clone();
+            for (int vertex = firstVertex; vertex < lastVertex; vertex++)
+            {
+                int uvIndex = vertex * 2;
+                repaired.Uv[uvIndex] = RemapTextureCoordinate(
+                    source.Uv[uvIndex],
+                    unknown.x1,
+                    unknown.x2,
+                    replacement.x1,
+                    replacement.x2
+                );
+                repaired.Uv[uvIndex + 1] = RemapTextureCoordinate(
+                    source.Uv[uvIndex + 1],
+                    unknown.y1,
+                    unknown.y2,
+                    replacement.y1,
+                    replacement.y2
+                );
+            }
+
+            int textureIndex = repaired.TextureIndices[face];
+            if (textureIndex < repaired.TextureIds.Length)
+            {
+                repaired.TextureIds[textureIndex] = replacement.atlasTextureId;
+            }
+            missingTexturesReplaced++;
+        }
+
+        return repaired ?? source;
+    }
+
+    private static float RemapTextureCoordinate(
+        float value,
+        float sourceStart,
+        float sourceEnd,
+        float targetStart,
+        float targetEnd
+    )
+    {
+        float sourceSize = sourceEnd - sourceStart;
+        if (Math.Abs(sourceSize) < 0.000001f) return targetStart;
+        float amount = (value - sourceStart) / sourceSize;
+        return targetStart + amount * (targetEnd - targetStart);
     }
 
     private void ApplyWorldColor(
@@ -448,7 +547,7 @@ public sealed class ModernAtlasScene : IDisposable
         completed.CustomShorts = null;
         meshRef = capi.Render.UploadMultiTextureMesh(completed);
         capi.Logger.Notification(
-            "[ModernAtlas] 3D scene ready: {0} exterior blocks, {1} vertices ({2} raw opaque), bounds ({3:0.0}, {4:0.0}, {5:0.0}) to ({6:0.0}, {7:0.0}, {8:0.0}).",
+            "[ModernAtlas] 3D scene ready: {0} exterior blocks, {1} vertices ({2} raw opaque), bounds ({3:0.0}, {4:0.0}, {5:0.0}) to ({6:0.0}, {7:0.0}, {8:0.0}); {9} missing material faces replaced with stone.",
             blocksAdded,
             completed.VerticesCount,
             nonTransparentVertices,
@@ -457,7 +556,8 @@ public sealed class ModernAtlasScene : IDisposable
             minZ,
             maxX,
             maxY,
-            maxZ
+            maxZ,
+            missingTexturesReplaced
         );
     }
 

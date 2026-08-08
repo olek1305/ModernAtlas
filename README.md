@@ -3,7 +3,7 @@
 ModernAtlas is a client-side map enhancement for Vintage Story 1.22.6. Its
 public name is deliberately independent from Google trademarks.
 
-## Current 0.3.5 prototype
+## Current 0.3.6 prototype
 
 - keeps the vanilla map, discovered areas and waypoints intact;
 - opens a separate full-screen 3D atlas with `G` (rebindable in Controls);
@@ -12,6 +12,12 @@ public name is deliberately independent from Google trademarks.
   wheel zoom, keyboard navigation and middle-click reset;
 - uses registered block meshes and the runtime texture atlas, including blocks
   supplied by other mods;
+- uses structural block-entity tessellation for stateful containers and doors
+  while excluding item-display storage, racks and shelves;
+- applies position-specific climate and seasonal colors plus live sun and moon
+  lighting, with the visual grid fixed to exact one-block boundaries;
+- replaces unresolved material faces with granite instead of the unknown
+  question-mark texture;
 - does not generate unexplored chunks and does not write to a save file;
 - works as a client-only mod, so a vanilla multiplayer server does not need it.
 

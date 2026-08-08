@@ -3,6 +3,9 @@
 layout(location = 0) out vec4 outColor;
 
 uniform sampler2D tex;
+uniform vec3 sunDirection;
+uniform float dayLight;
+uniform float moonLight;
 
 in vec2 uv;
 in vec4 color;
@@ -15,8 +18,13 @@ void main()
 
     vec3 normal = normalize(cross(dFdx(worldPosition), dFdy(worldPosition)));
     if (normal.y < 0.0) normal = -normal;
-    vec3 sunDirection = normalize(vec3(-0.45, 1.0, 0.3));
-    float light = 0.64 + 0.36 * max(dot(normal, sunDirection), 0.0);
+    vec3 liveSunDirection = normalize(sunDirection);
+    float diffuse = max(dot(normal, liveSunDirection), 0.0);
+    float light = clamp(
+        0.20 + 0.68 * dayLight + 0.12 * diffuse * dayLight + 0.15 * moonLight,
+        0.20,
+        1.0
+    );
 
     vec2 planePosition;
     if (abs(normal.y) > abs(normal.x) && abs(normal.y) > abs(normal.z)) {
@@ -33,6 +41,6 @@ void main()
     vec2 edgeWidth = max(fwidth(planePosition) * 0.5, vec2(0.0001));
     float blockInterior = smoothstep(0.5 - edgeWidth.x, 0.5, cell.x)
         + smoothstep(0.5 - edgeWidth.y, 0.5, cell.y);
-    float gridShade = mix(1.0, 0.78, clamp(blockInterior, 0.0, 1.0));
+    float gridShade = mix(1.0, 0.88, clamp(blockInterior, 0.0, 1.0));
     outColor.rgb *= light * gridShade;
 }

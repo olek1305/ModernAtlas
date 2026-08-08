@@ -318,6 +318,9 @@ public sealed class ModernAtlasDialog : GuiDialog
             shader.UniformMatrix("projectionMatrix", projection);
             shader.UniformMatrix("viewMatrix", view);
             shader.UniformMatrix("modelMatrix", model);
+            shader.Uniform("sunDirection", capi.World.Calendar.SunPositionNormalized);
+            shader.Uniform("dayLight", Math.Clamp(capi.World.Calendar.DayLightStrength, 0, 1));
+            shader.Uniform("moonLight", Math.Clamp(capi.World.Calendar.MoonLightStrength, 0, 1));
             render.RenderMultiTextureMesh(mesh, "tex");
             shader.Stop();
 
