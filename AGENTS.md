@@ -193,6 +193,8 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
 - Keep original ModernAtlas code under the repository's MIT license.
 - Use `apply_patch` for hand-written source changes, run a Release build, test
   the release archive and keep Git commits focused.
+- Prefix every Git commit subject with an appropriate Conventional Commits
+  type such as `fix:`, `feat:`, `docs:`, `refactor:`, `test:` or `build:`.
 
 ## Delivery phases
 
