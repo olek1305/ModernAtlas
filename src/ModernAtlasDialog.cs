@@ -27,11 +27,15 @@ public sealed class ModernAtlasDialog : GuiDialog
     private readonly Action saveConfig;
     private readonly Func<IShaderProgram?> stableLiquidShaderProvider;
     private readonly Func<IShaderProgram?> atlasCloudShaderProvider;
+    private readonly Func<IShaderProgram?> atlasOpacityShaderProvider;
+    private readonly AtlasSurfaceCache surfaceCache;
+    private readonly System.Func<int, bool> clearCache;
 
     private GuiComposer? overlay;
     private GuiComposer? settingsModal;
     private bool settingsModalOpen;
     private LoadedTexture? fogTexture;
+    private MeshRef? opacityQuad;
     private bool leftDragging;
     private bool rightDragging;
     private double centerX;
@@ -76,13 +80,16 @@ public sealed class ModernAtlasDialog : GuiDialog
     public override bool PrefersUngrabbedMouse => true;
     public override bool DisableMouseGrab => true;
 
-    public ModernAtlasDialog(
+    internal ModernAtlasDialog(
         ICoreClientAPI capi,
         ModernAtlasConfig config,
         ModernAtlasServerPolicy serverPolicy,
         Action saveConfig,
         Func<IShaderProgram?> stableLiquidShaderProvider,
-        Func<IShaderProgram?> atlasCloudShaderProvider
+        Func<IShaderProgram?> atlasCloudShaderProvider,
+        Func<IShaderProgram?> atlasOpacityShaderProvider,
+        AtlasSurfaceCache surfaceCache,
+        System.Func<int, bool> clearCache
     ) : base(capi)
     {
         this.config = config;
@@ -90,6 +97,9 @@ public sealed class ModernAtlasDialog : GuiDialog
         this.saveConfig = saveConfig;
         this.stableLiquidShaderProvider = stableLiquidShaderProvider;
         this.atlasCloudShaderProvider = atlasCloudShaderProvider;
+        this.atlasOpacityShaderProvider = atlasOpacityShaderProvider;
+        this.surfaceCache = surfaceCache;
+        this.clearCache = clearCache;
         RefreshVisibleEntityPolicy();
         ComposeOverlay();
     }
@@ -107,7 +117,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         exactChunkRenderer ??= ExactChunkRendererAdapter.TryCreate(
             capi,
             stableLiquidShaderProvider,
-            atlasCloudShaderProvider
+            atlasCloudShaderProvider,
+            surfaceCache
         );
         centerX = capi.World.Player.Entity.Pos.X;
         centerZ = capi.World.Player.Entity.Pos.Z;
@@ -140,6 +151,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             );
         }
         RenderFogMask();
+        ForceOpaqueWindowAlpha();
         capi.Render.GetEngineShader(EnumShaderProgram.Gui).Use();
         capi.Render.GLDepthMask(false);
         capi.Render.GLDisableDepthTest();
@@ -157,11 +169,12 @@ public sealed class ModernAtlasDialog : GuiDialog
                 : "living models blocked by server";
         string multiplayerStatus = capi.IsSinglePlayer ? "singleplayer controls" : "multiplayer safe limits locked";
         string pauseStatus = capi.IsSinglePlayer ? "game paused" : "live server";
-        string status = $"Game view distance {GameViewDistance} blocks • {fogStatus} • {animationStatus} • {cloudStatus} • {entityStatus} • exterior surface • {pauseStatus} • {multiplayerStatus} • {rendererStatus} • no distant chunk requests";
+        string status = $"Game view distance {GameViewDistance} blocks • {surfaceCache.Status} • {fogStatus} • {animationStatus} • {cloudStatus} • {entityStatus} • exterior surface • {pauseStatus} • {multiplayerStatus} • {rendererStatus} • no distant chunk requests";
         overlay?.GetDynamicText("status").SetNewText(status);
         overlay?.Render(deltaTime);
         if (settingsModalOpen)
         {
+            settingsModal?.GetDynamicText("cache-status")?.SetNewText(surfaceCache.Status);
             settingsModal?.Render(deltaTime);
         }
     }
@@ -333,6 +346,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             InvalidateFogTexture();
             args.Handled = true;
         }
+        else if (args.KeyCode == (int)GlKeys.Space)
+        {
+            CenterOnPlayer();
+            args.Handled = true;
+        }
         else if (args.KeyCode == (int)GlKeys.M)
         {
             if (!capi.IsSinglePlayer)
@@ -388,6 +406,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         exactChunkRenderer = null;
         fogTexture?.Dispose();
         fogTexture = null;
+        opacityQuad?.Dispose();
+        opacityQuad = null;
         overlay?.Dispose();
         overlay = null;
         settingsModal?.Dispose();
@@ -426,9 +446,9 @@ public sealed class ModernAtlasDialog : GuiDialog
             )
             .Compose();
 
-        ElementBounds modalRoot = ElementBounds.Fixed(0, 0, 340, 470)
+        ElementBounds modalRoot = ElementBounds.Fixed(0, 0, 340, 500)
             .WithAlignment(EnumDialogArea.CenterMiddle);
-        ElementBounds modalBackground = ElementBounds.Fixed(0, 0, 340, 470);
+        ElementBounds modalBackground = ElementBounds.Fixed(0, 0, 340, 500);
         settingsModal = capi.Gui.CreateCompo("modernatlas-settings", modalRoot)
             .AddShadedDialogBG(modalBackground, true)
             .AddStaticText(
@@ -539,6 +559,24 @@ public sealed class ModernAtlasDialog : GuiDialog
                 24,
                 4
             )
+            .AddStaticText(
+                "Map cache",
+                CairoFont.WhiteSmallishText(),
+                ElementBounds.Fixed(20, 392, 180, 28)
+            )
+            .AddDynamicText(
+                "",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(20, 421, 300, 28),
+                "cache-status"
+            )
+            .AddButton(
+                "Clear cache",
+                () => clearCache(GameViewDistance),
+                ElementBounds.Fixed(20, 450, 140, 34),
+                EnumButtonStyle.Normal,
+                "cache-clear"
+            )
             .Compose();
         SyncSettingsControls();
     }
@@ -610,13 +648,19 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private void ResetView()
     {
+        CenterOnPlayer();
+        yawDegrees = 42;
+        pitchDegrees = 72;
+        FitLoadedTerrain();
+    }
+
+    private void CenterOnPlayer()
+    {
         centerX = capi.World.Player.Entity.Pos.X;
         centerZ = capi.World.Player.Entity.Pos.Z;
         centerY = capi.World.Player.Entity.Pos.Y;
         FocusOnExteriorSurface();
-        yawDegrees = 42;
-        pitchDegrees = 72;
-        FitLoadedTerrain();
+        InvalidateFogTexture();
     }
 
     private void Pan(double x, double z, float amount, KeyEvent args)
@@ -732,6 +776,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private void SyncSettingsControls()
     {
         if (settingsModal == null) return;
+        settingsModal.GetDynamicText("cache-status")?.SetNewText(surfaceCache.Status);
         settingsModal.GetSwitch("fog")?.SetValue(EffectiveFogEnabled);
         settingsModal.GetSwitch("fog").Enabled = capi.IsSinglePlayer;
         settingsModal.GetSwitch("animations")?.SetValue(config.AnimationsEnabled);
@@ -838,6 +883,31 @@ public sealed class ModernAtlasDialog : GuiDialog
             capi.Render.GLDisableDepthTest();
             capi.Render.GlToggleBlend(true, EnumBlendMode.Standard);
             capi.Render.Render2DTexture(fogTexture.TextureId, 0, 0, frameWidth, frameHeight, 40);
+        }
+    }
+
+    private void ForceOpaqueWindowAlpha()
+    {
+        IShaderProgram? shader = atlasOpacityShaderProvider();
+        if (shader == null || shader.Disposed) return;
+
+        opacityQuad ??= capi.Render.UploadMesh(QuadMeshUtil.GetQuad());
+        IRenderAPI render = capi.Render;
+        render.CurrentFrameBuffer = null;
+        render.CurrentActiveShader?.Stop();
+        render.GLDisableDepthTest();
+        render.GLDepthMask(false);
+        render.GlToggleBlend(false, EnumBlendMode.Standard);
+        render.GlColorMask(false, false, false, true);
+        try
+        {
+            shader.Use();
+            render.RenderMesh(opacityQuad);
+            shader.Stop();
+        }
+        finally
+        {
+            render.GlColorMask(true, true, true, true);
         }
     }
 
