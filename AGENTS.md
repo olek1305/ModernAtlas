@@ -15,6 +15,11 @@ cover.
 The atlas is a dedicated full-screen 3D GUI opened with `G`; it is not a skin
 for the vanilla blue 2D map. `G` and `Escape` must both close it.
 
+ModernAtlas work is judged by the atlas view. Do not expand a map task into
+changes to ordinary world rendering unless ModernAtlas failed to restore state
+that it changed. Native world-camera haze, shadows or horizon color are outside
+the product scope when the atlas itself is correct.
+
 ## Project language
 
 - Use English only in source code, comments, documentation, filenames, logs,
@@ -30,7 +35,9 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
 - Render terrain, buildings, ruins, vegetation and fluids when they are made
   from blocks.
 - Preserve the game's live material appearance: texture-atlas coordinates,
-  biome tint, sunlight, shadows and connected or multipart block geometry.
+  biome tint, directional daylight and connected or multipart block geometry.
+  Do not sample the normal camera's shadow map from the atlas camera; it causes
+  severe frame loss and square shadow boundaries.
 - Keep atlas exposure neutral and stable. Player-local underwater, lava, fog
   sphere, night vision, perception, held-light and world-warp effects must not
   change atlas brightness, tint or haze. Restore every engine uniform after the
@@ -51,6 +58,11 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
   advance their skeleton animation while singleplayer is paused.
 - Use a neutral stone material when a block or texture cannot be resolved.
   Never intentionally display the missing-texture question-mark material.
+- Conceal atlas-only cave cutouts and entrances with a subdued neutral-gray
+  occlusion treatment so the empty framebuffer cannot shine through and draw
+  attention to hidden underground space. This treatment may cover a clipped
+  opening, but must not create world blocks, a terrain shell or persistent
+  geometry.
 - Clouds are a separate visual overlay. They must not become cached world
   geometry and must not disclose unexplored terrain.
 
@@ -60,12 +72,14 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
   database.
 - Read only world/chunk data already available to the client. Never request or
   generate unexplored terrain solely for the atlas.
-- Store persistent rendered tiles or meshes in a ModernAtlas-owned cache with
-  the world identity in its path. A cache failure must not damage a world.
 - Existing vanilla exploration, waypoints and maps must remain usable.
-- Exact block geometry is available only while chunks are client-loaded.
-  Cache useful atlas data as chunks are visited so the 3D atlas fills in over
-  time; fall back to vanilla terrain colors/height where exact data is absent.
+- Exact block geometry is available only while chunks are client-loaded. Draw
+  those completed meshes directly and conceal unavailable terrain with fog.
+- Do not create, load, render or maintain a persistent ModernAtlas terrain
+  cache. The former colored-relief cache and its Clear Cache UI were removed
+  because stale or incomplete tiles produced black terrain and excessive work.
+  Existing old ModernAtlas cache files are inert and must not be deleted
+  automatically.
 - Do not generate an artificial textured surface, stone shell or boundary wall
   around the atlas radius. Draw only client-loaded world geometry; conceal
   unavailable terrain with the existing fog rather than invented blocks.
@@ -85,8 +99,46 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
   vertical mouse motion stays vertical regardless of camera yaw. Do not map a
   downward drag to an unexpected compass direction.
 - Right-drag rotates and tilts the camera. Middle-click resets the view.
+- Survival-safe atlas views retain a useful tilt range. In singleplayer
+  Creative or explicitly accepted Cheat Mode, allow the pitch to reach a
+  horizontal zero-degree floor. Never let the camera rotate below the atlas
+  ground plane or invert through negative pitch; clamp or collide at the floor.
+- Smoothly interpolate pan, rotation, tilt and wheel zoom using real render
+  time so controls continue to animate while singleplayer is paused. Keep fog
+  texture uploads throttled while the camera is moving.
 - Keep atlas GUI controls clickable and prevent atlas input from leaking into
   the hotbar, inventories or dialogs underneath it.
+- Draw the full-screen atlas after ordinary mod HUD dialogs so class HUDs,
+  clocks and other overlays cannot cover the map.
+
+## Atlas inspection, search and layers
+
+- In singleplayer Creative or explicitly accepted Cheat Mode, clicking a
+  rendered living model may open an atlas unit frame. Show the loaded entity's
+  name or player nickname, current and maximum health, category and other
+  useful public details. The panel must not advance animation or reveal an
+  entity that the atlas was not already allowed to draw.
+- Add an atlas search UI for loaded blocks and, where disclosure permits,
+  loaded players, animals, hostile mobs, NPCs and dropped-item matches. A query
+  such as `chicken` should highlight matching visible results with an outline or
+  restrained emissive marker that remains readable at long atlas distances.
+  Search must be incremental, budgeted and limited to client-loaded data; it
+  must never request chunks or infer hidden positions.
+- Dropped items remain absent from the ordinary atlas render. A search result
+  may represent an already loaded dropped item only in singleplayer Creative
+  or accepted Cheat Mode, using a lightweight marker rather than invoking the
+  global item/entity render stage. Multiplayer never enables dropped-item
+  search without a future explicit server policy.
+- Add selectable atlas data layers where live loaded data supports them,
+  including soil fertility, moisture/rainfall, temperature and other useful
+  climate or land properties. Ore heatmaps and similarly revealing layers are
+  restricted to singleplayer Creative or accepted Cheat Mode. Layers must be
+  visually distinguishable, reversible and must not overwrite the textured 3D
+  base map or persist a terrain cache.
+- Expose the useful ambient/developer controls formerly reached through the
+  `~` editor from the atlas Settings UI. Clearly label them as developer visual
+  controls, scope them to the atlas framebuffer and restore all engine state
+  after every atlas draw.
 
 ## View distance and multiplayer rules
 
@@ -108,11 +160,10 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
 
 ## Performance and compatibility
 
-- Build chunk snapshots on the main thread only when required by the API;
-  perform expensive mesh/raster work off-thread using immutable snapshots.
 - Apply strict per-frame and per-tick budgets. Opening the atlas must not cause
   a large synchronous scan or visible gameplay freeze.
-- Invalidate cached atlas chunks after block changes and rebuild them lazily.
+- Do not register terrain-cache tick listeners or scan chunks for atlas-owned
+  fallback data. Rendering should consume the game's already completed meshes.
 - Prefer public Vintage Story APIs. Isolate any unavoidable game-content API
   integration behind a small adapter and document why it is needed.
 - For Vintage Story 1.22.6, exact live chunk rendering is isolated in
@@ -134,10 +185,13 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
   and makes fluids slide relative to terrain during camera movement.
 - Test with an isolated Vintage Story data directory containing vanilla plus
   ModernAtlas. Do not delete or permanently disable the user's other mods.
+- World-leave and client shutdown are required lifecycle tests. Dispose dialogs,
+  textures, shaders, callbacks and Harmony patches idempotently; leaving a
+  world after opening or closing the atlas must never crash the client.
 
 ## Current verified baseline
 
-- The working public version remains `0.6.0`. Do not change the version number
+- The working public version remains `0.6.1`. Do not change the version number
   unless the project owner explicitly requests it. Package-content changes may
   continue under this version during the current test cycle.
 - The verified liquid implementation uses completed liquid chunk meshes and a
@@ -154,20 +208,36 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
 - Do not replace the stable liquid shader with the stock `chunkliquid` shader.
   A test of that approach reproduced camera-relative liquid displacement even
   though its animation and transparency matched the normal world more closely.
-- The current confirmed Git baseline is commit `b2932d4` (`Fix atlas camera
-  drag jumps`). Treat changes after it as new work that requires a fresh build
-  and in-game verification.
+- Water exposure follows the selected live or fixed sun state so water does
+  not remain bright blue against dark terrain at night. Lava stays emissive.
+- The atlas disables `DropShadowIntensity` only for its own draw. Reusing the
+  game's perspective-camera shadow map caused square shadows and roughly one
+  frame per second. The engine value is restored after atlas draw.
+- The atlas uses smooth target-camera interpolation and draws at GUI order
+  `0.98` so ordinary third-party HUDs remain behind the full-screen map.
+- Persistent ModernAtlas terrain cache code, shaders and Settings controls are
+  removed. The atlas renders only current exact chunk meshes.
+- The current code checkpoint is commit `d5f0b94` (`fix: stabilize exact atlas
+  surface rendering`), packaged by `6a5b07f` (`build: package ModernAtlas
+  0.6.1`). It restores complete loaded terrain and liquids, hides underground
+  geometry with a transient surface-height texture, and disables the normal
+  sky-horizon tint only during atlas terrain rendering.
 
 ## Build and in-game test workflow
 
 - For every rendering change, build `ModernAtlas.csproj` in Release mode,
-  create `Releases/modernatlas_0.6.0.zip`, validate the ZIP, and copy that exact
+  create `Releases/modernatlas_0.6.1.zip`, validate the ZIP, and copy that exact
   archive to the active Vintage Story `Mods` directory. Compare SHA-256 hashes
   so the release and active archives are demonstrably identical.
 - Close the running game cleanly before replacing or retesting the active mod.
   Launch Vintage Story again with the user's normal data path, wait for the
   world to finish loading, open the atlas with `G`, and inspect the new
   `client-main.log` rather than relying on an older session.
+- Maintain an opt-in automated atlas smoke-test path that can launch the client,
+  join a named test world, open and close the atlas through ModernAtlas code,
+  capture diagnostics/screenshots and exit cleanly without X11/Wayland key
+  injection. It must be disabled during normal play and must never modify a
+  save, generate terrain or bypass multiplayer disclosure policy.
 - Check for ModernAtlas shader compilation failures, disposed shaders, OpenGL
   errors, exceptions, and the stable-liquid geometry diagnostic. A successful
   log is necessary but does not prove visual correctness; ask the project owner
@@ -180,6 +250,13 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
   Record unrelated failures separately; for example, `immersivelight@0.2.5`
   has produced an intermittent server-side `AccessViolationException` during
   test-world startup.
+- `ChunkLOD` owns its separate distant-terrain renderer and `ShadowGen`
+  process; neither belongs to ModernAtlas. ModernAtlas must not invoke
+  ChunkLOD's global render stage, alter its configuration, or treat its custom
+  LOD meshes as exact Vintage Story chunk meshes. The current full mod set can
+  emit `OpenGL InvalidOperation` before the atlas opens; do not attribute that
+  error to ModernAtlas without an isolated test. ChunkLOD can overload its
+  streaming queue when configured with an extreme full-LOD range.
 - Test both the safe server defaults and a policy with living models enabled.
   Confirm the generated server JSON, received policy log, per-category filter,
   fog lock and fallback behavior when the server has no policy channel.
@@ -199,7 +276,12 @@ for the vanilla blue 2D map. `G` and `Escape` must both close it.
 ## Delivery phases
 
 1. Preserve the vanilla map and add terrain relief (prototype complete).
-2. Capture loaded block surfaces into a safe per-world atlas cache.
-3. Render a tilted, navigable 3D block atlas with mod texture support.
-4. Add incremental block-change updates, quality settings and fallback tiles.
-5. Add optional animated clouds and visual polish matching the mock-up.
+2. Render a tilted, navigable 3D block atlas from client-loaded exact meshes
+   with mod texture support (current baseline).
+3. Keep unavailable terrain fogged without persistent fallback tiles.
+4. Fix cave-opening concealment, Creative/Cheat camera pitch and world-leave
+   lifecycle stability.
+5. Add atlas unit inspection, loaded-data search and safe result highlighting.
+6. Add selectable climate, soil and Cheat/Creative ore-analysis layers.
+7. Add atlas-scoped developer visual controls and automated smoke testing.
+8. Continue optional animated clouds and visual polish matching the mock-up.

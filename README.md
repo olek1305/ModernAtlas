@@ -4,7 +4,7 @@ ModernAtlas is a 3D map enhancement for Vintage Story 1.22.6. Its public name
 is deliberately independent from Google trademarks. The renderer remains
 client-side; an optional server component supplies fog and living-entity policy.
 
-## Current 0.6.0 prototype
+## Current 0.6.1 prototype
 
 - keeps the vanilla map, discovered areas and waypoints intact;
 - opens a separate full-screen 3D atlas with `G` (rebindable in Controls);
