@@ -24,6 +24,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private const string VisibilityPatchId = "modernatlas.exactchunkvisibility";
     private const string AtlasFilterMarker = "// MODERNATLAS_SURFACE_AND_BOUNDARY_FILTER";
     private const int CaveFilterTextureUnit = 12;
+    private const int MapLayerTextureUnit = 13;
     private const float VisibleSubsurfaceDepth = 3f;
     private static readonly Vec3f CaveConcealmentColor = new(0.24f, 0.25f, 0.25f);
 
@@ -90,11 +91,15 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private int rejectedLiquidLocationCount;
     private Vec3f atlasSunDirection = new(-0.34f, 0.86f, -0.38f);
     private float atlasExposure = 1f;
+    private Vec3f atlasFogColor = new(0.32f, 0.38f, 0.40f);
+    private float atlasBoundarySoftness = 1f;
+    private float atlasCaveMaskBrightness = 1f;
     private readonly Dictionary<EnumShaderProgram, AtlasFilterShaderState> atlasFilterShaders = new();
     private readonly HashSet<EnumShaderProgram> atlasFilterInjectionFailures = new();
     private bool loggedCaveFilterReady;
     private bool loggedUndergroundSafetyFailure;
     private bool loggedPreparationClearFailure;
+    private bool disposed;
 
     public int LastRenderedEntityCount { get; private set; }
     public IReadOnlyList<AtlasRenderedEntity> LastRenderedEntities =>
@@ -373,6 +378,12 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         bool fogEnabled,
         bool hideUndergroundCaves,
         AtlasSurfaceHeightTexture? surfaceHeightTexture,
+        AtlasMapLayerTexture? mapLayerTexture,
+        float mapLayerOpacity,
+        Vec3f fogColor,
+        float visualExposureMultiplier,
+        float boundarySoftness,
+        float caveMaskBrightness,
         float windWaveCounter,
         float windWaveCounterHighFrequency,
         float waterStillCounter,
@@ -425,6 +436,14 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         long transparentCompletedMilliseconds = renderStartedMilliseconds;
         bool atlasFilterConfigured = false;
 
+        atlasFogColor = new Vec3f(
+            Math.Clamp(fogColor.X, 0f, 1f),
+            Math.Clamp(fogColor.Y, 0f, 1f),
+            Math.Clamp(fogColor.Z, 0f, 1f)
+        );
+        atlasBoundarySoftness = Math.Clamp(boundarySoftness, 0.25f, 2f);
+        atlasCaveMaskBrightness = Math.Clamp(caveMaskBrightness, 0.5f, 1.5f);
+
         try
         {
             // The atlas already has an explicit unexplored-area mask. World
@@ -441,7 +460,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 savedAmbientColor,
                 savedSceneBrightness,
                 savedLightPosition,
-                savedSkyDaylight
+                savedSkyDaylight,
+                visualExposureMultiplier
             );
             shaderUniforms.CameraUnderwater = 0;
             shaderUniforms.FogSphereQuantity = 0;
@@ -473,7 +493,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             // produces no color even though the draw call succeeds.
             FrameBufferRef primaryFramebuffer = render.FrameBuffers[(int)EnumFrameBuffer.Primary];
             float[] atlasBackground = fogEnabled
-                ? new[] { 0.32f, 0.38f, 0.40f, 1f }
+                ? new[] { atlasFogColor.X, atlasFogColor.Y, atlasFogColor.Z, 1f }
                 : new[] { 0.035f, 0.075f, 0.11f, 1f };
             render.ClearFrameBuffer(primaryFramebuffer, atlasBackground, true, true);
 
@@ -555,6 +575,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 if ((hideUndergroundCaves && surfaceHeightTexture?.Ready != true)
                     || !ConfigureAtlasFilters(
                         surfaceHeightTexture,
+                        mapLayerTexture,
+                        mapLayerOpacity,
                         cameraPosition,
                         true,
                         hideUndergroundCaves,
@@ -598,6 +620,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 pausedCloudAnimationDeltaTime,
                 hideUndergroundCaves,
                 surfaceHeightTexture,
+                mapLayerTexture,
+                mapLayerOpacity,
                 fogEnabled,
                 viewDistanceBlocks
             ))
@@ -649,7 +673,16 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             {
                 try
                 {
-                    ConfigureAtlasFilters(null, cameraPosition, false, false, false, 0);
+                    ConfigureAtlasFilters(
+                        null,
+                        null,
+                        0,
+                        cameraPosition,
+                        false,
+                        false,
+                        false,
+                        0
+                    );
                 }
                 catch (Exception exception)
                 {
@@ -700,19 +733,28 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         Vec3f liveAmbientColor,
         float liveSceneBrightness,
         Vec3f liveLightPosition,
-        float liveSkyDaylight
+        float liveSkyDaylight,
+        float visualExposureMultiplier
     )
     {
+        float visualExposure = Math.Clamp(visualExposureMultiplier, 0.5f, 1.5f);
         if (liveLightingEnabled)
         {
-            ambientColorProperty.SetValue(ambient, liveAmbientColor);
-            ambientSceneBrightnessProperty.SetValue(ambient, liveSceneBrightness);
+            ambientColorProperty.SetValue(
+                ambient,
+                ScaleColor(liveAmbientColor, visualExposure)
+            );
+            ambientSceneBrightnessProperty.SetValue(
+                ambient,
+                Math.Clamp(liveSceneBrightness * visualExposure, 0.02f, 1.5f)
+            );
             shaderUniforms.LightPosition3D = liveLightPosition;
             atlasSunDirection = liveLightPosition;
             atlasExposure = Math.Clamp(
-                liveSkyDaylight * Math.Max(0.2f, liveSceneBrightness),
-                0.08f,
-                1f
+                liveSkyDaylight * Math.Max(0.2f, liveSceneBrightness)
+                    * visualExposure,
+                0.04f,
+                1.5f
             );
             return;
         }
@@ -728,26 +770,49 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             MathF.Sin(azimuth) * horizontal
         );
         atlasSunDirection = shaderUniforms.LightPosition3D;
-        atlasExposure = daylight;
+        atlasExposure = Math.Clamp(daylight * visualExposure, 0f, 1.5f);
         ambientColorProperty.SetValue(
             ambient,
-            new Vec3f(
-                0.24f + daylight * 0.66f,
-                0.29f + daylight * 0.61f,
-                0.42f + daylight * 0.48f
+            ScaleColor(
+                new Vec3f(
+                    0.24f + daylight * 0.66f,
+                    0.29f + daylight * 0.61f,
+                    0.42f + daylight * 0.48f
+                ),
+                visualExposure
             )
         );
-        ambientSceneBrightnessProperty.SetValue(ambient, 0.22f + daylight * 0.78f);
+        ambientSceneBrightnessProperty.SetValue(
+            ambient,
+            Math.Clamp((0.22f + daylight * 0.78f) * visualExposure, 0.02f, 1.5f)
+        );
     }
+
+    private static Vec3f ScaleColor(Vec3f color, float scale) => new(
+        Math.Clamp(color.X * scale, 0f, 1.5f),
+        Math.Clamp(color.Y * scale, 0f, 1.5f),
+        Math.Clamp(color.Z * scale, 0f, 1.5f)
+    );
 
     public void Dispose()
     {
-        DisableAndRestoreAtlasFilterSources();
+        if (disposed) return;
+        disposed = true;
+
+        // LeaveWorld is raised after the engine has started clearing its
+        // DefaultShaderUniforms arrays. Activating an engine chunk shader at
+        // that point makes ShaderProgramBase.Use upload a null
+        // colorMapRects[40] array and can crash Mesa inside glUniform4fv.
+        // Every atlas render disables its switches in a finally block.
+        // Teardown therefore restores only managed shader source and Harmony
+        // state; doing shader work from OnGuiClosed would interrupt the
+        // engine's active GUI render pass.
+        RestoreAtlasFilterSources();
         visibilityHarmony.UnpatchAll(VisibilityPatchId);
         cloudRenderer?.Dispose();
     }
 
-    public void RenderSurfacePreparationFrame(bool fogEnabled)
+    public void RenderSurfacePreparationFrame(bool fogEnabled, Vec3f fogColor)
     {
         if (disabled) return;
 
@@ -757,7 +822,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             render.CurrentActiveShader?.Stop();
             FrameBufferRef primaryFramebuffer = render.FrameBuffers[(int)EnumFrameBuffer.Primary];
             float[] atlasBackground = fogEnabled
-                ? new[] { 0.32f, 0.38f, 0.40f, 1f }
+                ? new[] { fogColor.X, fogColor.Y, fogColor.Z, 1f }
                 : new[] { 0.035f, 0.075f, 0.11f, 1f };
             render.ClearFrameBuffer(primaryFramebuffer, atlasBackground, true, true);
             blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
@@ -778,6 +843,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
 
     private bool ConfigureAtlasFilters(
         AtlasSurfaceHeightTexture? surfaceHeightTexture,
+        AtlasMapLayerTexture? mapLayerTexture,
+        float mapLayerOpacity,
         Vec3d cameraPosition,
         bool enabled,
         bool hideUndergroundCaves,
@@ -800,7 +867,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         }
 
         float radius = Math.Max(GlobalConstants.ChunkSize, disclosureRadius);
-        float feather = fogEnabled
+        float baseFeather = fogEnabled
             ? Math.Min(
                 radius * 0.25f,
                 Math.Max(GlobalConstants.ChunkSize * 2f, radius * 0.10f)
@@ -809,9 +876,13 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 radius * 0.25f,
                 Math.Max(GlobalConstants.ChunkSize * 0.5f, radius * 0.03f)
             );
+        float feather = Math.Min(radius * 0.40f, baseFeather * atlasBoundarySoftness);
         Vec3f boundaryColor = fogEnabled
-            ? new Vec3f(0.32f, 0.38f, 0.40f)
+            ? atlasFogColor
             : new Vec3f(0.035f, 0.075f, 0.11f);
+        bool applyMapLayer = mapLayerTexture?.Ready == true
+            && mapLayerTexture.TextureId > 0
+            && mapLayerTexture.Layer != AtlasMapLayer.TexturedTerrain;
 
         try
         {
@@ -825,7 +896,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 {
                     shader.Uniform(
                         "atlasCaveConcealmentColor",
-                        CaveConcealmentColor
+                        ScaleColor(CaveConcealmentColor, atlasCaveMaskBrightness)
                     );
                 }
                 if (hideUndergroundCaves && surfaceHeightTexture != null)
@@ -845,6 +916,31 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                         (float)AtlasSurfaceHeightTexture.HorizontalSampleSize
                     );
                     shader.Uniform("atlasVisibleSubsurfaceDepth", VisibleSubsurfaceDepth);
+                }
+                if (shader.HasUniform("atlasLayerEnabled"))
+                {
+                    shader.Uniform("atlasLayerEnabled", applyMapLayer ? 1 : 0);
+                    if (applyMapLayer && mapLayerTexture != null)
+                    {
+                        shader.BindTexture2D(
+                            "atlasLayerTex",
+                            mapLayerTexture.TextureId,
+                            MapLayerTextureUnit
+                        );
+                        shader.Uniform(
+                            "atlasLayerOriginXZ",
+                            (float)mapLayerTexture.OriginX,
+                            (float)mapLayerTexture.OriginZ
+                        );
+                        shader.Uniform(
+                            "atlasLayerSampleSize",
+                            (float)AtlasMapLayerTexture.HorizontalSampleSize
+                        );
+                        shader.Uniform(
+                            "atlasLayerOpacity",
+                            Math.Clamp(mapLayerOpacity, 0f, 1f)
+                        );
+                    }
                 }
                 shader.Uniform(
                     "atlasWorldOffset",
@@ -955,6 +1051,13 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
 
     private void DisableAtlasFilterUniforms()
     {
+        DefaultShaderUniforms uniforms = capi.Render.ShaderUniforms;
+        if (uniforms.ColorMapRects4 == null
+            || uniforms.ColorMapRects4.Length < 40 * 4)
+        {
+            return;
+        }
+
         foreach (AtlasFilterShaderState state in atlasFilterShaders.Values)
         {
             IShaderProgram shader = state.Shader;
@@ -971,6 +1074,10 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 {
                     shader.Uniform("atlasBoundaryEnabled", 0);
                 }
+                if (shader.HasUniform("atlasLayerEnabled"))
+                {
+                    shader.Uniform("atlasLayerEnabled", 0);
+                }
                 if (shader.HasUniform("atlasDisableHorizonFade"))
                 {
                     shader.Uniform("atlasDisableHorizonFade", 0);
@@ -984,9 +1091,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         }
     }
 
-    private void DisableAndRestoreAtlasFilterSources()
+    private void RestoreAtlasFilterSources()
     {
-        DisableAtlasFilterUniforms();
         foreach (EnumShaderProgram program in AtlasFilterPrograms)
         {
             RestoreAtlasFilterSource(program);
@@ -1050,6 +1156,28 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     }
 """
             : "";
+        string mapLayerCode = supportsBoundaryColor
+            ? """
+    if (atlasLayerEnabled > 0)
+    {
+        vec2 layerPosition =
+            (modernAtlasAbsoluteWorldPosition.xz - atlasLayerOriginXZ)
+            / atlasLayerSampleSize;
+        ivec2 layerDimensions = textureSize(atlasLayerTex, 0);
+        if (all(greaterThanEqual(layerPosition, vec2(0.0)))
+            && all(lessThan(layerPosition, vec2(layerDimensions))))
+        {
+            vec2 layerUv = layerPosition / vec2(layerDimensions);
+            vec4 layerColor = texture(atlasLayerTex, layerUv);
+            outColor.rgb = mix(
+                outColor.rgb,
+                layerColor.rgb,
+                clamp(layerColor.a * atlasLayerOpacity, 0.0, 1.0)
+            );
+        }
+    }
+"""
+            : "";
         string caveFilterCode = supportsBoundaryColor
             ? """
     if (atlasHideCaves > 0
@@ -1086,6 +1214,11 @@ uniform vec2 atlasDisclosureCenterXZ;
 uniform float atlasDisclosureRadius;
 uniform float atlasDisclosureFeather;
 uniform vec3 atlasBoundaryFogColor;
+uniform int atlasLayerEnabled;
+uniform sampler2D atlasLayerTex;
+uniform vec2 atlasLayerOriginXZ;
+uniform float atlasLayerSampleSize;
+uniform float atlasLayerOpacity;
 
 bool modernAtlasReadSurfaceHeight(ivec2 samplePosition, out float surfaceHeight)
 {
@@ -1137,7 +1270,7 @@ void main()
     }
 """ + caveFilterCode + """
     modernAtlasOriginalMain();
-""" + boundaryColorCode + """
+""" + mapLayerCode + boundaryColorCode + """
 }
 """;
     }
@@ -1213,6 +1346,8 @@ void main()
         float pausedCloudAnimationDeltaTime,
         bool hideUndergroundCaves,
         AtlasSurfaceHeightTexture? surfaceHeightTexture,
+        AtlasMapLayerTexture? mapLayerTexture,
+        float mapLayerOpacity,
         bool fogEnabled,
         int disclosureRadius
     )
@@ -1237,6 +1372,8 @@ void main()
             HideLiquidPools(hiddenLiquidPools);
             if (!ConfigureAtlasFilters(
                 surfaceHeightTexture,
+                mapLayerTexture,
+                mapLayerOpacity,
                 cameraPosition,
                 true,
                 hideUndergroundCaves,
@@ -1266,6 +1403,8 @@ void main()
                 waterFlowCounter,
                 hideUndergroundCaves,
                 surfaceHeightTexture,
+                mapLayerTexture,
+                mapLayerOpacity,
                 fogEnabled,
                 disclosureRadius
             );
@@ -1360,6 +1499,8 @@ void main()
         float waterFlowCounter,
         bool hideUndergroundCaves,
         AtlasSurfaceHeightTexture? surfaceHeightTexture,
+        AtlasMapLayerTexture? mapLayerTexture,
+        float mapLayerOpacity,
         bool fogEnabled,
         int disclosureRadius
     )
@@ -1407,7 +1548,7 @@ void main()
             (float)Math.Max(GlobalConstants.ChunkSize, disclosureRadius)
         );
         float radius = Math.Max(GlobalConstants.ChunkSize, disclosureRadius);
-        float boundaryFeather = fogEnabled
+        float baseBoundaryFeather = fogEnabled
             ? Math.Min(
                 radius * 0.25f,
                 Math.Max(GlobalConstants.ChunkSize * 2f, radius * 0.10f)
@@ -1416,11 +1557,15 @@ void main()
                 radius * 0.25f,
                 Math.Max(GlobalConstants.ChunkSize * 0.5f, radius * 0.03f)
             );
+        float boundaryFeather = Math.Min(
+            radius * 0.40f,
+            baseBoundaryFeather * atlasBoundarySoftness
+        );
         activeLiquidShader.Uniform("disclosureFeather", boundaryFeather);
         activeLiquidShader.Uniform(
             "boundaryFogColor",
             fogEnabled
-                ? new Vec3f(0.32f, 0.38f, 0.40f)
+                ? atlasFogColor
                 : new Vec3f(0.035f, 0.075f, 0.11f)
         );
         bool applySurfaceFilter = hideUndergroundCaves
@@ -1444,6 +1589,31 @@ void main()
                 (float)AtlasSurfaceHeightTexture.HorizontalSampleSize
             );
             activeLiquidShader.Uniform("atlasVisibleSubsurfaceDepth", VisibleSubsurfaceDepth);
+        }
+        bool applyMapLayer = mapLayerTexture?.Ready == true
+            && mapLayerTexture.TextureId > 0
+            && mapLayerTexture.Layer != AtlasMapLayer.TexturedTerrain;
+        activeLiquidShader.Uniform("atlasLayerEnabled", applyMapLayer ? 1 : 0);
+        if (applyMapLayer && mapLayerTexture != null)
+        {
+            activeLiquidShader.BindTexture2D(
+                "atlasLayerTex",
+                mapLayerTexture.TextureId,
+                MapLayerTextureUnit
+            );
+            activeLiquidShader.Uniform(
+                "atlasLayerOriginXZ",
+                (float)mapLayerTexture.OriginX,
+                (float)mapLayerTexture.OriginZ
+            );
+            activeLiquidShader.Uniform(
+                "atlasLayerSampleSize",
+                (float)AtlasMapLayerTexture.HorizontalSampleSize
+            );
+            activeLiquidShader.Uniform(
+                "atlasLayerOpacity",
+                Math.Clamp(mapLayerOpacity, 0f, 1f)
+            );
         }
         activeLiquidShader.Uniform("atlasSunDirection", atlasSunDirection);
         activeLiquidShader.Uniform("atlasExposure", atlasExposure);

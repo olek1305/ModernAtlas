@@ -31,6 +31,7 @@ public sealed class ModernAtlasSystem : ModSystem
     private CheatModeConsentDialog? cheatModeDialog;
     private string? activeWorldIdentifier;
     private int worldSessionGeneration;
+    private bool automatedWorldExitRequested;
 
     public override bool ShouldLoad(EnumAppSide side) => true;
 
@@ -171,6 +172,11 @@ public sealed class ModernAtlasSystem : ModSystem
 
     private void OnLeaveWorld()
     {
+        bool completeAutomatedWorldExit = automatedWorldExitRequested;
+        automatedWorldExitRequested = false;
+        clientApi?.Logger.Notification(
+            "[ModernAtlas] World leave received; releasing atlas state without activating engine shaders."
+        );
         worldSessionGeneration++;
         cheatModeDialog?.CancelWithoutDecision();
         cheatModeDialog?.Dispose();
@@ -178,6 +184,12 @@ public sealed class ModernAtlasSystem : ModSystem
         activeWorldIdentifier = null;
         dialog?.OnWorldLeave();
         serverPolicy.ResetToSafeDefaults();
+        if (completeAutomatedWorldExit)
+        {
+            clientApi?.Logger.Notification(
+                "[ModernAtlas] AUTOMATED WORLD-EXIT CHECK PASSED: the atlas released its world resources without a crash."
+            );
+        }
     }
 
     private void OnLevelFinalize()
@@ -302,7 +314,7 @@ public sealed class ModernAtlasSystem : ModSystem
         if (passed)
         {
             clientApi.Logger.Notification(
-                "[ModernAtlas] AUTOMATED SMOKE TEST PASSED: exact terrain rendered and the atlas is closing cleanly."
+                "[ModernAtlas] AUTOMATED ATLAS CHECKS PASSED: exact terrain and requested atlas features rendered."
             );
         }
         else
@@ -340,27 +352,45 @@ public sealed class ModernAtlasSystem : ModSystem
             const BindingFlags instanceFlags = BindingFlags.Instance
                 | BindingFlags.Public
                 | BindingFlags.NonPublic;
+            const BindingFlags staticFlags = BindingFlags.Static
+                | BindingFlags.Public
+                | BindingFlags.NonPublic;
             object game = clientApi.GetType().GetField("game", instanceFlags)?.GetValue(clientApi)
                 ?? throw new InvalidOperationException("Client game instance is unavailable.");
-            object runningGame = game.GetType().GetField(
-                "ScreenRunningGame",
+            object platform = game.GetType().GetField(
+                "Platform",
                 instanceFlags
             )?.GetValue(game)
-                ?? throw new InvalidOperationException("Running-game screen is unavailable.");
-            MethodInfo exitOrRedirect = runningGame.GetType().GetMethod(
-                "ExitOrRedirect",
+                ?? throw new InvalidOperationException("Client platform is unavailable.");
+            MethodInfo windowExit = platform.GetType().GetMethod(
+                "WindowExit",
                 instanceFlags
-            ) ?? throw new MissingMethodException(
-                runningGame.GetType().FullName,
-                "ExitOrRedirect"
-            );
-            Type exitModeType = exitOrRedirect.GetParameters()[2].ParameterType;
+            ) ?? throw new MissingMethodException(platform.GetType().FullName, "WindowExit");
+            Type exitModeType = windowExit.GetParameters()[1].ParameterType;
             object softExit = Enum.Parse(exitModeType, "SoftExit");
+            Type screenManagerType = game.GetType().Assembly.GetType(
+                "Vintagestory.Client.ScreenManager"
+            ) ?? throw new TypeLoadException("Vintage Story screen manager is unavailable.");
+            MethodInfo enqueueCallback = screenManagerType.GetMethod(
+                "EnqueueCallBack",
+                staticFlags
+            ) ?? throw new MissingMethodException(
+                screenManagerType.FullName,
+                "EnqueueCallBack"
+            );
 
             clientApi.Logger.Notification(
-                "[ModernAtlas] Automated smoke test is leaving the world through the game's normal soft-exit path."
+                "[ModernAtlas] Automated smoke test scheduled a clean window-close soft exit between frames."
             );
-            exitOrRedirect.Invoke(runningGame, new[] { true, "", softExit });
+            automatedWorldExitRequested = true;
+            Action closeClient = () => windowExit.Invoke(
+                platform,
+                new[] { "ModernAtlas automated smoke test completed", softExit }
+            );
+            enqueueCallback.Invoke(
+                null,
+                new object[] { closeClient, 100, "modernatlas-smoke-window-close" }
+            );
         }
         catch (Exception exception)
         {

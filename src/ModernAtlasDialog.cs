@@ -32,12 +32,15 @@ public sealed class ModernAtlasDialog : GuiDialog
     private readonly Func<IShaderProgram?> atlasCloudShaderProvider;
     private readonly Func<IShaderProgram?> atlasOpacityShaderProvider;
     private readonly AtlasSurfaceHeightTexture surfaceHeightTexture;
+    private readonly AtlasMapLayerTexture mapLayerTexture;
     private readonly AtlasSearchController searchController;
 
     private GuiComposer? overlay;
     private GuiComposer? settingsModal;
+    private GuiComposer? visualLabModal;
     private GuiComposer? unitPanel;
     private bool settingsModalOpen;
+    private bool visualLabModalOpen;
     private LoadedTexture? fogTexture;
     private LoadedTexture? searchMarkerTexture;
     private MeshRef? opacityQuad;
@@ -82,6 +85,10 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool automatedSmokeTestUnitInspectionPassed;
     private int automatedSmokeTestSearchPhase;
     private bool automatedSmokeTestSearchPassed;
+    private int automatedSmokeTestMapLayerPhase;
+    private bool automatedSmokeTestMapLayerPassed;
+    private AtlasMapLayer activeMapLayer = AtlasMapLayer.TexturedTerrain;
+    private bool synchronizingMapLayerDropdown;
 
     internal bool AutomatedSmokeTestRenderedExactWorld { get; private set; }
 
@@ -105,6 +112,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private float MinimumPitchDegrees => HasUnlockedCameraPitch
         ? UnlockedMinimumPitchDegrees
         : StandardMinimumPitchDegrees;
+    private Vec3f AtlasFogColor => AtlasVisualPalettes.FogColor(config.FogPalette);
 
     public override string ToggleKeyCombinationCode => "modernatlas-open";
     public override EnumDialogType DialogType => EnumDialogType.HUD;
@@ -130,6 +138,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         this.atlasCloudShaderProvider = atlasCloudShaderProvider;
         this.atlasOpacityShaderProvider = atlasOpacityShaderProvider;
         surfaceHeightTexture = new AtlasSurfaceHeightTexture(capi);
+        mapLayerTexture = new AtlasMapLayerTexture(capi);
         searchController = new AtlasSearchController(capi);
         RefreshVisibleEntityPolicy();
         ComposeOverlay();
@@ -139,6 +148,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         base.OnGuiOpened();
         settingsModalOpen = false;
+        visualLabModalOpen = false;
         selectedEntityId = null;
         ClearSearch();
         ResetPointerDrag();
@@ -173,6 +183,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         FitLoadedTerrain();
         zoom = targetZoom;
         PrepareSurfaceSafetyFilter();
+        PrepareMapLayer();
         SyncSettingsControls();
         capi.Logger.Notification(
             "[ModernAtlas] Opened independent 3D atlas GUI at exterior surface height {0:0.0}; singleplayer paused: {1}.",
@@ -185,6 +196,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         AdvancePausedAnimation();
         AdvanceCamera(atlasRealDeltaTime);
+        mapLayerTexture.Advance();
         if (!loggedFirstRender)
         {
             loggedFirstRender = true;
@@ -202,6 +214,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             }
             ExerciseAutomatedUnitInspection();
             ExerciseAutomatedSearch();
+            ExerciseAutomatedMapLayers();
         }
         if (rendered && !loggedEntityModels && visibleEntityPolicy.AnyEntityModels)
         {
@@ -244,17 +257,28 @@ public sealed class ModernAtlasDialog : GuiDialog
         string status = $"Game view distance {GameViewDistance} blocks • {fogStatus} • {lightingStatus} • {animationStatus} • {cloudStatus} • {entityStatus} • {caveStatus} • exterior surface • {pauseStatus} • {multiplayerStatus} • {rendererStatus} • no distant chunk requests";
         overlay?.GetDynamicText("status").SetNewText(status);
         overlay?.GetDynamicText("search-status").SetNewText(searchController.StatusText);
+        overlay?.GetDynamicText("layer-status").SetNewText(mapLayerTexture.StatusText);
         overlay?.Render(deltaTime);
         RenderUnitInspection(deltaTime);
         if (settingsModalOpen)
         {
             settingsModal?.Render(deltaTime);
         }
+        if (visualLabModalOpen)
+        {
+            visualLabModal?.Render(deltaTime);
+        }
         AdvanceAutomatedSmokeTest();
     }
 
     public override void OnMouseDown(MouseEvent args)
     {
+        if (visualLabModalOpen)
+        {
+            visualLabModal?.OnMouseDown(args);
+            args.Handled = true;
+            return;
+        }
         if (settingsModalOpen)
         {
             settingsModal?.OnMouseDown(args);
@@ -284,6 +308,12 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnMouseUp(MouseEvent args)
     {
+        if (visualLabModalOpen)
+        {
+            visualLabModal?.OnMouseUp(args);
+            args.Handled = true;
+            return;
+        }
         if (settingsModalOpen)
         {
             settingsModal?.OnMouseUp(args);
@@ -324,6 +354,12 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnMouseMove(MouseEvent args)
     {
+        if (visualLabModalOpen)
+        {
+            visualLabModal?.OnMouseMove(args);
+            args.Handled = true;
+            return;
+        }
         if (settingsModalOpen)
         {
             settingsModal?.OnMouseMove(args);
@@ -380,6 +416,12 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnMouseWheel(MouseWheelEventArgs args)
     {
+        if (visualLabModalOpen)
+        {
+            visualLabModal?.OnMouseWheel(args);
+            args.SetHandled();
+            return;
+        }
         if (settingsModalOpen)
         {
             settingsModal?.OnMouseWheel(args);
@@ -396,7 +438,18 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnKeyDown(KeyEvent args)
     {
-        if (settingsModalOpen)
+        if (args.KeyCode == (int)GlKeys.Escape || args.KeyCode == (int)GlKeys.G)
+        {
+            TryClose();
+            args.Handled = true;
+            return;
+        }
+
+        if (visualLabModalOpen)
+        {
+            visualLabModal?.OnKeyDown(args, false);
+        }
+        else if (settingsModalOpen)
         {
             settingsModal?.OnKeyDown(args, false);
         }
@@ -405,13 +458,6 @@ public sealed class ModernAtlasDialog : GuiDialog
             overlay?.OnKeyDown(args, false);
         }
         if (args.Handled) return;
-
-        if (args.KeyCode == (int)GlKeys.Escape || args.KeyCode == (int)GlKeys.G)
-        {
-            TryClose();
-            args.Handled = true;
-            return;
-        }
 
         float pan = Math.Max(1, targetZoom * 0.08f);
         double yaw = targetYawDegrees * GameMath.DEG2RAD;
@@ -477,8 +523,10 @@ public sealed class ModernAtlasDialog : GuiDialog
     public override void OnGuiClosed()
     {
         settingsModalOpen = false;
+        visualLabModalOpen = false;
         selectedEntityId = null;
         searchController.Clear();
+        mapLayerTexture.Reset();
         preparingSurfaceFilter = false;
         surfaceHeightTexture.Reset();
         ResetPointerDrag();
@@ -496,6 +544,10 @@ public sealed class ModernAtlasDialog : GuiDialog
     public void SetCheatMode(bool enabled)
     {
         cheatModeEnabled = capi.IsSinglePlayer && enabled;
+        if (activeMapLayer.RequiresSpoilerAccess() && !HasUnlockedCameraPitch)
+        {
+            SetMapLayer(AtlasMapLayer.TexturedTerrain);
+        }
         ClampPitchToAccessLevel(!IsOpened());
         if (!IsOpened()) return;
 
@@ -523,6 +575,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestUnitInspectionPassed = false;
         automatedSmokeTestSearchPhase = 0;
         automatedSmokeTestSearchPassed = false;
+        automatedSmokeTestMapLayerPhase = 0;
+        automatedSmokeTestMapLayerPassed = false;
         AutomatedSmokeTestRenderedExactWorld = false;
     }
 
@@ -531,17 +585,19 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (!automatedSmokeTestActive) return;
 
         automatedSmokeTestElapsedSeconds += atlasRealDeltaTime;
-        if (automatedSmokeTestElapsedSeconds < 12f) return;
-
-        automatedSmokeTestActive = false;
-        Action<bool>? completion = automatedSmokeTestCompletion;
-        automatedSmokeTestCompletion = null;
         bool passed = AutomatedSmokeTestRenderedExactWorld
             && (!automatedSmokeTestRequiresUnlockedPitch
                 || automatedSmokeTestRenderedAtPitchFloor)
             && (!automatedSmokeTestUnitInspectionAttempted
                 || automatedSmokeTestUnitInspectionPassed)
-            && automatedSmokeTestSearchPassed;
+            && automatedSmokeTestSearchPassed
+            && automatedSmokeTestMapLayerPassed;
+        if (passed && automatedSmokeTestElapsedSeconds < 3f) return;
+        if (!passed && automatedSmokeTestElapsedSeconds < 24f) return;
+
+        automatedSmokeTestActive = false;
+        Action<bool>? completion = automatedSmokeTestCompletion;
+        automatedSmokeTestCompletion = null;
         completion?.Invoke(passed);
     }
 
@@ -691,6 +747,59 @@ public sealed class ModernAtlasDialog : GuiDialog
         return false;
     }
 
+    private void ExerciseAutomatedMapLayers()
+    {
+        if (automatedSmokeTestMapLayerPassed || !automatedSmokeTestSearchPassed)
+        {
+            return;
+        }
+
+        if (automatedSmokeTestMapLayerPhase == 0)
+        {
+            SetMapLayer(AtlasMapLayer.Moisture);
+            automatedSmokeTestMapLayerPhase = 1;
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated smoke test started the loaded-data moisture layer."
+            );
+            return;
+        }
+
+        if (automatedSmokeTestMapLayerPhase == 1)
+        {
+            if (!mapLayerTexture.Ready) return;
+            if (mapLayerTexture.TextureId <= 0)
+            {
+                automatedSmokeTestMapLayerPhase = -1;
+                capi.Logger.Error(
+                    "[ModernAtlas] Automated map-layer test prepared moisture data without a GPU texture."
+                );
+                return;
+            }
+            SetMapLayer(AtlasMapLayer.OreDensity);
+            automatedSmokeTestMapLayerPhase = 2;
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated smoke test rendered the moisture layer and started the Creative/Cheat ore-density layer."
+            );
+            return;
+        }
+
+        if (automatedSmokeTestMapLayerPhase != 2 || !mapLayerTexture.Ready) return;
+        if (mapLayerTexture.TextureId <= 0)
+        {
+            automatedSmokeTestMapLayerPhase = -1;
+            capi.Logger.Error(
+                "[ModernAtlas] Automated map-layer test prepared ore data without a GPU texture."
+            );
+            return;
+        }
+
+        automatedSmokeTestMapLayerPassed = true;
+        SetMapLayer(AtlasMapLayer.TexturedTerrain);
+        capi.Logger.Notification(
+            "[ModernAtlas] Automated smoke test rendered climate and Creative/Cheat ore map layers from loaded data."
+        );
+    }
+
     internal void OnWorldLeave()
     {
         automatedSmokeTestActive = false;
@@ -702,11 +811,16 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestUnitInspectionPassed = false;
         automatedSmokeTestSearchPhase = 0;
         automatedSmokeTestSearchPassed = false;
+        automatedSmokeTestMapLayerPhase = 0;
+        automatedSmokeTestMapLayerPassed = false;
         AutomatedSmokeTestRenderedExactWorld = false;
         cheatModeEnabled = false;
         settingsModalOpen = false;
+        visualLabModalOpen = false;
         selectedEntityId = null;
         searchController.Clear();
+        activeMapLayer = AtlasMapLayer.TexturedTerrain;
+        mapLayerTexture.Reset();
         preparingSurfaceFilter = false;
         ResetPointerDrag();
 
@@ -760,6 +874,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         exactChunkRenderer?.Dispose();
         exactChunkRenderer = null;
         surfaceHeightTexture.Dispose();
+        mapLayerTexture.Dispose();
         fogTexture?.Dispose();
         fogTexture = null;
         searchMarkerTexture?.Dispose();
@@ -770,6 +885,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         overlay = null;
         settingsModal?.Dispose();
         settingsModal = null;
+        visualLabModal?.Dispose();
+        visualLabModal = null;
         unitPanel?.Dispose();
         unitPanel = null;
         base.Dispose();
@@ -821,6 +938,25 @@ public sealed class ModernAtlasDialog : GuiDialog
                 ElementBounds.Fixed(24, 162, 760, 30),
                 "search-status"
             )
+            .AddStaticText(
+                "Map layer",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(24, 202, 140, 30)
+            )
+            .AddDropDown(
+                AtlasMapLayerInfo.Values,
+                AtlasMapLayerInfo.Names,
+                (int)activeMapLayer,
+                OnMapLayerChanged,
+                ElementBounds.Fixed(166, 196, 300, 34),
+                "map-layer"
+            )
+            .AddDynamicText(
+                "",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(24, 236, 760, 30),
+                "layer-status"
+            )
             .AddButton(
                 "Settings",
                 OpenSettingsModal,
@@ -860,9 +996,9 @@ public sealed class ModernAtlasDialog : GuiDialog
             )
             .Compose();
 
-        ElementBounds modalRoot = ElementBounds.Fixed(0, 0, 340, 490)
+        ElementBounds modalRoot = ElementBounds.Fixed(0, 0, 340, 535)
             .WithAlignment(EnumDialogArea.CenterMiddle);
-        ElementBounds modalBackground = ElementBounds.Fixed(0, 0, 340, 490);
+        ElementBounds modalBackground = ElementBounds.Fixed(0, 0, 340, 535);
         settingsModal = capi.Gui.CreateCompo("modernatlas-settings", modalRoot)
             .AddShadedDialogBG(modalBackground, true)
             .AddStaticText(
@@ -995,6 +1131,13 @@ public sealed class ModernAtlasDialog : GuiDialog
                 ElementBounds.Fixed(170, 419, 140, 34),
                 "fixed-sun-hour"
             )
+            .AddButton(
+                "Atlas visual lab",
+                OpenVisualLab,
+                ElementBounds.Fixed(20, 472, 300, 38),
+                EnumButtonStyle.Normal,
+                "visual-lab-open"
+            )
             .Compose();
         settingsModal.GetSlider("fixed-sun-hour")?.SetValues(
             Math.Clamp(config.FixedSunHour, 0, 23),
@@ -1003,12 +1146,97 @@ public sealed class ModernAtlasDialog : GuiDialog
             1,
             "h"
         );
+
+        ElementBounds labRoot = ElementBounds.Fixed(0, 0, 430, 440)
+            .WithAlignment(EnumDialogArea.CenterMiddle);
+        visualLabModal = capi.Gui.CreateCompo("modernatlas-visual-lab", labRoot)
+            .AddShadedDialogBG(ElementBounds.Fixed(0, 0, 430, 440), true)
+            .AddStaticText(
+                "Atlas visual lab",
+                CairoFont.WhiteSmallishText().WithFontSize(20),
+                ElementBounds.Fixed(20, 18, 240, 30)
+            )
+            .AddButton(
+                "Back",
+                CloseVisualLab,
+                ElementBounds.Fixed(330, 14, 80, 30),
+                EnumButtonStyle.Normal,
+                "visual-lab-back"
+            )
+            .AddStaticText(
+                "Atlas-only controls; the normal world is never changed.",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(20, 54, 390, 28)
+            )
+            .AddStaticText(
+                "Exposure",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(20, 96, 160, 28)
+            )
+            .AddSlider(
+                OnAtlasExposureChanged,
+                ElementBounds.Fixed(205, 90, 205, 34),
+                "atlas-exposure"
+            )
+            .AddStaticText(
+                "Data-layer opacity",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(20, 146, 175, 28)
+            )
+            .AddSlider(
+                OnMapLayerOpacityChanged,
+                ElementBounds.Fixed(205, 140, 205, 34),
+                "layer-opacity"
+            )
+            .AddStaticText(
+                "Boundary softness",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(20, 196, 175, 28)
+            )
+            .AddSlider(
+                OnBoundarySoftnessChanged,
+                ElementBounds.Fixed(205, 190, 205, 34),
+                "boundary-softness"
+            )
+            .AddStaticText(
+                "Cave mask brightness",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(20, 246, 180, 28)
+            )
+            .AddSlider(
+                OnCaveMaskBrightnessChanged,
+                ElementBounds.Fixed(205, 240, 205, 34),
+                "cave-mask-brightness"
+            )
+            .AddStaticText(
+                "Fog palette",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(20, 296, 160, 28)
+            )
+            .AddDropDown(
+                AtlasVisualPalettes.Values,
+                AtlasVisualPalettes.Names,
+                AtlasVisualPalettes.IndexOf(config.FogPalette),
+                OnFogPaletteChanged,
+                ElementBounds.Fixed(205, 290, 205, 34),
+                "fog-palette"
+            )
+            .AddButton(
+                "Reset visual tuning",
+                ResetVisualTuning,
+                ElementBounds.Fixed(20, 370, 390, 38),
+                EnumButtonStyle.Normal,
+                "visual-lab-reset"
+            )
+            .Compose();
+        ConfigureVisualLabSliders();
         SyncSettingsControls();
     }
 
     private bool OpenSettingsModal()
     {
         ResetPointerDrag();
+        visualLabModalOpen = false;
         settingsModalOpen = true;
         SyncSettingsControls();
         return true;
@@ -1017,6 +1245,115 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool CloseSettingsModal()
     {
         settingsModalOpen = false;
+        visualLabModalOpen = false;
+        return true;
+    }
+
+    private bool OpenVisualLab()
+    {
+        ResetPointerDrag();
+        settingsModalOpen = false;
+        visualLabModalOpen = true;
+        SyncVisualLabControls();
+        return true;
+    }
+
+    private bool CloseVisualLab()
+    {
+        visualLabModalOpen = false;
+        settingsModalOpen = true;
+        SyncSettingsControls();
+        return true;
+    }
+
+    private void ConfigureVisualLabSliders()
+    {
+        visualLabModal?.GetSlider("atlas-exposure")?.SetValues(
+            Math.Clamp(config.AtlasExposurePercent, 50, 150),
+            50,
+            150,
+            5,
+            "%"
+        );
+        visualLabModal?.GetSlider("layer-opacity")?.SetValues(
+            Math.Clamp(config.MapLayerOpacityPercent, 0, 100),
+            0,
+            100,
+            5,
+            "%"
+        );
+        visualLabModal?.GetSlider("boundary-softness")?.SetValues(
+            Math.Clamp(config.BoundarySoftnessPercent, 25, 200),
+            25,
+            200,
+            5,
+            "%"
+        );
+        visualLabModal?.GetSlider("cave-mask-brightness")?.SetValues(
+            Math.Clamp(config.CaveMaskBrightnessPercent, 50, 150),
+            50,
+            150,
+            5,
+            "%"
+        );
+    }
+
+    private void SyncVisualLabControls()
+    {
+        ConfigureVisualLabSliders();
+        visualLabModal?.GetDropDown("fog-palette")?.SetSelectedIndex(
+            AtlasVisualPalettes.IndexOf(config.FogPalette)
+        );
+    }
+
+    private bool OnAtlasExposureChanged(int value)
+    {
+        config.AtlasExposurePercent = Math.Clamp(value, 50, 150);
+        saveConfig();
+        return true;
+    }
+
+    private bool OnMapLayerOpacityChanged(int value)
+    {
+        config.MapLayerOpacityPercent = Math.Clamp(value, 0, 100);
+        saveConfig();
+        return true;
+    }
+
+    private bool OnBoundarySoftnessChanged(int value)
+    {
+        config.BoundarySoftnessPercent = Math.Clamp(value, 25, 200);
+        InvalidateFogTexture();
+        saveConfig();
+        return true;
+    }
+
+    private bool OnCaveMaskBrightnessChanged(int value)
+    {
+        config.CaveMaskBrightnessPercent = Math.Clamp(value, 50, 150);
+        saveConfig();
+        return true;
+    }
+
+    private void OnFogPaletteChanged(string value, bool selected)
+    {
+        if (!selected) return;
+        int index = AtlasVisualPalettes.IndexOf(value);
+        config.FogPalette = AtlasVisualPalettes.Values[index];
+        InvalidateFogTexture();
+        saveConfig();
+    }
+
+    private bool ResetVisualTuning()
+    {
+        config.AtlasExposurePercent = 100;
+        config.MapLayerOpacityPercent = 62;
+        config.BoundarySoftnessPercent = 100;
+        config.CaveMaskBrightnessPercent = 100;
+        config.FogPalette = "neutral";
+        InvalidateFogTexture();
+        saveConfig();
+        SyncVisualLabControls();
         return true;
     }
 
@@ -1051,11 +1388,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
 
         Entity entity = selected.Value.Entity;
-        string name = entity.GetName();
-        if (string.IsNullOrWhiteSpace(name))
-        {
-            name = entity.Code?.Path ?? "Living entity";
-        }
+        string name = AtlasSafeDisplayName.ForEntity(entity);
 
         double dx = entity.Pos.X - capi.World.Player.Entity.Pos.X;
         double dy = entity.Pos.Y - capi.World.Player.Entity.Pos.Y;
@@ -1199,6 +1532,63 @@ public sealed class ModernAtlasDialog : GuiDialog
             input.SetValue("", true);
         }
         return true;
+    }
+
+    private void OnMapLayerChanged(string value, bool selected)
+    {
+        if (!selected || synchronizingMapLayerDropdown) return;
+
+        AtlasMapLayer layer = AtlasMapLayerInfo.FromValue(value);
+        if (layer.RequiresSpoilerAccess() && !UnitInspectionEnabled)
+        {
+            capi.TriggerIngameError(
+                this,
+                "modernatlas-layer-access",
+                "Ore density is available only in singleplayer Cheat Mode or Creative mode."
+            );
+            SyncMapLayerDropdown();
+            return;
+        }
+        SetMapLayer(layer);
+    }
+
+    private void SetMapLayer(AtlasMapLayer layer)
+    {
+        if (layer.RequiresSpoilerAccess() && !UnitInspectionEnabled)
+        {
+            layer = AtlasMapLayer.TexturedTerrain;
+        }
+        activeMapLayer = layer;
+        SyncMapLayerDropdown();
+        if (IsOpened()) PrepareMapLayer();
+        else mapLayerTexture.Reset();
+    }
+
+    private void SyncMapLayerDropdown()
+    {
+        GuiElementDropDown? dropdown = overlay?.GetDropDown("map-layer");
+        if (dropdown == null) return;
+
+        synchronizingMapLayerDropdown = true;
+        try
+        {
+            dropdown.SetSelectedIndex((int)activeMapLayer);
+        }
+        finally
+        {
+            synchronizingMapLayerDropdown = false;
+        }
+    }
+
+    private void PrepareMapLayer()
+    {
+        mapLayerTexture.Begin(
+            activeMapLayer,
+            capi.World.Player.Entity.Pos.X,
+            capi.World.Player.Entity.Pos.Z,
+            GameViewDistance,
+            UnitInspectionEnabled
+        );
     }
 
     private void AdvanceSearch()
@@ -1363,6 +1753,12 @@ public sealed class ModernAtlasDialog : GuiDialog
             EffectiveFogEnabled,
             SurfaceSafetyEnabled,
             SurfaceSafetyEnabled ? surfaceHeightTexture : null,
+            mapLayerTexture,
+            Math.Clamp(config.MapLayerOpacityPercent, 0, 100) / 100f,
+            AtlasFogColor,
+            Math.Clamp(config.AtlasExposurePercent, 50, 150) / 100f,
+            Math.Clamp(config.BoundarySoftnessPercent, 25, 200) / 100f,
+            Math.Clamp(config.CaveMaskBrightnessPercent, 50, 150) / 100f,
             windWaveCounter,
             windWaveCounterHighFrequency,
             waterStillCounter,
@@ -1430,7 +1826,10 @@ public sealed class ModernAtlasDialog : GuiDialog
         // Draw an opaque Primary frame while the small surface texture is
         // prepared. Clearing the default framebuffer directly can leave the
         // native Linux window transparent after the atlas closes.
-        exactChunkRenderer?.RenderSurfacePreparationFrame(EffectiveFogEnabled);
+        exactChunkRenderer?.RenderSurfacePreparationFrame(
+            EffectiveFogEnabled,
+            AtlasFogColor
+        );
     }
 
     private void FitLoadedTerrain()
@@ -1732,8 +2131,9 @@ public sealed class ModernAtlasDialog : GuiDialog
 
         using ImageSurface surface = new(Format.Argb32, Math.Max(1, width), Math.Max(1, height));
         using Context context = new(surface);
+        Vec3f fogColor = AtlasFogColor;
         context.Operator = Operator.Source;
-        context.SetSourceRGBA(0.32, 0.38, 0.40, 1.0);
+        context.SetSourceRGBA(fogColor.X, fogColor.Y, fogColor.Z, 1.0);
         context.Paint();
 
         double radiusX = height * GameViewDistance / (2.0 * zoom);
@@ -1763,9 +2163,10 @@ public sealed class ModernAtlasDialog : GuiDialog
         // Overlap the view-distance edge instead of starting beyond it. This
         // hides transient chunk cross-sections and turns the disclosure limit
         // into an atmospheric horizon rather than a hard circular cutout.
-        const double clearScale = 0.90;
+        double softness = Math.Clamp(config.BoundarySoftnessPercent, 25, 200) / 100.0;
         const double opaqueScale = 1.04;
-        const int featherSteps = 24;
+        double clearScale = Math.Clamp(opaqueScale - 0.14 * softness, 0.70, 1.0);
+        int featherSteps = Math.Clamp((int)Math.Round(24 * softness), 8, 48);
         for (int step = featherSteps; step >= 0; step--)
         {
             double progress = step / (double)featherSteps;
@@ -1776,7 +2177,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             context.Scale(radiusX * scale, radiusY * scale);
             context.Arc(0, 0, 1, 0, Math.PI * 2);
             context.Restore();
-            context.SetSourceRGBA(0.32, 0.38, 0.40, alpha);
+            context.SetSourceRGBA(fogColor.X, fogColor.Y, fogColor.Z, alpha);
             context.Fill();
         }
         context.Save();

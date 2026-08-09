@@ -13,6 +13,11 @@ uniform sampler2D atlasSurfaceHeightTex;
 uniform vec2 atlasSurfaceOriginXZ;
 uniform float atlasSurfaceSampleSize;
 uniform float atlasVisibleSubsurfaceDepth;
+uniform int atlasLayerEnabled;
+uniform sampler2D atlasLayerTex;
+uniform vec2 atlasLayerOriginXZ;
+uniform float atlasLayerSampleSize;
+uniform float atlasLayerOpacity;
 uniform vec3 atlasSunDirection;
 uniform float atlasExposure;
 
@@ -112,8 +117,27 @@ void main(void)
     if (!isLava)
     {
         float topLight = mix(0.55, 1.0, clamp(atlasSunDirection.y, 0.0, 1.0));
-        float exposure = mix(0.14, 1.0, clamp(atlasExposure, 0.0, 1.0));
+        float exposure = mix(0.14, 1.0, clamp(atlasExposure, 0.0, 1.0))
+            * mix(1.0, 1.5, clamp((atlasExposure - 1.0) * 2.0, 0.0, 1.0));
         color.rgb *= topLight * exposure;
+    }
+    if (atlasLayerEnabled > 0)
+    {
+        vec2 layerPosition =
+            (absoluteWorldPosition.xz - atlasLayerOriginXZ)
+            / atlasLayerSampleSize;
+        ivec2 layerDimensions = textureSize(atlasLayerTex, 0);
+        if (all(greaterThanEqual(layerPosition, vec2(0.0)))
+            && all(lessThan(layerPosition, vec2(layerDimensions))))
+        {
+            vec2 layerUv = layerPosition / vec2(layerDimensions);
+            vec4 layerColor = texture(atlasLayerTex, layerUv);
+            color.rgb = mix(
+                color.rgb,
+                layerColor.rgb,
+                clamp(layerColor.a * atlasLayerOpacity, 0.0, 1.0)
+            );
+        }
     }
     // Preserve the source texture's authored water alpha. Lava is natively
     // opaque. Geometry remains stable because no camera-dependent vertex warp

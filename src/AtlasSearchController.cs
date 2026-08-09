@@ -37,7 +37,6 @@ internal sealed class AtlasSearchController
     private long queryChangedMilliseconds;
     private long lastDynamicRefreshMilliseconds;
     private int blockRegistryIndex;
-    private bool resolvingHeldBlockNames;
     private int minimumChunkX;
     private int maximumChunkX;
     private int minimumChunkZ;
@@ -67,7 +66,7 @@ internal sealed class AtlasSearchController
     public bool BlockScanComplete => stage == SearchStage.Complete;
     public string Query => query;
     public string DiagnosticSummary =>
-        $"blockTypes={matchingBlockIds.Count}, heldNames={resolvingHeldBlockNames}, columns={chunkColumns.Count}, probedCoordinates={probedChunkCoordinates}, inspectedChunks={inspectedChunks}, readyChunks={readyChunks}, paletteChunks={paletteMatchingChunks}, scannedPositions={scannedBlockPositions}, rawMatches={rawBlockMatches}, radiusRejected={radiusRejectedMatches}, surfaceRejected={surfaceRejectedMatches}, markers={blockResults.Count}";
+        $"blockTypes={matchingBlockIds.Count}, columns={chunkColumns.Count}, probedCoordinates={probedChunkCoordinates}, inspectedChunks={inspectedChunks}, readyChunks={readyChunks}, paletteChunks={paletteMatchingChunks}, scannedPositions={scannedBlockPositions}, rawMatches={rawBlockMatches}, radiusRejected={radiusRejectedMatches}, surfaceRejected={surfaceRejectedMatches}, markers={blockResults.Count}";
 
     public string StatusText
     {
@@ -208,12 +207,6 @@ internal sealed class AtlasSearchController
         IList<Block> blocks = capi.World.Blocks;
         if (blockRegistryIndex >= blocks.Count)
         {
-            if (!resolvingHeldBlockNames && matchingBlockIds.Count == 0)
-            {
-                resolvingHeldBlockNames = true;
-                blockRegistryIndex = 0;
-                return true;
-            }
             InitializeChunkCandidatePreparation();
             stage = SearchStage.PrepareChunks;
             return true;
@@ -222,22 +215,11 @@ internal sealed class AtlasSearchController
         Block block = blocks[blockRegistryIndex++];
         if (block?.Code == null || block.Id == 0) return true;
 
-        if (!resolvingHeldBlockNames)
-        {
-            if (Matches(block.Code.ToString())) matchingBlockIds.Add(block.Id);
-            return true;
-        }
-
-        try
-        {
-            string name = block.GetHeldItemName(new ItemStack(block));
-            if (Matches(name)) matchingBlockIds.Add(block.Id);
-        }
-        catch
-        {
-            // Modded blocks are allowed to rely on placement-only state for
-            // their held name. Their registered asset code remains searchable.
-        }
+        // Asset codes are stable, language-independent and safe to inspect
+        // while Vintage Story builds the handbook on a worker thread. Calling
+        // GetHeldItemName here would concurrently mutate the engine's global
+        // translation service and can corrupt its non-concurrent hash sets.
+        if (Matches(block.Code.ToString())) matchingBlockIds.Add(block.Id);
         return true;
     }
 
@@ -350,16 +332,39 @@ internal sealed class AtlasSearchController
 
         if (currentChunk == null || currentChunk.Disposed)
         {
-            currentChunk = null;
+            AbandonCurrentChunk();
             return true;
         }
 
-        IChunkBlocks data = currentChunk.Data;
+        IChunkBlocks? data;
+        int dataLength;
+        int index;
+        int solidId;
+        int fluidId;
+        try
+        {
+            data = currentChunk.Data;
+            dataLength = data?.Length ?? 0;
+            if (data == null || currentBlockIndex >= dataLength)
+            {
+                AbandonCurrentChunk();
+                return true;
+            }
+
+            index = currentBlockIndex++;
+            scannedBlockPositions++;
+            solidId = data.GetBlockId(index, BlockLayersAccess.Solid);
+            fluidId = data.GetFluid(index);
+        }
+        catch (Exception exception) when (IsTransientChunkAccessFailure(exception))
+        {
+            // Streaming can dispose a loaded chunk between the checks above
+            // and the actual palette read. Skip it and continue next frame.
+            AbandonCurrentChunk();
+            return true;
+        }
+
         int chunkSize = GlobalConstants.ChunkSize;
-        int index = currentBlockIndex++;
-        scannedBlockPositions++;
-        int solidId = data.GetBlockId(index, BlockLayersAccess.Solid);
-        int fluidId = data.GetFluid(index);
         int matchingId = matchingBlockIds.Contains(solidId)
             ? solidId
             : matchingBlockIds.Contains(fluidId)
@@ -390,10 +395,9 @@ internal sealed class AtlasSearchController
             }
         }
 
-        if (currentBlockIndex >= data.Length)
+        if (currentBlockIndex >= dataLength)
         {
-            currentChunk = null;
-            currentBlockIndex = 0;
+            AbandonCurrentChunk();
         }
         return true;
     }
@@ -426,8 +430,20 @@ internal sealed class AtlasSearchController
             }
             readyChunks++;
 
+            IChunkBlocks? chunkData;
             fuzzyBlockIds.Clear();
-            chunk.Data.FuzzyListBlockIds(fuzzyBlockIds);
+            try
+            {
+                chunkData = chunk.Data;
+                if (chunkData == null) continue;
+                chunkData.FuzzyListBlockIds(fuzzyBlockIds);
+            }
+            catch (Exception exception) when (IsTransientChunkAccessFailure(exception))
+            {
+                // A chunk can be unloaded by the streaming thread after
+                // GetChunk returns it. It is no longer eligible atlas data.
+                continue;
+            }
             bool mayContainMatch = false;
             foreach (int blockId in fuzzyBlockIds)
             {
@@ -438,14 +454,36 @@ internal sealed class AtlasSearchController
             if (!mayContainMatch) continue;
             paletteMatchingChunks++;
 
-            chunk.Unpack_ReadOnly();
-            if (chunk.Disposed) continue;
+            try
+            {
+                chunk.Unpack_ReadOnly();
+                if (chunk.Disposed || chunk.Data == null) continue;
+            }
+            catch (Exception exception) when (IsTransientChunkAccessFailure(exception))
+            {
+                continue;
+            }
             currentChunk = chunk;
             currentChunkCandidate = new ChunkCandidate(column.X, chunkY, column.Z);
             currentBlockIndex = 0;
             return true;
         }
         return false;
+    }
+
+    private void AbandonCurrentChunk()
+    {
+        currentChunk = null;
+        currentBlockIndex = 0;
+    }
+
+    private static bool IsTransientChunkAccessFailure(Exception exception)
+    {
+        return exception is NullReferenceException
+            or ObjectDisposedException
+            or InvalidOperationException
+            or IndexOutOfRangeException
+            or ArgumentOutOfRangeException;
     }
 
     private void AddBlockResult(int worldX, int worldY, int worldZ, int blockId)
@@ -518,7 +556,10 @@ internal sealed class AtlasSearchController
 
                 ItemStack? stack = item.Itemstack;
                 string code = stack?.Collectible?.Code?.ToString() ?? "";
-                string name = stack?.GetName() ?? "Dropped item";
+                string name = AtlasSafeDisplayName.ForItemStack(
+                    stack,
+                    "Dropped item"
+                );
                 if (!Matches(code) && !Matches(name)) continue;
                 dynamicResults.Add(new AtlasSearchResult(
                     entity.Pos.X,
@@ -538,7 +579,7 @@ internal sealed class AtlasSearchController
 
     private bool MatchesEntity(Entity entity)
     {
-        return Matches(entity.GetName())
+        return Matches(AtlasSafeDisplayName.ForEntity(entity))
             || Matches(entity.Code?.ToString())
             || Matches(entity.Properties?.Class);
     }
@@ -584,10 +625,7 @@ internal sealed class AtlasSearchController
 
     private string GetEntityLabel(Entity entity)
     {
-        string name = entity.GetName();
-        return string.IsNullOrWhiteSpace(name)
-            ? entity.Code?.ToString() ?? "Living entity"
-            : name;
+        return AtlasSafeDisplayName.ForEntity(entity);
     }
 
     private static AtlasSearchResultKind ToSearchKind(AtlasEntityKind kind)
@@ -613,7 +651,6 @@ internal sealed class AtlasSearchController
         blockResults.Clear();
         dynamicResults.Clear();
         blockRegistryIndex = 0;
-        resolvingHeldBlockNames = false;
         minimumChunkX = 0;
         maximumChunkX = 0;
         minimumChunkZ = 0;
