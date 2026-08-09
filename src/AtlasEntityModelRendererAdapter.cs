@@ -44,6 +44,7 @@ internal sealed class AtlasEntityModelRendererAdapter
 
             foreach (RenderEntry entry in entries)
             {
+                entry.HideLocalPlayerHeldItems(capi.World.Player.Entity);
                 entry.Renderer.BeforeRender(deltaTime);
                 entry.ForceThirdPerson(capi.World.Player.Entity);
                 entry.Renderer.DoRender3DOpaque(deltaTime, false);
@@ -158,7 +159,8 @@ internal sealed class AtlasEntityModelRendererAdapter
         string runtimeGroup = entity.Properties?.Server?.SpawnConditions?.Runtime?.Group ?? "";
         string worldgenGroup = entity.Properties?.Server?.SpawnConditions?.Worldgen?.Group ?? "";
         if (runtimeGroup.Equals("hostile", StringComparison.OrdinalIgnoreCase)
-            || worldgenGroup.Equals("hostile", StringComparison.OrdinalIgnoreCase))
+            || worldgenGroup.Equals("hostile", StringComparison.OrdinalIgnoreCase)
+            || IsHostileMonsterIdentity(entity))
         {
             return EntityKind.Mob;
         }
@@ -173,6 +175,29 @@ internal sealed class AtlasEntityModelRendererAdapter
         }
 
         return entity is EntityPlayer ? EntityKind.Player : EntityKind.Animal;
+    }
+
+    private static bool IsHostileMonsterIdentity(Entity entity)
+    {
+        // Some hostile variants declare their spawn group under
+        // spawnconditionsByType. That group is not exposed through the
+        // resolved Runtime/Worldgen properties used above, so recognize the
+        // game's monster families by their stable entity code or class too.
+        // This notably covers shivers, the spider-like hostile creature.
+        string code = entity.Code?.Path ?? "";
+        string className = entity.Properties?.Class ?? entity.GetType().Name;
+        return HasMonsterFamily(code) || HasMonsterFamily(className);
+    }
+
+    private static bool HasMonsterFamily(string value)
+    {
+        return value.Contains("drifter", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("shiver", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("bowtorn", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("locust", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("eidolon", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("spider", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("arachnid", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsAllowed(EntityKind kind, ModernAtlasServerPolicy policy)
@@ -201,6 +226,9 @@ internal sealed class AtlasEntityModelRendererAdapter
         private object? savedRenderMode;
         private EntityPlayer? localPlayer;
         private bool savedSelfNowShadowPass;
+        private EntityAgent? localPlayerAgent;
+        private ItemSlot? savedLeftHandItemSlot;
+        private ItemSlot? savedRightHandItemSlot;
 
         public Entity Entity { get; }
         public EntityRenderer Renderer { get; }
@@ -221,6 +249,21 @@ internal sealed class AtlasEntityModelRendererAdapter
             savedRenderMode = renderModeField.GetValue(Renderer);
             object thirdPerson = Enum.Parse(renderModeField.FieldType, "ThirdPerson");
             renderModeField.SetValue(Renderer, thirdPerson);
+        }
+
+        public void HideLocalPlayerHeldItems(Entity localPlayerEntity)
+        {
+            if (Entity != localPlayerEntity || Entity is not EntityAgent agent) return;
+
+            localPlayerAgent = agent;
+            savedLeftHandItemSlot = agent.LeftHandItemSlot;
+            savedRightHandItemSlot = agent.RightHandItemSlot;
+            // The player renderer prepares held-item meshes in BeforeRender.
+            // Atlas camera matrices make the first-person hotbar item appear
+            // detached and camera-relative, so hide both hands only for this
+            // atlas draw and restore the real inventory slot references below.
+            agent.LeftHandItemSlot = new DummySlot();
+            agent.RightHandItemSlot = new DummySlot();
         }
 
         public void UseThirdPersonAnimator(Entity localPlayerEntity)
@@ -245,9 +288,17 @@ internal sealed class AtlasEntityModelRendererAdapter
             {
                 localPlayer.selfNowShadowPass = savedSelfNowShadowPass;
             }
+            if (localPlayerAgent != null)
+            {
+                localPlayerAgent.LeftHandItemSlot = savedLeftHandItemSlot;
+                localPlayerAgent.RightHandItemSlot = savedRightHandItemSlot;
+            }
             renderModeField = null;
             savedRenderMode = null;
             localPlayer = null;
+            localPlayerAgent = null;
+            savedLeftHandItemSlot = null;
+            savedRightHandItemSlot = null;
         }
 
         private static FieldInfo? FindField(Type type, string name)
