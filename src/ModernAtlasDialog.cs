@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Cairo;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
@@ -31,12 +32,14 @@ public sealed class ModernAtlasDialog : GuiDialog
     private readonly Func<IShaderProgram?> atlasCloudShaderProvider;
     private readonly Func<IShaderProgram?> atlasOpacityShaderProvider;
     private readonly AtlasSurfaceHeightTexture surfaceHeightTexture;
+    private readonly AtlasSearchController searchController;
 
     private GuiComposer? overlay;
     private GuiComposer? settingsModal;
     private GuiComposer? unitPanel;
     private bool settingsModalOpen;
     private LoadedTexture? fogTexture;
+    private LoadedTexture? searchMarkerTexture;
     private MeshRef? opacityQuad;
     private bool leftDragging;
     private bool rightDragging;
@@ -77,6 +80,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool automatedSmokeTestRenderedAtPitchFloor;
     private bool automatedSmokeTestUnitInspectionAttempted;
     private bool automatedSmokeTestUnitInspectionPassed;
+    private int automatedSmokeTestSearchPhase;
+    private bool automatedSmokeTestSearchPassed;
 
     internal bool AutomatedSmokeTestRenderedExactWorld { get; private set; }
 
@@ -125,6 +130,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         this.atlasCloudShaderProvider = atlasCloudShaderProvider;
         this.atlasOpacityShaderProvider = atlasOpacityShaderProvider;
         surfaceHeightTexture = new AtlasSurfaceHeightTexture(capi);
+        searchController = new AtlasSearchController(capi);
         RefreshVisibleEntityPolicy();
         ComposeOverlay();
     }
@@ -134,6 +140,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         base.OnGuiOpened();
         settingsModalOpen = false;
         selectedEntityId = null;
+        ClearSearch();
         ResetPointerDrag();
         PauseSingleplayerForAtlas();
         atlasAnimationSeconds = 0;
@@ -184,6 +191,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             capi.Logger.Notification("[ModernAtlas] First 3D atlas GUI frame rendered.");
         }
         bool rendered = RenderLiveWorld(deltaTime);
+        AdvanceSearch();
         if (rendered && automatedSmokeTestActive)
         {
             AutomatedSmokeTestRenderedExactWorld = true;
@@ -193,6 +201,7 @@ public sealed class ModernAtlasDialog : GuiDialog
                 automatedSmokeTestRenderedAtPitchFloor = true;
             }
             ExerciseAutomatedUnitInspection();
+            ExerciseAutomatedSearch();
         }
         if (rendered && !loggedEntityModels && visibleEntityPolicy.AnyEntityModels)
         {
@@ -208,6 +217,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         capi.Render.GLDepthMask(false);
         capi.Render.GLDisableDepthTest();
         capi.Render.GlToggleBlend(true, EnumBlendMode.Standard);
+        RenderSearchMarkers();
         string rendererStatus = rendered
             ? "exact loaded chunk geometry"
             : "exact renderer unavailable";
@@ -233,6 +243,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
         string status = $"Game view distance {GameViewDistance} blocks • {fogStatus} • {lightingStatus} • {animationStatus} • {cloudStatus} • {entityStatus} • {caveStatus} • exterior surface • {pauseStatus} • {multiplayerStatus} • {rendererStatus} • no distant chunk requests";
         overlay?.GetDynamicText("status").SetNewText(status);
+        overlay?.GetDynamicText("search-status").SetNewText(searchController.StatusText);
         overlay?.Render(deltaTime);
         RenderUnitInspection(deltaTime);
         if (settingsModalOpen)
@@ -467,6 +478,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         settingsModalOpen = false;
         selectedEntityId = null;
+        searchController.Clear();
         preparingSurfaceFilter = false;
         surfaceHeightTexture.Reset();
         ResetPointerDrag();
@@ -509,6 +521,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestRenderedAtPitchFloor = false;
         automatedSmokeTestUnitInspectionAttempted = false;
         automatedSmokeTestUnitInspectionPassed = false;
+        automatedSmokeTestSearchPhase = 0;
+        automatedSmokeTestSearchPassed = false;
         AutomatedSmokeTestRenderedExactWorld = false;
     }
 
@@ -517,7 +531,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (!automatedSmokeTestActive) return;
 
         automatedSmokeTestElapsedSeconds += atlasRealDeltaTime;
-        if (automatedSmokeTestElapsedSeconds < 8f) return;
+        if (automatedSmokeTestElapsedSeconds < 12f) return;
 
         automatedSmokeTestActive = false;
         Action<bool>? completion = automatedSmokeTestCompletion;
@@ -526,7 +540,8 @@ public sealed class ModernAtlasDialog : GuiDialog
             && (!automatedSmokeTestRequiresUnlockedPitch
                 || automatedSmokeTestRenderedAtPitchFloor)
             && (!automatedSmokeTestUnitInspectionAttempted
-                || automatedSmokeTestUnitInspectionPassed);
+                || automatedSmokeTestUnitInspectionPassed)
+            && automatedSmokeTestSearchPassed;
         completion?.Invoke(passed);
     }
 
@@ -586,6 +601,96 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
     }
 
+    private void ExerciseAutomatedSearch()
+    {
+        if (automatedSmokeTestSearchPassed
+            || !automatedSmokeTestUnitInspectionPassed)
+        {
+            return;
+        }
+
+        if (automatedSmokeTestSearchPhase == 0)
+        {
+            searchController.SetQueryImmediatelyForAutomatedTest("player");
+            automatedSmokeTestSearchPhase = 1;
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated smoke test started a loaded-entity atlas search."
+            );
+            return;
+        }
+
+        if (automatedSmokeTestSearchPhase == 1)
+        {
+            bool foundPlayer = false;
+            foreach (AtlasSearchResult result in searchController.DynamicResults)
+            {
+                if (result.Kind != AtlasSearchResultKind.Player) continue;
+                foundPlayer = true;
+                break;
+            }
+            if (!foundPlayer) return;
+
+            if (!TryGetAutomatedBlockSearchQuery(out string blockQuery))
+            {
+                automatedSmokeTestSearchPhase = -1;
+                capi.Logger.Error(
+                    "[ModernAtlas] Automated atlas search test could not find a loaded surface block near the player."
+                );
+                return;
+            }
+
+            searchController.SetQueryImmediatelyForAutomatedTest(blockQuery);
+            automatedSmokeTestSearchPhase = 2;
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated smoke test found a loaded entity marker and started an incremental block search for '{0}'.",
+                blockQuery
+            );
+            return;
+        }
+
+        if (automatedSmokeTestSearchPhase != 2) return;
+        if (searchController.BlockResults.Count > 0)
+        {
+            automatedSmokeTestSearchPassed = true;
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated smoke test found loaded entity and block search markers."
+            );
+        }
+        else if (searchController.BlockScanComplete)
+        {
+            automatedSmokeTestSearchPhase = -1;
+            capi.Logger.Error(
+                "[ModernAtlas] Automated atlas block search completed without finding its known loaded block: {0}.",
+                searchController.DiagnosticSummary
+            );
+        }
+    }
+
+    private bool TryGetAutomatedBlockSearchQuery(out string query)
+    {
+        query = "";
+        int worldX = (int)Math.Floor(capi.World.Player.Entity.Pos.X);
+        int worldZ = (int)Math.Floor(capi.World.Player.Entity.Pos.Z);
+        int surfaceY = capi.World.BlockAccessor.GetRainMapHeightAt(worldX, worldZ);
+        int startY = Math.Clamp(
+            surfaceY > 0
+                ? surfaceY
+                : (int)Math.Floor(capi.World.Player.Entity.Pos.Y) - 1,
+            0,
+            capi.World.BlockAccessor.MapSizeY - 1
+        );
+        BlockPos position = new(worldX, startY, worldZ);
+        for (int offset = 0; offset <= 32 && position.Y >= 0; offset++, position.Y--)
+        {
+            Block block = capi.World.BlockAccessor.GetBlock(position);
+            string path = block.Code?.Path ?? "";
+            if (block.Id == 0 || path.Length < 2) continue;
+            query = path;
+            return true;
+        }
+        return false;
+    }
+
     internal void OnWorldLeave()
     {
         automatedSmokeTestActive = false;
@@ -595,10 +700,13 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestRenderedAtPitchFloor = false;
         automatedSmokeTestUnitInspectionAttempted = false;
         automatedSmokeTestUnitInspectionPassed = false;
+        automatedSmokeTestSearchPhase = 0;
+        automatedSmokeTestSearchPassed = false;
         AutomatedSmokeTestRenderedExactWorld = false;
         cheatModeEnabled = false;
         settingsModalOpen = false;
         selectedEntityId = null;
+        searchController.Clear();
         preparingSurfaceFilter = false;
         ResetPointerDrag();
 
@@ -654,6 +762,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         surfaceHeightTexture.Dispose();
         fogTexture?.Dispose();
         fogTexture = null;
+        searchMarkerTexture?.Dispose();
+        searchMarkerTexture = null;
         opacityQuad?.Dispose();
         opacityQuad = null;
         overlay?.Dispose();
@@ -687,6 +797,30 @@ public sealed class ModernAtlasDialog : GuiDialog
                 ElementBounds.Fixed(24, 88, 650, 34),
                 "status"
             )
+            .AddStaticText(
+                "Search loaded map",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(24, 128, 140, 30)
+            )
+            .AddTextInput(
+                ElementBounds.Fixed(166, 122, 300, 34),
+                OnSearchTextChanged,
+                CairoFont.SmallTextInput(),
+                "search-input"
+            )
+            .AddButton(
+                "Clear",
+                ClearSearch,
+                ElementBounds.Fixed(478, 122, 76, 34),
+                EnumButtonStyle.Normal,
+                "search-clear"
+            )
+            .AddDynamicText(
+                "",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(24, 162, 760, 30),
+                "search-status"
+            )
             .AddButton(
                 "Settings",
                 OpenSettingsModal,
@@ -695,6 +829,10 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "settings-button"
             )
             .Compose();
+        overlay.GetTextInput("search-input")?.SetMaxLength(80);
+        overlay.GetTextInput("search-input")?.SetPlaceHolderText(
+            "Block, creature, player or dropped item"
+        );
 
         ElementBounds unitRoot = ElementBounds.Fixed(0, 0, 340, 250)
             .WithAlignment(EnumDialogArea.RightMiddle)
@@ -1045,6 +1183,138 @@ public sealed class ModernAtlasDialog : GuiDialog
             && screenX <= capi.Render.FrameWidth
             && screenY >= 0
             && screenY <= capi.Render.FrameHeight;
+    }
+
+    private void OnSearchTextChanged(string text)
+    {
+        searchController.SetQuery(text);
+    }
+
+    private bool ClearSearch()
+    {
+        searchController.Clear();
+        GuiElementTextInput? input = overlay?.GetTextInput("search-input");
+        if (input != null && input.GetText().Length > 0)
+        {
+            input.SetValue("", true);
+        }
+        return true;
+    }
+
+    private void AdvanceSearch()
+    {
+        IReadOnlyList<AtlasRenderedEntity> renderedEntities = exactChunkRenderer
+            ?.LastRenderedEntities ?? Array.Empty<AtlasRenderedEntity>();
+        searchController.Advance(
+            GameViewDistance,
+            SurfaceSafetyEnabled,
+            surfaceHeightTexture,
+            renderedEntities,
+            UnitInspectionEnabled
+        );
+    }
+
+    private void RenderSearchMarkers()
+    {
+        if (!searchController.HasActiveQuery) return;
+        EnsureSearchMarkerTexture();
+        if (searchMarkerTexture?.TextureId <= 0) return;
+
+        float guiScale = (float)Math.Max(0.5, RuntimeEnv.GUIScale);
+        float pulse = 0.5f + 0.5f * MathF.Sin(capi.ElapsedMilliseconds / 230f);
+        float markerSize = Math.Clamp((28f + pulse * 6f) * guiScale, 24f, 58f);
+        foreach (AtlasSearchResult result in searchController.BlockResults)
+        {
+            RenderSearchMarker(result, markerSize, pulse);
+        }
+        foreach (AtlasSearchResult result in searchController.DynamicResults)
+        {
+            RenderSearchMarker(result, markerSize + 4f, pulse);
+        }
+    }
+
+    private void RenderSearchMarker(
+        AtlasSearchResult result,
+        float markerSize,
+        float pulse
+    )
+    {
+        double dx = result.X - capi.World.Player.Entity.Pos.X;
+        double dz = result.Z - capi.World.Player.Entity.Pos.Z;
+        double clearRadius = GameViewDistance * (EffectiveFogEnabled ? 0.88 : 1.0);
+        if (dx * dx + dz * dz > clearRadius * clearRadius) return;
+        if (!TryProjectAtlasPosition(
+            result.X,
+            result.Y,
+            result.Z,
+            out double screenX,
+            out double screenY,
+            out _
+        ))
+        {
+            return;
+        }
+
+        float alpha = 0.78f + pulse * 0.18f;
+        Vec4f color = result.Kind switch
+        {
+            AtlasSearchResultKind.Block => new Vec4f(1f, 0.72f, 0.18f, alpha),
+            AtlasSearchResultKind.Player => new Vec4f(0.20f, 0.86f, 1f, alpha),
+            AtlasSearchResultKind.Animal => new Vec4f(0.34f, 1f, 0.48f, alpha),
+            AtlasSearchResultKind.Mob => new Vec4f(1f, 0.22f, 0.18f, alpha),
+            AtlasSearchResultKind.Npc => new Vec4f(0.78f, 0.48f, 1f, alpha),
+            AtlasSearchResultKind.DroppedItem => new Vec4f(1f, 0.46f, 0.12f, alpha),
+            _ => new Vec4f(1f, 1f, 1f, alpha)
+        };
+        capi.Render.Render2DTexture(
+            searchMarkerTexture!.TextureId,
+            (float)screenX - markerSize * 0.5f,
+            (float)screenY - markerSize * 0.5f,
+            markerSize,
+            markerSize,
+            45,
+            color
+        );
+    }
+
+    private void EnsureSearchMarkerTexture()
+    {
+        if (searchMarkerTexture?.TextureId > 0) return;
+
+        const int size = 64;
+        searchMarkerTexture ??= new LoadedTexture(capi);
+        using ImageSurface surface = new(Format.Argb32, size, size);
+        using Context context = new(surface);
+        context.Operator = Operator.Source;
+        context.SetSourceRGBA(0, 0, 0, 0);
+        context.Paint();
+        context.Operator = Operator.Over;
+
+        for (int radius = 28; radius >= 18; radius -= 2)
+        {
+            double progress = (28 - radius) / 10.0;
+            context.SetSourceRGBA(1, 1, 1, 0.025 + progress * 0.018);
+            context.Arc(32, 32, radius, 0, Math.PI * 2);
+            context.Fill();
+        }
+        context.SetSourceRGBA(1, 1, 1, 0.96);
+        context.LineWidth = 3;
+        context.Arc(32, 32, 17, 0, Math.PI * 2);
+        context.Stroke();
+        context.LineWidth = 2;
+        context.MoveTo(32, 7);
+        context.LineTo(32, 20);
+        context.MoveTo(32, 44);
+        context.LineTo(32, 57);
+        context.MoveTo(7, 32);
+        context.LineTo(20, 32);
+        context.MoveTo(44, 32);
+        context.LineTo(57, 32);
+        context.Stroke();
+        context.Arc(32, 32, 3.5, 0, Math.PI * 2);
+        context.Fill();
+
+        capi.Gui.LoadOrUpdateCairoTexture(surface, true, ref searchMarkerTexture);
     }
 
     private bool RenderLiveWorld(float deltaTime)
