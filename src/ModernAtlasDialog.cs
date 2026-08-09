@@ -41,14 +41,20 @@ public sealed class ModernAtlasDialog : GuiDialog
     private double centerX;
     private double centerY;
     private double centerZ;
+    private double targetCenterX;
+    private double targetCenterZ;
     private float yawDegrees = 42;
     private float pitchDegrees = 72;
     private float zoom = 180;
+    private float targetYawDegrees = 42;
+    private float targetPitchDegrees = 72;
+    private float targetZoom = 180;
     private bool loggedFirstRender;
     private int fogTextureWidth;
     private int fogTextureHeight;
     private float fogTextureZoom = -1;
     private float fogTexturePitch = -1;
+    private long lastFogTextureBuildMilliseconds;
     private bool pausedGameForAtlas;
     private float atlasAnimationSeconds;
     private float frozenWindWaveCounter;
@@ -75,7 +81,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override string ToggleKeyCombinationCode => "modernatlas-open";
     public override EnumDialogType DialogType => EnumDialogType.HUD;
-    public override double DrawOrder => 0.82;
+    public override double DrawOrder => 0.98;
     public override double InputOrder => 0.05;
     public override bool PrefersUngrabbedMouse => true;
     public override bool DisableMouseGrab => true;
@@ -123,8 +129,13 @@ public sealed class ModernAtlasDialog : GuiDialog
         centerX = capi.World.Player.Entity.Pos.X;
         centerZ = capi.World.Player.Entity.Pos.Z;
         centerY = capi.World.Player.Entity.Pos.Y;
+        targetCenterX = centerX;
+        targetCenterZ = centerZ;
+        targetYawDegrees = yawDegrees;
+        targetPitchDegrees = pitchDegrees;
         FocusOnExteriorSurface();
         FitLoadedTerrain();
+        zoom = targetZoom;
         SyncSettingsControls();
         capi.Logger.Notification(
             "[ModernAtlas] Opened independent 3D atlas GUI at exterior surface height {0:0.0}; singleplayer paused: {1}.",
@@ -136,6 +147,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     public override void OnRenderGUI(float deltaTime)
     {
         AdvancePausedAnimation();
+        AdvanceCamera(atlasRealDeltaTime);
         if (!loggedFirstRender)
         {
             loggedFirstRender = true;
@@ -254,28 +266,26 @@ public sealed class ModernAtlasDialog : GuiDialog
 
             if (rightDragging)
             {
-                yawDegrees = NormalizeDegrees(yawDegrees + (float)deltaX * 0.42f);
-                pitchDegrees = Math.Clamp(
-                    pitchDegrees - (float)deltaY * 0.32f,
+                targetYawDegrees = NormalizeDegrees(targetYawDegrees + (float)deltaX * 0.42f);
+                targetPitchDegrees = Math.Clamp(
+                    targetPitchDegrees - (float)deltaY * 0.32f,
                     MinimumPitchDegrees,
                     86
                 );
-                InvalidateFogTexture();
             }
 
             if (leftDragging)
             {
-                double worldPerPixel = zoom * 2.0 / Math.Max(1, capi.Render.FrameHeight);
-                double yaw = yawDegrees * GameMath.DEG2RAD;
+                double worldPerPixel = targetZoom * 2.0 / Math.Max(1, capi.Render.FrameHeight);
+                double yaw = targetYawDegrees * GameMath.DEG2RAD;
                 double rightX = Math.Cos(yaw);
                 double rightZ = -Math.Sin(yaw);
                 double forwardX = Math.Sin(yaw);
                 double forwardZ = Math.Cos(yaw);
                 // Drag the map in the same screen-space direction as the mouse.
                 // The vertical sign must not flip when the camera yaw changes.
-                centerX -= (deltaX * rightX + deltaY * forwardX) * worldPerPixel;
-                centerZ -= (deltaX * rightZ + deltaY * forwardZ) * worldPerPixel;
-                InvalidateFogTexture();
+                targetCenterX -= (deltaX * rightX + deltaY * forwardX) * worldPerPixel;
+                targetCenterZ -= (deltaX * rightZ + deltaY * forwardZ) * worldPerPixel;
             }
 
             args.Handled = true;
@@ -300,8 +310,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (args.IsHandled) return;
 
         float wheel = args.deltaPrecise != 0 ? args.deltaPrecise : args.delta;
-        zoom = Math.Clamp(zoom * MathF.Pow(0.84f, wheel), 8, 30000);
-        InvalidateFogTexture();
+        targetZoom = Math.Clamp(targetZoom * MathF.Pow(0.84f, wheel), 8, 30000);
         args.SetHandled();
     }
 
@@ -324,8 +333,8 @@ public sealed class ModernAtlasDialog : GuiDialog
             return;
         }
 
-        float pan = Math.Max(1, zoom * 0.08f);
-        double yaw = yawDegrees * GameMath.DEG2RAD;
+        float pan = Math.Max(1, targetZoom * 0.08f);
+        double yaw = targetYawDegrees * GameMath.DEG2RAD;
         double forwardX = Math.Sin(yaw);
         double forwardZ = Math.Cos(yaw);
         double rightX = Math.Cos(yaw);
@@ -339,14 +348,12 @@ public sealed class ModernAtlasDialog : GuiDialog
         else if (args.KeyCode == (int)GlKeys.E) Rotate(6, args);
         else if (args.KeyCode == (int)GlKeys.R)
         {
-            pitchDegrees = Math.Clamp(pitchDegrees + 4, MinimumPitchDegrees, 86);
-            InvalidateFogTexture();
+            targetPitchDegrees = Math.Clamp(targetPitchDegrees + 4, MinimumPitchDegrees, 86);
             args.Handled = true;
         }
         else if (args.KeyCode == (int)GlKeys.F)
         {
-            pitchDegrees = Math.Clamp(pitchDegrees - 4, MinimumPitchDegrees, 86);
-            InvalidateFogTexture();
+            targetPitchDegrees = Math.Clamp(targetPitchDegrees - 4, MinimumPitchDegrees, 86);
             args.Handled = true;
         }
         else if (args.KeyCode == (int)GlKeys.Space)
@@ -683,25 +690,23 @@ public sealed class ModernAtlasDialog : GuiDialog
     private void ResetView()
     {
         CenterOnPlayer();
-        yawDegrees = 42;
-        pitchDegrees = 72;
+        targetYawDegrees = 42;
+        targetPitchDegrees = 72;
         FitLoadedTerrain();
     }
 
     private void CenterOnPlayer()
     {
-        centerX = capi.World.Player.Entity.Pos.X;
-        centerZ = capi.World.Player.Entity.Pos.Z;
+        targetCenterX = capi.World.Player.Entity.Pos.X;
+        targetCenterZ = capi.World.Player.Entity.Pos.Z;
         centerY = capi.World.Player.Entity.Pos.Y;
         FocusOnExteriorSurface();
-        InvalidateFogTexture();
     }
 
     private void Pan(double x, double z, float amount, KeyEvent args)
     {
-        centerX += x * amount;
-        centerZ += z * amount;
-        InvalidateFogTexture();
+        targetCenterX += x * amount;
+        targetCenterZ += z * amount;
         args.Handled = true;
     }
 
@@ -715,7 +720,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         float radius = GameViewDistance;
         float aspect = capi.Render.FrameWidth / (float)Math.Max(1, capi.Render.FrameHeight);
-        float pitch = pitchDegrees * GameMath.DEG2RAD;
+        float pitch = targetPitchDegrees * GameMath.DEG2RAD;
 
         // A circular radius projects to an ellipse when the camera tilts. Add
         // vertical headroom for trees, buildings and hills so neither the top
@@ -723,8 +728,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         float horizontalFit = radius / Math.Max(0.5f, aspect);
         float verticalFit = radius * Math.Abs(MathF.Sin(pitch))
             + Math.Min(192, radius * 0.3f) * Math.Abs(MathF.Cos(pitch));
-        zoom = Math.Clamp(Math.Max(horizontalFit, verticalFit) * 1.08f, 80, 30000);
-        InvalidateFogTexture();
+        targetZoom = Math.Clamp(Math.Max(horizontalFit, verticalFit) * 1.08f, 80, 30000);
     }
 
     private void OnFogToggled(bool enabled)
@@ -849,8 +853,8 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private void FocusOnExteriorSurface()
     {
-        int x = (int)Math.Floor(centerX);
-        int z = (int)Math.Floor(centerZ);
+        int x = (int)Math.Floor(targetCenterX);
+        int z = (int)Math.Floor(targetCenterZ);
         BlockPos position = new(x, 0, z);
         if (capi.World.BlockAccessor.GetMapChunkAtBlockPos(position) == null) return;
 
@@ -898,6 +902,43 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
     }
 
+    private void AdvanceCamera(float realDeltaTime)
+    {
+        float blend = 1f - MathF.Exp(-14f * Math.Clamp(realDeltaTime, 0, 0.1f));
+        if (blend <= 0) return;
+
+        double oldCenterX = centerX;
+        double oldCenterZ = centerZ;
+        float oldYaw = yawDegrees;
+        float oldPitch = pitchDegrees;
+        float oldZoom = zoom;
+
+        centerX += (targetCenterX - centerX) * blend;
+        centerZ += (targetCenterZ - centerZ) * blend;
+        float yawDelta = NormalizeSignedDegrees(targetYawDegrees - yawDegrees);
+        yawDegrees = NormalizeDegrees(yawDegrees + yawDelta * blend);
+        pitchDegrees += (targetPitchDegrees - pitchDegrees) * blend;
+        zoom += (targetZoom - zoom) * blend;
+
+        if (Math.Abs(targetCenterX - centerX) < 0.001) centerX = targetCenterX;
+        if (Math.Abs(targetCenterZ - centerZ) < 0.001) centerZ = targetCenterZ;
+        if (Math.Abs(NormalizeSignedDegrees(targetYawDegrees - yawDegrees)) < 0.001f)
+        {
+            yawDegrees = targetYawDegrees;
+        }
+        if (Math.Abs(targetPitchDegrees - pitchDegrees) < 0.001f) pitchDegrees = targetPitchDegrees;
+        if (Math.Abs(targetZoom - zoom) < 0.001f) zoom = targetZoom;
+
+        if (Math.Abs(centerX - oldCenterX) > 0.0001
+            || Math.Abs(centerZ - oldCenterZ) > 0.0001
+            || Math.Abs(NormalizeSignedDegrees(yawDegrees - oldYaw)) > 0.0001f
+            || Math.Abs(pitchDegrees - oldPitch) > 0.0001f
+            || Math.Abs(zoom - oldZoom) > 0.0001f)
+        {
+            InvalidateFogTexture();
+        }
+    }
+
     private void CaptureAnimationFrame()
     {
         DefaultShaderUniforms uniforms = capi.Render.ShaderUniforms;
@@ -918,11 +959,14 @@ public sealed class ModernAtlasDialog : GuiDialog
         int frameHeight = capi.Render.FrameHeight;
         int width = Math.Max(1, (frameWidth + FogTextureDownsample - 1) / FogTextureDownsample);
         int height = Math.Max(1, (frameHeight + FogTextureDownsample - 1) / FogTextureDownsample);
-        if (fogTexture == null
+        bool needsRebuild = fogTexture == null
             || fogTextureWidth != width
             || fogTextureHeight != height
             || Math.Abs(fogTextureZoom - zoom) > 0.1f
-            || Math.Abs(fogTexturePitch - pitchDegrees) > 0.1f)
+            || Math.Abs(fogTexturePitch - pitchDegrees) > 0.1f;
+        if (needsRebuild
+            && (fogTexture == null
+                || capi.ElapsedMilliseconds - lastFogTextureBuildMilliseconds >= 40))
         {
             RebuildFogTexture(width, height);
         }
@@ -968,6 +1012,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         fogTextureHeight = height;
         fogTextureZoom = zoom;
         fogTexturePitch = pitchDegrees;
+        lastFogTextureBuildMilliseconds = capi.ElapsedMilliseconds;
 
         using ImageSurface surface = new(Format.Argb32, Math.Max(1, width), Math.Max(1, height));
         using Context context = new(surface);
@@ -1034,8 +1079,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private void Rotate(float degrees, KeyEvent args)
     {
-        yawDegrees = NormalizeDegrees(yawDegrees + degrees);
-        InvalidateFogTexture();
+        targetYawDegrees = NormalizeDegrees(targetYawDegrees + degrees);
         args.Handled = true;
     }
 
@@ -1043,5 +1087,11 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         value %= 360;
         return value < 0 ? value + 360 : value;
+    }
+
+    private static float NormalizeSignedDegrees(float value)
+    {
+        value = NormalizeDegrees(value);
+        return value > 180 ? value - 360 : value;
     }
 }
