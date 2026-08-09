@@ -229,6 +229,8 @@ internal sealed class AtlasEntityModelRendererAdapter
         private EntityAgent? localPlayerAgent;
         private ItemSlot? savedLeftHandItemSlot;
         private ItemSlot? savedRightHandItemSlot;
+        private FieldInfo? renderHeldItemField;
+        private bool savedRenderHeldItem;
 
         public Entity Entity { get; }
         public EntityRenderer Renderer { get; }
@@ -255,6 +257,12 @@ internal sealed class AtlasEntityModelRendererAdapter
         {
             if (Entity != localPlayerEntity || Entity is not EntityAgent agent) return;
 
+            renderHeldItemField = FindField(Renderer.GetType(), "DoRenderHeldItem");
+            if (renderHeldItemField?.FieldType == typeof(bool))
+            {
+                savedRenderHeldItem = (bool)(renderHeldItemField.GetValue(Renderer) ?? true);
+                renderHeldItemField.SetValue(Renderer, false);
+            }
             localPlayerAgent = agent;
             savedLeftHandItemSlot = agent.LeftHandItemSlot;
             savedRightHandItemSlot = agent.RightHandItemSlot;
@@ -293,12 +301,17 @@ internal sealed class AtlasEntityModelRendererAdapter
                 localPlayerAgent.LeftHandItemSlot = savedLeftHandItemSlot;
                 localPlayerAgent.RightHandItemSlot = savedRightHandItemSlot;
             }
+            if (renderHeldItemField != null)
+            {
+                renderHeldItemField.SetValue(Renderer, savedRenderHeldItem);
+            }
             renderModeField = null;
             savedRenderMode = null;
             localPlayer = null;
             localPlayerAgent = null;
             savedLeftHandItemSlot = null;
             savedRightHandItemSlot = null;
+            renderHeldItemField = null;
         }
 
         private static FieldInfo? FindField(Type type, string name)
