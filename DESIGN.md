@@ -1,70 +1,84 @@
 # ModernAtlas 3D renderer design
 
-## Why a separate atlas cache is required
+## Why the atlas uses exact loaded meshes
 
-The vanilla client map retains explored map imagery and height information, but
-it is not a permanent copy of every block in every visited chunk. Precise roofs,
-walls, trees and ruins can therefore be reconstructed only while their chunks
-are loaded on the client. ModernAtlas will capture a compact representation at
-that time and keep it in its own disposable per-world cache.
+The client map does not contain the block geometry needed to reproduce roofs,
+walls, trees, connected models or modded block shapes. ModernAtlas therefore
+draws Vintage Story's already completed client chunk meshes directly while the
+corresponding chunks are loaded. It does not request distant chunks, invent a
+height-field replacement or maintain a persistent terrain cache. Unavailable
+geometry is concealed by the player-anchored fog boundary.
 
-## Data flow
+## Render flow
 
-1. Observe client-loaded chunk columns and block-change events.
-2. On the game thread, copy only the block data required for visible surfaces.
-3. Resolve registered block definitions. Unknown or broken definitions map to a
-   configurable neutral stone fallback.
-4. Use Vintage Story's block tessellator and texture atlas so modded block
-   shapes and materials retain their appearance.
-5. Build atlas meshes or raster tiles incrementally outside the render loop.
-6. Upload a bounded number of completed resources per frame.
-7. Draw them with an orthographic camera that supports pan, zoom, rotation and
-   tilt. Draw the game's live clouds afterward as a non-persistent, optional,
-   bounded 3D layer with soft independent shadows, using their current weather
-   phase and world position.
+1. Open a dedicated full-screen atlas framebuffer and orthographic camera.
+2. Reuse completed opaque chunk meshes with the engine's registered block
+   texture atlases, color maps and current animation uniforms.
+3. Draw only server-authorized, already loaded living models into the same
+   terrain depth buffer.
+4. Run the engine's required before/after OIT setup around non-fluid
+   transparent chunk materials, without invoking the global entity or particle
+   render stage.
+5. Draw completed liquid mesh pools with the stable ModernAtlas liquid shader.
+6. Apply the transient cave-safety, loaded-data layer and disclosure-boundary
+   filters, compose OIT into the native Primary framebuffer, and blit once to
+   the window.
+7. Draw optional live cloud cover, fog and lightweight GUI markers afterward.
+8. Restore every modified engine uniform and framebuffer state before normal
+   world rendering resumes.
 
-## Visibility policy
+## Visibility and disclosure
 
-The capture includes blocks and fluids that contribute to the visible exterior
-of the world. Fully enclosed and subterranean cave geometry may be discarded.
-The default camera follows the client rain-height surface and does not provide
-an underground cutaway. Server-authorized 3D models may render already loaded
-players, animals, hostile mobs and NPCs. They are drawn before fog so the fog
-still conceals them. Model renderers and all other transient systems remain
-excluded, including armor, held or dropped items, weapons and particles.
+The atlas follows Vintage Story's own view-distance setting because that is
+what determines which exact meshes exist on the client. The clear radius is
+anchored to the player's real position, so panning the atlas camera cannot
+reveal new terrain. Multiplayer fog and living-model categories are limited by
+the server policy, with fog on and living models off when no policy arrives.
 
-The live prototype does not generate a height-field shell or textured boundary
-wall. It draws only exact client-loaded chunk geometry and uses the existing
-unexplored-area fog where data is unavailable. Any future cave mask must avoid
-inventing visible blocks or cutting valleys, slopes and building walls at a
-single global height.
+The transient surface-height texture hides underground geometry in safe mode.
+An exterior envelope preserves complete cliff steps, building walls and floors
+near the surface. Faces farther below the envelope use a subdued neutral-gray
+atlas material so a cave opening cannot expose the empty framebuffer. This is
+a shader treatment of real geometry, not a generated shell or world block.
 
-The atlas does not reuse shadow maps rendered for the normal player camera.
-Those maps do not align with the elevated orthographic atlas eye and produce
-chunk-sized dark squares near dusk. Atlas terrain instead keeps stable vertex
-lighting and normal-based directional shading from a fixed neutral light.
+## Search and analysis layers
 
-The live exact-mesh prototype follows Vintage Story's own view-distance setting.
-It does not expose a second radius because only the game controls which chunk
-meshes are loaded and therefore available to the atlas.
+Search resolves registered block definitions and scans only chunks for which
+the public block accessor already returns client data. It is incremental and
+budgeted; entities are limited to authorized rendered living models, while
+Creative/Cheat dropped-item results use markers instead of the global item
+renderer.
 
-## Compatibility policy
+Climate and land-analysis layers sample only loaded map chunks and regions into
+a transient eight-block-resolution color texture. The shader tints existing 3D
+geometry and can return immediately to normal textured terrain. Ore-density
+analysis is restricted to singleplayer Creative or accepted Cheat Mode. When a
+loaded region has no ore-potential map, the layer samples registered
+`EnumBlockMaterial.Ore` blocks in already loaded vertical chunk columns; it
+never requests or generates missing chunks. No layer is stored in a save, map
+database or ModernAtlas terrain cache.
 
-Block identity is stored by asset code rather than numeric ID because numeric
-IDs may change when a mod list changes. The cache records a content fingerprint.
-If a contributing mod disappears or changes, unresolved entries use neutral
-stone and affected chunks are rebuilt when source world data becomes available.
+Search and inspection labels avoid the engine's translated collectible and
+entity name methods while the survival handbook may still be building on a
+worker thread. Stable asset codes, custom names and player nicknames avoid a
+known concurrent mutation path in Vintage Story's translation diagnostics.
 
-The initial implementation may simplify special dynamic block entities. The
-ordinary registered block remains visible, while custom animated or entity-like
-attachments are excluded unless they can be obtained safely through the normal
-block tessellation path.
+World teardown restores managed shader source and Harmony state without
+activating engine shaders. Vintage Story clears default shader-uniform arrays
+before the `LeaveWorld` event, so uniform uploads during disposal can reach the
+graphics driver with null color-map data. Atlas filter uniforms are instead
+disabled by the render-pass `finally` block before teardown begins.
 
-## Graceful levels of detail
+## Compatibility boundary
 
-- Far: vanilla map color plus stored height relief.
-- Medium: one representative textured surface per block column with elevation.
-- Near: cached exposed block geometry, including vertical walls and structures.
+Vintage Story 1.22.6 does not publicly expose its completed terrain GPU meshes,
+so that integration is isolated in `ExactChunkRendererAdapter` and guarded by a
+version check. Block materials and shapes still come from the runtime engine
+atlases and meshes, which preserves registered mod content without hard-coded
+vanilla block IDs. If exact rendering or a safety shader is unavailable, the
+atlas reports the failure instead of substituting invented terrain.
 
-This prevents a continent-sized atlas from keeping millions of detailed block
-meshes on the GPU at once.
+The normal player-camera shadow map is never sampled from the elevated atlas
+camera. Atlas visual-lab controls alter only atlas exposure, layer opacity,
+boundary softness, cave-mask brightness and fog palette; all world renderer
+state is restored after the atlas pass.

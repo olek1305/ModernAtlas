@@ -139,6 +139,17 @@ the product scope when the atlas itself is correct.
   `~` editor from the atlas Settings UI. Clearly label them as developer visual
   controls, scope them to the atlas framebuffer and restore all engine state
   after every atlas draw.
+- The current data-layer implementation samples only already loaded map chunks,
+  map regions and exact chunk block data into a transient,
+  eight-block-resolution GPU color texture. It tints the exact 3D geometry
+  instead of drawing a replacement heightfield. If a loaded client map region
+  contains no ore-potential maps, the Creative/Cheat ore layer samples vertical
+  columns from already loaded chunks and recognizes registered blocks through
+  `EnumBlockMaterial.Ore`; it must not request, unpack or generate a chunk.
+- `Atlas visual lab` is the supported replacement for relying on the engine's
+  `~` ambient editor while `G` owns input. Its exposure, layer opacity,
+  boundary softness, cave-mask brightness and fog palette controls affect only
+  the atlas framebuffer. Keep their defaults neutral and their ranges bounded.
 
 ## View distance and multiplayer rules
 
@@ -217,11 +228,32 @@ the product scope when the atlas itself is correct.
   `0.98` so ordinary third-party HUDs remain behind the full-screen map.
 - Persistent ModernAtlas terrain cache code, shaders and Settings controls are
   removed. The atlas renders only current exact chunk meshes.
-- The current code checkpoint is commit `d5f0b94` (`fix: stabilize exact atlas
-  surface rendering`), packaged by `6a5b07f` (`build: package ModernAtlas
-  0.6.1`). It restores complete loaded terrain and liquids, hides underground
-  geometry with a transient surface-height texture, and disables the normal
-  sky-horizon tint only during atlas terrain rendering.
+- Cave openings use a neutral gray atlas-only concealment material, while a
+  one-block exterior envelope preserves cliff sides, building walls and floor
+  faces near the three-block safety allowance.
+- Singleplayer Creative and accepted Cheat Mode permit a zero-degree pitch
+  floor, unit inspection, dropped-item search and ore-density analysis. The
+  camera never crosses into negative pitch.
+- Loaded-data search resolves registered block asset codes incrementally, then
+  scans only already loaded chunks under a strict per-frame budget. Entity
+  results come only from models already authorized and rendered by the atlas.
+  During world startup, do not call translated `GetHeldItemName`,
+  `ItemStack.GetName` or `Entity.GetName` from atlas search or unit inspection:
+  the survival handbook can concurrently mutate Vintage Story's non-thread-safe
+  translation diagnostics. Use stable asset codes, explicit custom names and
+  player nicknames instead.
+- The 0.6.1 test-cycle feature checkpoints include `7fe0f01` (surface safety,
+  lifecycle smoke test and Creative camera), `6640a5d` (unit inspection) and
+  `5bba376` (loaded-data search). Commit `669c4bb` adds loaded-data analysis
+  layers, the atlas visual lab, translation-safe search labels, streaming-race
+  guards and shader-safe world teardown. Its full automated atlas and
+  world-exit regression passed with the normal full mod set.
+- World teardown starts after Vintage Story replaces `DefaultShaderUniforms`.
+  `ExactChunkRendererAdapter.Dispose` must never activate an engine shader or
+  upload uniforms at that point; doing so can pass a null `colorMapRects[40]`
+  array to `glUniform4fv` and crash Mesa. Restore managed shader source and
+  Harmony state only. Atlas filter switches are cleared in each render
+  `finally` block while the renderer is still valid.
 
 ## Build and in-game test workflow
 
@@ -238,6 +270,12 @@ the product scope when the atlas itself is correct.
   capture diagnostics/screenshots and exit cleanly without X11/Wayland key
   injection. It must be disabled during normal play and must never modify a
   save, generate terrain or bypass multiplayer disclosure policy.
+- The smoke test must exercise exact terrain, stable liquids, the zero-degree
+  Creative pitch, unit inspection, entity and block search, a climate layer,
+  the Creative/Cheat ore layer, atlas closure and the normal soft-exit path.
+  Schedule its window-close request through `ScreenManager.EnqueueCallBack` so
+  it runs between frames; invoking `ExitOrRedirect` from inside the atlas render
+  or pre-setting `exitToMainMenu` can invalidate or bypass game-session teardown.
 - Check for ModernAtlas shader compilation failures, disposed shaders, OpenGL
   errors, exceptions, and the stable-liquid geometry diagnostic. A successful
   log is necessary but does not prove visual correctness; ask the project owner

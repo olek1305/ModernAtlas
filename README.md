@@ -46,9 +46,24 @@ client-side; an optional server component supplies fog and living-entity policy.
   by Vintage Story's graphics options;
 - anchors the atlas camera to the live rain-height surface and keeps a
   20-degree-or-higher tilt range so an underground player does not open a cave
-  cutaway instead of the exterior;
+  cutaway instead of the exterior; singleplayer Creative and accepted Cheat
+  Mode may tilt to exactly zero degrees but never below the ground plane;
 - draws only the game's exact loaded chunk geometry and does not generate an
   artificial textured surface or wall around the atlas radius;
+- covers clipped cave openings with a quiet neutral-gray atlas material while
+  retaining real cliff sides, building walls and floor faces near the surface;
+- provides Creative/Cheat unit frames for clicked, already rendered living
+  models, including name, category, health and loaded public details;
+- searches already loaded blocks and permitted entities incrementally, with
+  visible atlas markers and no distant chunk requests; Creative/Cheat may also
+  search already loaded dropped items without rendering the global item stage;
+- offers reversible fertility, moisture, temperature, forest-density and
+  geologic-activity overlays, plus a Creative/Cheat ore-density layer, by
+  tinting only the exact 3D geometry already present in the atlas; ore density
+  uses loaded regional data when available and otherwise samples registered ore
+  blocks from already loaded chunk columns;
+- includes an atlas-only visual lab under Settings for exposure, layer opacity,
+  boundary softness, cave-mask brightness and neutral fog palettes;
 - forces the unexplored-area mask in multiplayer while using only exact chunk
   data that the server has already sent to the client;
 - can render the game's live animated 3D models for already client-loaded
@@ -57,14 +72,17 @@ client-side; an optional server component supplies fog and living-entity policy.
   ModernAtlas policy channel, so a vanilla multiplayer server remains safe.
 
 Dropped items, particles, labels and unrelated transient objects are never
-queried. Optional living models iterate only `LoadedEntities`, so the atlas
+drawn by the ordinary atlas render. Creative/Cheat search may inspect already
+loaded dropped-item entities and represent matches with lightweight markers.
+Optional living models iterate only `LoadedEntities`, so the atlas
 does not request or receive hidden entity positions. Models use the same world
 depth buffer as terrain and fluids, so walls and fog conceal them. In paused
 singleplayer they hold the pose captured when the atlas opens instead of
 continuing run, walk or gesture animation. The renderer is an
 isolated 1.22.6 integration. If it is unavailable, ModernAtlas reports the
 failure instead of displaying substitute block models or invented materials.
-Persistent coverage of previously visited distant terrain is the next cache stage.
+There is no persistent ModernAtlas terrain cache; unavailable exact terrain is
+concealed by the player-anchored fog boundary.
 
 The atlas settings include a `Living entities` master switch and separate
 `Players`, `Animals`, `Hostile mobs`, and `NPCs` switches. These are normal
@@ -139,13 +157,10 @@ not bundle any Vintage Story binaries or assets.
 
 ## Planned architecture
 
-1. Persistent, world-specific ModernAtlas block cache (separate from saves).
-2. More selective exposed-face geometry for terrain, trees, buildings, paths
-   and ruins.
-3. Zoom-dependent levels of detail and a larger navigable world area.
-4. Additional visual polish matching the concept image.
-5. Optional server-provided block tiles, respecting server map permissions and
-   never revealing unexplored terrain by default.
+1. Continue rendering exact client-loaded block meshes without a terrain cache.
+2. Refine the player-anchored fog transition and loaded-data analysis layers.
+3. Add atlas quality and compatibility polish within strict frame budgets.
+4. Continue optional cloud and presentation polish matching the concept image.
 
 See `DESIGN.md` for the renderer and compatibility design. `AGENTS.md` records
 the product goal and safety rules for future Codex sessions.
