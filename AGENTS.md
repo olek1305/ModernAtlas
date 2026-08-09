@@ -267,15 +267,40 @@ the product scope when the atlas itself is correct.
   `client-main.log` rather than relying on an older session.
 - Maintain an opt-in automated atlas smoke-test path that can launch the client,
   join a named test world, open and close the atlas through ModernAtlas code,
-  capture diagnostics/screenshots and exit cleanly without X11/Wayland key
-  injection. It must be disabled during normal play and must never modify a
-  save, generate terrain or bypass multiplayer disclosure policy.
+  capture diagnostics and exit cleanly without X11/Wayland key injection. It
+  must be disabled during normal play and must never modify a save, generate
+  terrain or bypass multiplayer disclosure policy.
+- Run the automated game-control test with the normal data directory and an
+  explicitly named singleplayer test world, for example:
+
+  ```sh
+  env MODERNATLAS_SMOKE_TEST=1 /opt/vintagestory/Vintagestory \
+    --dataPath /home/arcylisz/.config/VintagestoryData -o 'test creative'
+  ```
+
+  The `-o` argument performs the world join. `OnLevelFinalize` waits for that
+  world to be ready, then `BeginAutomatedSmokeTest` and `TryOpen` open the same
+  atlas dialog normally toggled by `G`. Do not use `xdotool`, `sendkey`, fake
+  mouse input or other synthetic desktop input for this test; those methods
+  are unreliable and may control the wrong window. Reserve real `G`, `Escape`
+  and mouse controls for the owner's final visual inspection.
 - The smoke test must exercise exact terrain, stable liquids, the zero-degree
   Creative pitch, unit inspection, entity and block search, a climate layer,
   the Creative/Cheat ore layer, atlas closure and the normal soft-exit path.
-  Schedule its window-close request through `ScreenManager.EnqueueCallBack` so
-  it runs between frames; invoking `ExitOrRedirect` from inside the atlas render
-  or pre-setting `exitToMainMenu` can invalidate or bypass game-session teardown.
+  Drive those controls through the dialog's own methods: set the pitch target,
+  select a rendered entity, submit search queries, switch map layers and call
+  `TryClose`. Schedule the final `ClientPlatform.WindowExit(..., SoftExit)`
+  request through `ScreenManager.EnqueueCallBack` so it runs between frames;
+  invoking `ExitOrRedirect` from inside the atlas render or pre-setting
+  `exitToMainMenu` can invalidate or bypass game-session teardown.
+- Record the pre-launch modification time of `client-crash.log`, wait for the
+  game process to exit and require exit code zero. The fresh `client-main.log`
+  must contain `AUTOMATED ATLAS CHECKS PASSED`, `World leave received`,
+  `Released world-specific atlas rendering resources` and
+  `AUTOMATED WORLD-EXIT CHECK PASSED`. It must not contain a new critical
+  error, ModernAtlas exception, shader failure, disposed-shader report or
+  ModernAtlas-attributable OpenGL error, and the test must not create a newer
+  crash log or core dump. Record failures from unrelated mods separately.
 - Check for ModernAtlas shader compilation failures, disposed shaders, OpenGL
   errors, exceptions, and the stable-liquid geometry diagnostic. A successful
   log is necessary but does not prove visual correctness; ask the project owner
