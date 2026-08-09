@@ -20,7 +20,7 @@ out vec2 uv;
 out vec2 uvSize;
 out float stillFrameWeight;
 out vec2 flowVectorf;
-out vec2 absoluteWorldXZ;
+out vec3 absoluteWorldPosition;
 flat out vec2 uvBase;
 flat out int waterFlags;
 
@@ -30,7 +30,7 @@ flat out int waterFlags;
 void main(void)
 {
     vec4 worldPos = vec4(xyz + origin, 1.0);
-    absoluteWorldXZ = worldPos.xz + playerpos.xz;
+    absoluteWorldPosition = worldPos.xyz + playerpos.xyz;
     gl_Position = projectionMatrix * modelViewMatrix * worldPos;
     // Give the liquid surface deterministic depth priority without changing
     // its world-space height or making it camera-relative. Contained liquids

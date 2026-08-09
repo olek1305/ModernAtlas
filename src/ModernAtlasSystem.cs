@@ -25,6 +25,8 @@ public sealed class ModernAtlasSystem : ModSystem
     private IShaderProgram? stableLiquidShader;
     private IShaderProgram? atlasCloudShader;
     private IShaderProgram? atlasOpacityShader;
+    private CheatModeConsentDialog? cheatModeDialog;
+    private string? activeWorldIdentifier;
 
     public override bool ShouldLoad(EnumAppSide side) => true;
 
@@ -63,6 +65,7 @@ public sealed class ModernAtlasSystem : ModSystem
             .RegisterMessageType<ModernAtlasServerPolicy>()
             .SetMessageHandler<ModernAtlasServerPolicy>(OnServerPolicyReceived);
         api.Event.LeaveWorld += OnLeaveWorld;
+        api.Event.LevelFinalize += OnLevelFinalize;
 
         if (GetStableLiquidShader() == null)
         {
@@ -102,6 +105,12 @@ public sealed class ModernAtlasSystem : ModSystem
 
     private bool OnOpenMap(KeyCombination keyCombination)
     {
+        if (cheatModeDialog?.IsOpened() == true)
+        {
+            cheatModeDialog.Focus();
+            return true;
+        }
+
         dialog?.Toggle();
         return true;
     }
@@ -111,6 +120,7 @@ public sealed class ModernAtlasSystem : ModSystem
         if (clientApi != null)
         {
             clientApi.Event.LeaveWorld -= OnLeaveWorld;
+            clientApi.Event.LevelFinalize -= OnLevelFinalize;
         }
         if (serverApi != null)
         {
@@ -118,6 +128,9 @@ public sealed class ModernAtlasSystem : ModSystem
         }
         dialog?.Dispose();
         dialog = null;
+        cheatModeDialog?.CancelWithoutDecision();
+        cheatModeDialog?.Dispose();
+        cheatModeDialog = null;
         stableLiquidShader = null;
         atlasCloudShader = null;
         atlasOpacityShader = null;
@@ -126,6 +139,7 @@ public sealed class ModernAtlasSystem : ModSystem
         config = null;
         serverConfig = null;
         serverPolicyChannel = null;
+        activeWorldIdentifier = null;
         base.Dispose();
     }
 
@@ -153,7 +167,84 @@ public sealed class ModernAtlasSystem : ModSystem
 
     private void OnLeaveWorld()
     {
+        cheatModeDialog?.CancelWithoutDecision();
+        cheatModeDialog?.Dispose();
+        cheatModeDialog = null;
+        activeWorldIdentifier = null;
+        dialog?.SetCheatMode(false);
         serverPolicy.ResetToSafeDefaults();
+    }
+
+    private void OnLevelFinalize()
+    {
+        if (clientApi == null || config == null) return;
+
+        string worldIdentifier = clientApi.World.SavegameIdentifier;
+        if (string.IsNullOrWhiteSpace(worldIdentifier)) return;
+
+        activeWorldIdentifier = worldIdentifier;
+        cheatModeDialog?.CancelWithoutDecision();
+        cheatModeDialog?.Dispose();
+        cheatModeDialog = null;
+
+        // A client preference can never authorize multiplayer disclosure. A
+        // future server policy may add this explicitly; until then the safe
+        // surface-only view is mandatory outside singleplayer.
+        if (!clientApi.IsSinglePlayer)
+        {
+            dialog?.SetCheatMode(false);
+            return;
+        }
+
+        if (config.CheatModeByWorld.TryGetValue(worldIdentifier, out bool enabled))
+        {
+            dialog?.SetCheatMode(enabled);
+            clientApi.Logger.Notification(
+                "[ModernAtlas] Restored the saved spoiler mode for this world: {0}.",
+                enabled ? "Cheat Mode enabled" : "caves hidden"
+            );
+            return;
+        }
+
+        dialog?.SetCheatMode(false);
+        clientApi.Event.RegisterCallback(
+            _ => OpenCheatModeConsent(worldIdentifier),
+            350
+        );
+    }
+
+    private void OpenCheatModeConsent(string worldIdentifier)
+    {
+        if (clientApi == null || config == null
+            || !clientApi.IsSinglePlayer
+            || activeWorldIdentifier != worldIdentifier
+            || config.CheatModeByWorld.ContainsKey(worldIdentifier))
+        {
+            return;
+        }
+
+        cheatModeDialog = new CheatModeConsentDialog(
+            clientApi,
+            enabled => SaveCheatModeDecision(worldIdentifier, enabled)
+        );
+        cheatModeDialog.TryOpen();
+    }
+
+    private void SaveCheatModeDecision(string worldIdentifier, bool enabled)
+    {
+        if (clientApi == null || config == null
+            || activeWorldIdentifier != worldIdentifier)
+        {
+            return;
+        }
+
+        config.CheatModeByWorld[worldIdentifier] = enabled;
+        SaveConfig();
+        dialog?.SetCheatMode(enabled);
+        clientApi.Logger.Notification(
+            "[ModernAtlas] Saved the spoiler decision for this world: {0}.",
+            enabled ? "Cheat Mode enabled" : "underground caves hidden"
+        );
     }
 
     private IShaderProgram? GetStableLiquidShader()

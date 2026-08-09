@@ -28,6 +28,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private readonly Func<IShaderProgram?> stableLiquidShaderProvider;
     private readonly Func<IShaderProgram?> atlasCloudShaderProvider;
     private readonly Func<IShaderProgram?> atlasOpacityShaderProvider;
+    private readonly AtlasSurfaceHeightTexture surfaceHeightTexture;
 
     private GuiComposer? overlay;
     private GuiComposer? settingsModal;
@@ -62,6 +63,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     private long lastAtlasFrameMilliseconds;
     private float atlasRealDeltaTime;
     private bool loggedEntityModels;
+    private bool cheatModeEnabled;
+    private bool preparingSurfaceFilter;
 
     private int GameViewDistance
     {
@@ -76,6 +79,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool EffectiveFogEnabled => capi.IsSinglePlayer
         ? config.FogEnabled
         : serverPolicy.FogEnabled;
+    private bool SurfaceSafetyEnabled => !capi.IsSinglePlayer || !cheatModeEnabled;
 
     public override string ToggleKeyCombinationCode => "modernatlas-open";
     public override EnumDialogType DialogType => EnumDialogType.HUD;
@@ -100,6 +104,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         this.stableLiquidShaderProvider = stableLiquidShaderProvider;
         this.atlasCloudShaderProvider = atlasCloudShaderProvider;
         this.atlasOpacityShaderProvider = atlasOpacityShaderProvider;
+        surfaceHeightTexture = new AtlasSurfaceHeightTexture(capi);
         RefreshVisibleEntityPolicy();
         ComposeOverlay();
     }
@@ -129,6 +134,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         FocusOnExteriorSurface();
         FitLoadedTerrain();
         zoom = targetZoom;
+        PrepareSurfaceSafetyFilter();
         SyncSettingsControls();
         capi.Logger.Notification(
             "[ModernAtlas] Opened independent 3D atlas GUI at exterior surface height {0:0.0}; singleplayer paused: {1}.",
@@ -175,9 +181,16 @@ public sealed class ModernAtlasDialog : GuiDialog
             : capi.IsSinglePlayer || serverPolicy.AnyEntityModels
                 ? "living models off"
                 : "living models blocked by server";
+        string caveStatus = SurfaceSafetyEnabled
+            ? "underground caves hidden"
+            : "cave view (Cheat Mode)";
         string multiplayerStatus = capi.IsSinglePlayer ? "singleplayer controls" : "multiplayer safe limits locked";
         string pauseStatus = capi.IsSinglePlayer ? "game paused" : "live server";
-        string status = $"Game view distance {GameViewDistance} blocks • {fogStatus} • {lightingStatus} • {animationStatus} • {cloudStatus} • {entityStatus} • exterior surface • {pauseStatus} • {multiplayerStatus} • {rendererStatus} • no distant chunk requests";
+        if (preparingSurfaceFilter)
+        {
+            rendererStatus = $"preparing surface safety {surfaceHeightTexture.ProgressPercent}%";
+        }
+        string status = $"Game view distance {GameViewDistance} blocks • {fogStatus} • {lightingStatus} • {animationStatus} • {cloudStatus} • {entityStatus} • {caveStatus} • exterior surface • {pauseStatus} • {multiplayerStatus} • {rendererStatus} • no distant chunk requests";
         overlay?.GetDynamicText("status").SetNewText(status);
         overlay?.Render(deltaTime);
         if (settingsModalOpen)
@@ -389,6 +402,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     public override void OnGuiClosed()
     {
         settingsModalOpen = false;
+        preparingSurfaceFilter = false;
+        surfaceHeightTexture.Reset();
         ResetPointerDrag();
         ResumeSingleplayerAfterAtlas();
         base.OnGuiClosed();
@@ -401,11 +416,20 @@ public sealed class ModernAtlasDialog : GuiDialog
         SyncSettingsControls();
     }
 
+    public void SetCheatMode(bool enabled)
+    {
+        cheatModeEnabled = capi.IsSinglePlayer && enabled;
+        if (!IsOpened()) return;
+
+        PrepareSurfaceSafetyFilter();
+    }
+
     public override void Dispose()
     {
         ResumeSingleplayerAfterAtlas();
         exactChunkRenderer?.Dispose();
         exactChunkRenderer = null;
+        surfaceHeightTexture.Dispose();
         fogTexture?.Dispose();
         fogTexture = null;
         opacityQuad?.Dispose();
@@ -613,6 +637,13 @@ public sealed class ModernAtlasDialog : GuiDialog
         IRenderAPI render = capi.Render;
         render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
 
+        preparingSurfaceFilter = SurfaceSafetyEnabled && !surfaceHeightTexture.Advance();
+        if (preparingSurfaceFilter)
+        {
+            ClearSurfacePreparationFrame();
+            return false;
+        }
+
         float aspect = render.FrameWidth / (float)Math.Max(1, render.FrameHeight);
         float farPlane = Math.Max(2000, GameViewDistance * 6);
         Mat4f.Ortho(projection, -zoom * aspect, zoom * aspect, -zoom, zoom, 0.1f, farPlane);
@@ -645,6 +676,8 @@ public sealed class ModernAtlasDialog : GuiDialog
             pitch,
             GameViewDistance,
             EffectiveFogEnabled,
+            SurfaceSafetyEnabled,
+            SurfaceSafetyEnabled ? surfaceHeightTexture : null,
             windWaveCounter,
             windWaveCounterHighFrequency,
             waterStillCounter,
@@ -688,6 +721,30 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         leftDragging = false;
         rightDragging = false;
+    }
+
+    private void PrepareSurfaceSafetyFilter()
+    {
+        preparingSurfaceFilter = SurfaceSafetyEnabled;
+        if (!SurfaceSafetyEnabled)
+        {
+            surfaceHeightTexture.Reset();
+            return;
+        }
+
+        surfaceHeightTexture.Begin(
+            capi.World.Player.Entity.Pos.X,
+            capi.World.Player.Entity.Pos.Z,
+            GameViewDistance
+        );
+    }
+
+    private void ClearSurfacePreparationFrame()
+    {
+        // Draw an opaque Primary frame while the small surface texture is
+        // prepared. Clearing the default framebuffer directly can leave the
+        // native Linux window transparent after the atlas closes.
+        exactChunkRenderer?.RenderSurfacePreparationFrame(EffectiveFogEnabled);
     }
 
     private void FitLoadedTerrain()
@@ -990,7 +1047,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         using ImageSurface surface = new(Format.Argb32, Math.Max(1, width), Math.Max(1, height));
         using Context context = new(surface);
         context.Operator = Operator.Source;
-        context.SetSourceRGBA(0.32, 0.38, 0.40, 0.90);
+        context.SetSourceRGBA(0.32, 0.38, 0.40, 1.0);
         context.Paint();
 
         double radiusX = height * GameViewDistance / (2.0 * zoom);
@@ -1017,14 +1074,17 @@ public sealed class ModernAtlasDialog : GuiDialog
         double centerScreenX = width / 2.0 + projectedRight * pixelsPerBlock;
         double centerScreenY = height / 2.0 - projectedUp * pixelsPerBlock;
 
-        // Keep the complete game view distance clear. The feather starts only
-        // outside that radius so tilted hills and buildings are not hidden by
-        // the GUI fog mask.
-        const int featherSteps = 18;
+        // Overlap the view-distance edge instead of starting beyond it. This
+        // hides transient chunk cross-sections and turns the disclosure limit
+        // into an atmospheric horizon rather than a hard circular cutout.
+        const double clearScale = 0.90;
+        const double opaqueScale = 1.04;
+        const int featherSteps = 24;
         for (int step = featherSteps; step >= 0; step--)
         {
-            double scale = 1.0 + 0.18 * step / featherSteps;
-            double alpha = 0.90 * step / featherSteps;
+            double progress = step / (double)featherSteps;
+            double scale = clearScale + (opaqueScale - clearScale) * progress;
+            double alpha = progress;
             context.Save();
             context.Translate(centerScreenX, centerScreenY);
             context.Scale(radiusX * scale, radiusY * scale);
@@ -1035,7 +1095,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
         context.Save();
         context.Translate(centerScreenX, centerScreenY);
-        context.Scale(radiusX, radiusY);
+        context.Scale(radiusX * clearScale, radiusY * clearScale);
         context.Arc(0, 0, 1, 0, Math.PI * 2);
         context.Restore();
         context.SetSourceRGBA(0, 0, 0, 0);

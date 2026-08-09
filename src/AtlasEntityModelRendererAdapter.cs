@@ -31,7 +31,8 @@ internal sealed class AtlasEntityModelRendererAdapter
         double[] view,
         float[] projection,
         int viewDistanceBlocks,
-        ModernAtlasServerPolicy policy
+        ModernAtlasServerPolicy policy,
+        AtlasSurfaceHeightTexture? surfaceHeightTexture
     )
     {
         if (disabled || !policy.AnyEntityModels) return 0;
@@ -39,7 +40,7 @@ internal sealed class AtlasEntityModelRendererAdapter
         List<RenderEntry>? entries = null;
         try
         {
-            entries = CollectEntries(viewDistanceBlocks, policy);
+            entries = CollectEntries(viewDistanceBlocks, policy, surfaceHeightTexture);
             if (entries.Count == 0) return 0;
 
             foreach (RenderEntry entry in entries)
@@ -123,7 +124,8 @@ internal sealed class AtlasEntityModelRendererAdapter
 
     private List<RenderEntry> CollectEntries(
         int viewDistanceBlocks,
-        ModernAtlasServerPolicy policy
+        ModernAtlasServerPolicy policy,
+        AtlasSurfaceHeightTexture? surfaceHeightTexture
     )
     {
         List<RenderEntry> entries = new();
@@ -142,6 +144,16 @@ internal sealed class AtlasEntityModelRendererAdapter
             double dx = entity.Pos.X - playerEntity.Pos.X;
             double dz = entity.Pos.Z - playerEntity.Pos.Z;
             if (dx * dx + dz * dz > maximumDistanceSquared) continue;
+            if (surfaceHeightTexture != null
+                && (!surfaceHeightTexture.TryGetSurfaceHeight(
+                        entity.Pos.X,
+                        entity.Pos.Z,
+                        out int surfaceHeight
+                    )
+                    || entity.Pos.Y < surfaceHeight - 3))
+            {
+                continue;
+            }
 
             EntityKind kind = Classify(entity);
             if (!IsAllowed(kind, policy)) continue;

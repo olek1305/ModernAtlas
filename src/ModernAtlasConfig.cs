@@ -1,8 +1,12 @@
+using System.Collections.Generic;
+
 namespace ModernAtlas;
 
 /// <summary>Client-only atlas preferences.</summary>
 public sealed class ModernAtlasConfig
 {
+    private Dictionary<string, bool> cheatModeByWorld = new();
+
     public bool FogEnabled { get; set; }
     public bool AnimationsEnabled { get; set; } = true;
     public bool CloudsEnabled { get; set; } = true;
@@ -13,4 +17,14 @@ public sealed class ModernAtlasConfig
     public bool ShowAnimals { get; set; } = true;
     public bool ShowMobs { get; set; } = true;
     public bool ShowNpcs { get; set; } = true;
+
+    /// <summary>
+    /// Stores the player's explicit spoiler decision per save without writing
+    /// anything to the Vintage Story save or map database.
+    /// </summary>
+    public Dictionary<string, bool> CheatModeByWorld
+    {
+        get => cheatModeByWorld;
+        set => cheatModeByWorld = value ?? new Dictionary<string, bool>();
+    }
 }

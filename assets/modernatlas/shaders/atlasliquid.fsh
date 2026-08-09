@@ -4,12 +4,15 @@ uniform sampler2D terrainTex;
 uniform vec2 blockTextureSize;
 uniform vec2 textureAtlasSize;
 uniform float waterFlowCounter;
-uniform sampler2D loadedChunkMask;
-uniform vec2 maskChunkOrigin;
-uniform float maskSize;
-uniform float chunkSize;
 uniform vec2 disclosureCenterXZ;
 uniform float disclosureRadius;
+uniform float disclosureFeather;
+uniform vec3 boundaryFogColor;
+uniform int atlasHideCaves;
+uniform sampler2D atlasSurfaceHeightTex;
+uniform vec2 atlasSurfaceOriginXZ;
+uniform float atlasSurfaceSampleSize;
+uniform float atlasVisibleSubsurfaceDepth;
 uniform vec3 atlasSunDirection;
 uniform float atlasExposure;
 
@@ -17,7 +20,7 @@ in vec2 uv;
 in vec2 uvSize;
 in float stillFrameWeight;
 in vec2 flowVectorf;
-in vec2 absoluteWorldXZ;
+in vec3 absoluteWorldPosition;
 flat in vec2 uvBase;
 flat in int waterFlags;
 
@@ -25,16 +28,49 @@ layout(location = 0) out vec4 outColor;
 
 #include colormap.fsh
 
+bool readSurfaceHeight(ivec2 samplePosition, out float surfaceHeight)
+{
+    ivec2 dimensions = textureSize(atlasSurfaceHeightTex, 0);
+    if (any(lessThan(samplePosition, ivec2(0)))
+        || any(greaterThanEqual(samplePosition, dimensions)))
+    {
+        return false;
+    }
+
+    vec4 encodedHeight = texelFetch(atlasSurfaceHeightTex, samplePosition, 0);
+    if (encodedHeight.b < 0.5) return false;
+    surfaceHeight = floor(encodedHeight.r * 255.0 + 0.5) * 256.0
+        + floor(encodedHeight.g * 255.0 + 0.5);
+    return true;
+}
+
 void main(void)
 {
-    vec2 disclosureDelta = absoluteWorldXZ - disclosureCenterXZ;
-    if (dot(disclosureDelta, disclosureDelta) > disclosureRadius * disclosureRadius) discard;
+    vec2 disclosureDelta = absoluteWorldPosition.xz - disclosureCenterXZ;
+    float disclosureDistance = length(disclosureDelta);
+    if (disclosureDistance >= disclosureRadius) discard;
+    float boundaryFade = smoothstep(
+        max(0.0, disclosureRadius - disclosureFeather),
+        disclosureRadius,
+        disclosureDistance
+    );
+    if (atlasHideCaves > 0)
+    {
+        ivec2 samplePosition = ivec2(floor(
+            (absoluteWorldPosition.xz - atlasSurfaceOriginXZ) / atlasSurfaceSampleSize
+        ));
+        float exteriorSurfaceHeight;
+        if (!readSurfaceHeight(samplePosition, exteriorSurfaceHeight))
+        {
+            discard;
+        }
 
-    vec2 maskCell = floor(absoluteWorldXZ / chunkSize) - maskChunkOrigin;
-    if (any(lessThan(maskCell, vec2(0.0)))
-        || any(greaterThanEqual(maskCell, vec2(maskSize)))) discard;
-    vec2 maskUv = (maskCell + vec2(0.5)) / maskSize;
-    if (texture(loadedChunkMask, maskUv).r < 0.5) discard;
+        if (absoluteWorldPosition.y
+            < exteriorSurfaceHeight - atlasVisibleSubsurfaceDepth)
+        {
+            discard;
+        }
+    }
 
     bool isLava = (waterFlags & (1 << 27)) != 0;
     float speed = isLava ? waterFlowCounter * 0.1 : waterFlowCounter;
@@ -83,5 +119,9 @@ void main(void)
     // opaque. Geometry remains stable because no camera-dependent vertex warp
     // or depth reconstruction is used by this atlas shader.
     if (isLava) color.a = 1.0;
+    color.rgb = mix(color.rgb, boundaryFogColor, boundaryFade);
+    // Keep the authored liquid alpha throughout the visible terrain range.
+    // The GUI fog performs the single final boundary fade; attenuating alpha
+    // here as well made water disappear well before opaque terrain.
     outColor = color;
 }

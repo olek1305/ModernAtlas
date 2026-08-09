@@ -22,9 +22,31 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
 {
     private const string SupportedVersion = "1.22.6";
     private const string VisibilityPatchId = "modernatlas.exactchunkvisibility";
+    private const string AtlasFilterMarker = "// MODERNATLAS_SURFACE_AND_BOUNDARY_FILTER";
+    private const int CaveFilterTextureUnit = 12;
+    private const float VisibleSubsurfaceDepth = 3f;
+
+    private static readonly EnumShaderProgram[] AtlasFilterPrograms =
+    {
+        EnumShaderProgram.Chunkopaque,
+        EnumShaderProgram.Chunktopsoil,
+        EnumShaderProgram.Chunktransparent
+    };
 
     [ThreadStatic]
     private static bool atlasVisibilityOverride;
+
+    [ThreadStatic]
+    private static bool atlasTerrainCollectionOverride;
+
+    [ThreadStatic]
+    private static bool atlasLiquidVisibilityOverride;
+
+    [ThreadStatic]
+    private static HashSet<(int X, int Z)>? atlasVisibleTerrainColumns;
+
+    [ThreadStatic]
+    private static ExactChunkRendererAdapter? atlasLiquidAdapter;
 
     private readonly ICoreClientAPI capi;
     private readonly object chunkRenderer;
@@ -61,15 +83,31 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private bool loggedSuccess;
     private bool loggedTransparentSuccess;
     private bool loggedStableLiquidDiagnostics;
-    private LoadedTexture? liquidChunkMask;
-    private int liquidMaskOriginX;
-    private int liquidMaskOriginZ;
-    private int liquidMaskSize;
-    private long lastLiquidMaskUpdateMilliseconds;
+    private readonly HashSet<(int X, int Z)> visibleTerrainColumns = new();
+    private readonly Dictionary<(int X, int Y, int Z), bool> liquidChunkCompletion = new();
+    private int allowedLiquidLocationCount;
+    private int rejectedLiquidLocationCount;
     private Vec3f atlasSunDirection = new(-0.34f, 0.86f, -0.38f);
     private float atlasExposure = 1f;
+    private readonly Dictionary<EnumShaderProgram, AtlasFilterShaderState> atlasFilterShaders = new();
+    private readonly HashSet<EnumShaderProgram> atlasFilterInjectionFailures = new();
+    private bool loggedCaveFilterReady;
+    private bool loggedUndergroundSafetyFailure;
+    private bool loggedPreparationClearFailure;
 
     public int LastRenderedEntityCount { get; private set; }
+
+    private sealed class AtlasFilterShaderState
+    {
+        public IShaderProgram Shader { get; }
+        public string OriginalFragmentCode { get; }
+
+        public AtlasFilterShaderState(IShaderProgram shader, string originalFragmentCode)
+        {
+            Shader = shader;
+            OriginalFragmentCode = originalFragmentCode;
+        }
+    }
 
     private ExactChunkRendererAdapter(
         ICoreClientAPI capi,
@@ -275,7 +313,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 modelVisibility,
                 prefix: new HarmonyMethod(atlasVisibilityPrefix)
             );
-
             capi.Logger.Notification(
                 "[ModernAtlas] Vintage Story 1.22.6 exact chunk renderer is available."
             );
@@ -331,6 +368,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         float pitchRadians,
         int viewDistanceBlocks,
         bool fogEnabled,
+        bool hideUndergroundCaves,
+        AtlasSurfaceHeightTexture? surfaceHeightTexture,
         float windWaveCounter,
         float windWaveCounterHighFrequency,
         float waterStillCounter,
@@ -376,6 +415,12 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         float savedSunsetMod = shaderUniforms.SunsetMod;
         float savedWindWaveCounter = shaderUniforms.WindWaveCounter;
         float savedWindWaveCounterHighFrequency = shaderUniforms.WindWaveCounterHighFreq;
+        long renderStartedMilliseconds = capi.ElapsedMilliseconds;
+        long sceneSetupCompletedMilliseconds = renderStartedMilliseconds;
+        long opaqueCompletedMilliseconds = renderStartedMilliseconds;
+        long entitiesCompletedMilliseconds = renderStartedMilliseconds;
+        long transparentCompletedMilliseconds = renderStartedMilliseconds;
+        bool atlasFilterConfigured = false;
 
         try
         {
@@ -419,12 +464,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             // engine values after this draw so normal gameplay is unaffected.
             shaderUniforms.WindWaveCounter = windWaveCounter;
             shaderUniforms.WindWaveCounterHighFreq = windWaveCounterHighFrequency;
-
-            // The normal world has already rendered before this HUD dialog.
-            // Clear it so weather particles such as rain cannot leak through
-            // transparent atlas pixels. ModernAtlas then draws chunk meshes
-            // through Primary and overlays only its own fog and GUI.
-            clearFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Default });
 
             // The official chunk shaders write to the multi-attachment Primary
             // world framebuffer. Rendering them into the default GUI target
@@ -494,6 +533,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 cullingView
             );
             ReplacePoolFrustums(atlasFrustum, changedPools);
+            sceneSetupCompletedMilliseconds = capi.ElapsedMilliseconds;
             // The engine's completed mesh locations retain an occlusion flag
             // calculated on a worker thread for the normal player camera.
             // During this draw only, use the atlas frustum without that stale
@@ -503,14 +543,47 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             render.PMatrix.Push(projectionDouble);
             projectionPushed = true;
             render.CurrentActiveShader?.Stop();
-            renderOpaque.Invoke(chunkRenderer, new object[] { deltaTime });
+            visibleTerrainColumns.Clear();
+            atlasVisibleTerrainColumns = visibleTerrainColumns;
+            atlasTerrainCollectionOverride = true;
+            try
+            {
+                atlasFilterConfigured = true;
+                if ((hideUndergroundCaves && surfaceHeightTexture?.Ready != true)
+                    || !ConfigureAtlasFilters(
+                        surfaceHeightTexture,
+                        cameraPosition,
+                        true,
+                        hideUndergroundCaves,
+                        fogEnabled,
+                        viewDistanceBlocks
+                    ))
+                {
+                    if (!loggedUndergroundSafetyFailure)
+                    {
+                        loggedUndergroundSafetyFailure = true;
+                        capi.Logger.Error(
+                            "[ModernAtlas] The terrain safety filters are unavailable; terrain drawing was skipped to avoid revealing caves or terrain beyond the disclosure boundary."
+                        );
+                    }
+                    return false;
+                }
+                renderOpaque.Invoke(chunkRenderer, new object[] { deltaTime });
+            }
+            finally
+            {
+                atlasTerrainCollectionOverride = false;
+            }
+            opaqueCompletedMilliseconds = capi.ElapsedMilliseconds;
             LastRenderedEntityCount = entityModelRenderer.Render(
                 deltaTime,
                 view,
                 projection,
                 viewDistanceBlocks,
-                entityPolicy
+                entityPolicy,
+                hideUndergroundCaves ? surfaceHeightTexture : null
             );
+            entitiesCompletedMilliseconds = capi.ElapsedMilliseconds;
             if (!RenderTransparentChunks(
                 deltaTime,
                 projection,
@@ -519,17 +592,33 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 waterStillCounter,
                 waterFlowCounter,
                 cloudsEnabled,
-                pausedCloudAnimationDeltaTime
+                pausedCloudAnimationDeltaTime,
+                hideUndergroundCaves,
+                surfaceHeightTexture,
+                fogEnabled,
+                viewDistanceBlocks
             ))
             {
                 blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
             }
+            transparentCompletedMilliseconds = capi.ElapsedMilliseconds;
 
             if (!loggedSuccess)
             {
                 loggedSuccess = true;
                 capi.Logger.Notification(
                     "[ModernAtlas] Rendering the atlas from the game's completed chunk meshes and materials."
+                );
+                capi.Logger.Notification(
+                    "[ModernAtlas] Disabled the normal camera sky-horizon tint only inside the atlas terrain shader."
+                );
+                capi.Logger.Notification(
+                    "[ModernAtlas] First atlas render timing: setup {0} ms, opaque terrain {1} ms, living entities {2} ms, transparent/liquids/clouds {3} ms, total {4} ms.",
+                    sceneSetupCompletedMilliseconds - renderStartedMilliseconds,
+                    opaqueCompletedMilliseconds - sceneSetupCompletedMilliseconds,
+                    entitiesCompletedMilliseconds - opaqueCompletedMilliseconds,
+                    transparentCompletedMilliseconds - entitiesCompletedMilliseconds,
+                    transparentCompletedMilliseconds - renderStartedMilliseconds
                 );
             }
             return true;
@@ -548,7 +637,26 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         }
         finally
         {
+            atlasTerrainCollectionOverride = false;
+            atlasLiquidVisibilityOverride = false;
+            atlasVisibleTerrainColumns = null;
+            atlasLiquidAdapter = null;
             atlasVisibilityOverride = false;
+            if (atlasFilterConfigured)
+            {
+                try
+                {
+                    ConfigureAtlasFilters(null, cameraPosition, false, false, false, 0);
+                }
+                catch (Exception exception)
+                {
+                    disabled = true;
+                    capi.Logger.Error(
+                        "[ModernAtlas] Failed to restore the normal terrain shader state; exact atlas rendering was disabled: {0}",
+                        exception.Message
+                    );
+                }
+            }
             for (int index = changedPools.Count - 1; index >= 0; index--)
             {
                 (object pool, object? frustum) = changedPools[index];
@@ -631,10 +739,380 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
 
     public void Dispose()
     {
+        DisableAndRestoreAtlasFilterSources();
         visibilityHarmony.UnpatchAll(VisibilityPatchId);
         cloudRenderer?.Dispose();
-        liquidChunkMask?.Dispose();
-        liquidChunkMask = null;
+    }
+
+    public void RenderSurfacePreparationFrame(bool fogEnabled)
+    {
+        if (disabled) return;
+
+        try
+        {
+            IRenderAPI render = capi.Render;
+            render.CurrentActiveShader?.Stop();
+            FrameBufferRef primaryFramebuffer = render.FrameBuffers[(int)EnumFrameBuffer.Primary];
+            float[] atlasBackground = fogEnabled
+                ? new[] { 0.32f, 0.38f, 0.40f, 1f }
+                : new[] { 0.035f, 0.075f, 0.11f, 1f };
+            render.ClearFrameBuffer(primaryFramebuffer, atlasBackground, true, true);
+            blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
+            render.CurrentFrameBuffer = null;
+        }
+        catch (Exception exception)
+        {
+            if (!loggedPreparationClearFailure)
+            {
+                loggedPreparationClearFailure = true;
+                capi.Logger.Warning(
+                    "[ModernAtlas] Could not draw the atlas preparation frame: {0}",
+                    exception.Message
+                );
+            }
+        }
+    }
+
+    private bool ConfigureAtlasFilters(
+        AtlasSurfaceHeightTexture? surfaceHeightTexture,
+        Vec3d cameraPosition,
+        bool enabled,
+        bool hideUndergroundCaves,
+        bool fogEnabled,
+        int disclosureRadius
+    )
+    {
+        if (!enabled)
+        {
+            DisableAtlasFilterUniforms();
+            return true;
+        }
+
+        if ((hideUndergroundCaves
+                && (surfaceHeightTexture?.Ready != true
+                    || surfaceHeightTexture.TextureId <= 0))
+            || !EnsureAtlasFilterShaders())
+        {
+            return false;
+        }
+
+        float radius = Math.Max(GlobalConstants.ChunkSize, disclosureRadius);
+        float feather = fogEnabled
+            ? Math.Min(
+                radius * 0.25f,
+                Math.Max(GlobalConstants.ChunkSize * 2f, radius * 0.10f)
+            )
+            : Math.Min(
+                radius * 0.25f,
+                Math.Max(GlobalConstants.ChunkSize * 0.5f, radius * 0.03f)
+            );
+        Vec3f boundaryColor = fogEnabled
+            ? new Vec3f(0.32f, 0.38f, 0.40f)
+            : new Vec3f(0.035f, 0.075f, 0.11f);
+
+        try
+        {
+            foreach (EnumShaderProgram program in AtlasFilterPrograms)
+            {
+                IShaderProgram shader = atlasFilterShaders[program].Shader;
+                capi.Render.CurrentActiveShader?.Stop();
+                shader.Use();
+                shader.Uniform("atlasHideCaves", hideUndergroundCaves ? 1 : 0);
+                if (hideUndergroundCaves && surfaceHeightTexture != null)
+                {
+                    shader.BindTexture2D(
+                        "atlasSurfaceHeightTex",
+                        surfaceHeightTexture.TextureId,
+                        CaveFilterTextureUnit
+                    );
+                    shader.Uniform(
+                        "atlasSurfaceOriginXZ",
+                        (float)surfaceHeightTexture.OriginX,
+                        (float)surfaceHeightTexture.OriginZ
+                    );
+                    shader.Uniform(
+                        "atlasSurfaceSampleSize",
+                        (float)AtlasSurfaceHeightTexture.HorizontalSampleSize
+                    );
+                    shader.Uniform("atlasVisibleSubsurfaceDepth", VisibleSubsurfaceDepth);
+                }
+                shader.Uniform(
+                    "atlasWorldOffset",
+                    (float)cameraPosition.X,
+                    (float)cameraPosition.Y,
+                    (float)cameraPosition.Z
+                );
+                shader.Uniform("atlasBoundaryEnabled", 1);
+                if (shader.HasUniform("atlasDisableHorizonFade"))
+                {
+                    shader.Uniform("atlasDisableHorizonFade", 1);
+                }
+                shader.Uniform(
+                    "atlasDisclosureCenterXZ",
+                    (float)capi.World.Player.Entity.Pos.X,
+                    (float)capi.World.Player.Entity.Pos.Z
+                );
+                shader.Uniform("atlasDisclosureRadius", radius);
+                shader.Uniform("atlasDisclosureFeather", feather);
+                shader.Uniform("atlasBoundaryFogColor", boundaryColor);
+                shader.Stop();
+            }
+            return true;
+        }
+        catch
+        {
+            DisableAtlasFilterUniforms();
+            throw;
+        }
+    }
+
+    private bool EnsureAtlasFilterShaders()
+    {
+        foreach (EnumShaderProgram program in AtlasFilterPrograms)
+        {
+            if (!EnsureAtlasFilterShader(
+                program,
+                program != EnumShaderProgram.Chunktransparent
+            ))
+            {
+                return false;
+            }
+        }
+
+        if (!loggedCaveFilterReady)
+        {
+            loggedCaveFilterReady = true;
+            capi.Logger.Notification(
+                "[ModernAtlas] Surface-only terrain and vegetation safety is active with a {0}-block cave depth allowance and a player-anchored fog boundary.",
+                VisibleSubsurfaceDepth
+            );
+        }
+        return true;
+    }
+
+    private bool EnsureAtlasFilterShader(
+        EnumShaderProgram program,
+        bool supportsBoundaryColor
+    )
+    {
+        if (atlasFilterInjectionFailures.Contains(program)) return false;
+
+        IShaderProgram shader = capi.Render.GetEngineShader(program);
+        if (shader.Disposed || shader.FragmentShader == null) return false;
+        string source = shader.FragmentShader.Code ?? "";
+        if (atlasFilterShaders.TryGetValue(program, out AtlasFilterShaderState? state)
+            && ReferenceEquals(shader, state.Shader)
+            && source.Contains(AtlasFilterMarker, StringComparison.Ordinal))
+        {
+            return shader.HasUniform("atlasHideCaves")
+                && shader.HasUniform("atlasBoundaryEnabled");
+        }
+
+        if (state != null && !ReferenceEquals(shader, state.Shader))
+        {
+            RestoreAtlasFilterSource(program);
+        }
+
+        string? injected = InjectAtlasFilter(source, supportsBoundaryColor);
+        if (injected == null)
+        {
+            atlasFilterInjectionFailures.Add(program);
+            capi.Logger.Error(
+                "[ModernAtlas] Could not locate the main function in engine shader {0}.",
+                program
+            );
+            return false;
+        }
+
+        capi.Render.CurrentActiveShader?.Stop();
+        shader.FragmentShader.Code = injected;
+        if (!shader.Compile())
+        {
+            shader.FragmentShader.Code = source;
+            shader.Compile();
+            atlasFilterInjectionFailures.Add(program);
+            capi.Logger.Error(
+                "[ModernAtlas] Failed to compile the atlas safety filter for engine shader {0}; the original shader was restored.",
+                program
+            );
+            return false;
+        }
+
+        atlasFilterShaders[program] = new AtlasFilterShaderState(shader, source);
+        return shader.HasUniform("atlasHideCaves")
+            && shader.HasUniform("atlasBoundaryEnabled");
+    }
+
+    private void DisableAtlasFilterUniforms()
+    {
+        foreach (AtlasFilterShaderState state in atlasFilterShaders.Values)
+        {
+            IShaderProgram shader = state.Shader;
+            if (shader.Disposed) continue;
+            try
+            {
+                capi.Render.CurrentActiveShader?.Stop();
+                shader.Use();
+                if (shader.HasUniform("atlasHideCaves"))
+                {
+                    shader.Uniform("atlasHideCaves", 0);
+                }
+                if (shader.HasUniform("atlasBoundaryEnabled"))
+                {
+                    shader.Uniform("atlasBoundaryEnabled", 0);
+                }
+                if (shader.HasUniform("atlasDisableHorizonFade"))
+                {
+                    shader.Uniform("atlasDisableHorizonFade", 0);
+                }
+                shader.Stop();
+            }
+            catch
+            {
+                // The client may already be tearing down its GL context.
+            }
+        }
+    }
+
+    private void DisableAndRestoreAtlasFilterSources()
+    {
+        DisableAtlasFilterUniforms();
+        foreach (EnumShaderProgram program in AtlasFilterPrograms)
+        {
+            RestoreAtlasFilterSource(program);
+        }
+    }
+
+    private void RestoreAtlasFilterSource(EnumShaderProgram program)
+    {
+        if (!atlasFilterShaders.Remove(program, out AtlasFilterShaderState? state)) return;
+        if (state.Shader.FragmentShader != null
+            && state.Shader.FragmentShader.Code?.Contains(
+                AtlasFilterMarker,
+                StringComparison.Ordinal
+            ) == true)
+        {
+            // The compiled program remains safe because both atlas switches
+            // were set to zero. Restoring the source ensures a later global
+            // shader reload compiles the unmodified game shader.
+            state.Shader.FragmentShader.Code = state.OriginalFragmentCode;
+        }
+    }
+
+    private static string? InjectAtlasFilter(string source, bool supportsBoundaryColor)
+    {
+        int mainIndex = source.LastIndexOf("void main", StringComparison.Ordinal);
+        if (mainIndex < 0) return null;
+
+        int nameIndex = mainIndex + "void ".Length;
+        if (nameIndex + "main".Length > source.Length
+            || !source.AsSpan(nameIndex, "main".Length).SequenceEqual("main".AsSpan()))
+        {
+            return null;
+        }
+
+        string renamed = source.Remove(nameIndex, "main".Length)
+            .Insert(nameIndex, "modernAtlasOriginalMain");
+        const string horizonFadeCondition = "if (haxyFade > 0)";
+        if (renamed.Contains(horizonFadeCondition, StringComparison.Ordinal))
+        {
+            renamed = renamed.Replace(
+                horizonFadeCondition,
+                "if (haxyFade > 0 && atlasDisableHorizonFade == 0)",
+                StringComparison.Ordinal
+            );
+            renamed = renamed.Insert(
+                mainIndex,
+                "uniform int atlasDisableHorizonFade;\n\n"
+            );
+        }
+        string boundaryColorCode = supportsBoundaryColor
+            ? """
+    if (atlasBoundaryEnabled > 0)
+    {
+        float fogStart = max(0.0, atlasDisclosureRadius - atlasDisclosureFeather);
+        float fogAmount = smoothstep(
+            fogStart,
+            atlasDisclosureRadius,
+            modernAtlasDisclosureDistance
+        );
+        outColor.rgb = mix(outColor.rgb, atlasBoundaryFogColor, fogAmount);
+    }
+"""
+            : "";
+
+        return renamed + """
+
+// MODERNATLAS_SURFACE_AND_BOUNDARY_FILTER
+uniform int atlasHideCaves;
+uniform sampler2D atlasSurfaceHeightTex;
+uniform vec2 atlasSurfaceOriginXZ;
+uniform float atlasSurfaceSampleSize;
+uniform float atlasVisibleSubsurfaceDepth;
+uniform vec3 atlasWorldOffset;
+uniform int atlasBoundaryEnabled;
+uniform vec2 atlasDisclosureCenterXZ;
+uniform float atlasDisclosureRadius;
+uniform float atlasDisclosureFeather;
+uniform vec3 atlasBoundaryFogColor;
+
+bool modernAtlasReadSurfaceHeight(ivec2 samplePosition, out float surfaceHeight)
+{
+    ivec2 dimensions = textureSize(atlasSurfaceHeightTex, 0);
+    if (any(lessThan(samplePosition, ivec2(0)))
+        || any(greaterThanEqual(samplePosition, dimensions)))
+    {
+        return false;
+    }
+
+    vec4 encodedHeight = texelFetch(atlasSurfaceHeightTex, samplePosition, 0);
+    if (encodedHeight.b < 0.5) return false;
+
+    surfaceHeight = floor(encodedHeight.r * 255.0 + 0.5) * 256.0
+        + floor(encodedHeight.g * 255.0 + 0.5);
+    return true;
+}
+
+bool modernAtlasBelowSurface(vec3 absoluteWorldPosition)
+{
+    ivec2 samplePosition = ivec2(floor(
+        (absoluteWorldPosition.xz - atlasSurfaceOriginXZ) / atlasSurfaceSampleSize
+    ));
+    float exteriorSurfaceHeight;
+    if (!modernAtlasReadSurfaceHeight(samplePosition, exteriorSurfaceHeight))
+    {
+        return true;
+    }
+
+    // The transient texture already contains a one-block exterior envelope.
+    // Every face of the same cliff step therefore uses the same threshold:
+    // top floors and both visible sides remain a complete solid block, while
+    // terrain-covered cave faces still remain below the envelope.
+    return absoluteWorldPosition.y
+        < exteriorSurfaceHeight - atlasVisibleSubsurfaceDepth;
+}
+
+void main()
+{
+    vec3 modernAtlasAbsoluteWorldPosition = worldPos.xyz + atlasWorldOffset;
+    float modernAtlasDisclosureDistance = distance(
+        modernAtlasAbsoluteWorldPosition.xz,
+        atlasDisclosureCenterXZ
+    );
+    if (atlasBoundaryEnabled > 0
+        && modernAtlasDisclosureDistance >= atlasDisclosureRadius)
+    {
+        discard;
+    }
+    if (atlasHideCaves > 0
+        && modernAtlasBelowSurface(modernAtlasAbsoluteWorldPosition))
+    {
+        discard;
+    }
+    modernAtlasOriginalMain();
+""" + boundaryColorCode + """
+}
+""";
     }
 
     private static bool UseAtlasVisibility(
@@ -677,6 +1155,23 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 break;
         }
 
+        if (__result && __instance.IndicesEnd > __instance.IndicesStart)
+        {
+            if (atlasTerrainCollectionOverride)
+            {
+                (int X, int Y, int Z) chunk = GetMeshChunk(
+                    __instance,
+                    GlobalConstants.ChunkSize
+                );
+                atlasVisibleTerrainColumns?.Add((chunk.X, chunk.Z));
+            }
+            else if (atlasLiquidVisibilityOverride
+                && atlasLiquidAdapter?.IsCompletedLiquidChunk(__instance) != true)
+            {
+                __result = false;
+            }
+        }
+
         return false;
     }
 
@@ -688,7 +1183,11 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         float waterStillCounter,
         float waterFlowCounter,
         bool cloudsEnabled,
-        float pausedCloudAnimationDeltaTime
+        float pausedCloudAnimationDeltaTime,
+        bool hideUndergroundCaves,
+        AtlasSurfaceHeightTexture? surfaceHeightTexture,
+        bool fogEnabled,
+        int disclosureRadius
     )
     {
         if (transparentPassDisabled) return false;
@@ -709,6 +1208,19 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 new object[] { deltaTime, EnumRenderStage.OIT }
             );
             HideLiquidPools(hiddenLiquidPools);
+            if (!ConfigureAtlasFilters(
+                surfaceHeightTexture,
+                cameraPosition,
+                true,
+                hideUndergroundCaves,
+                fogEnabled,
+                disclosureRadius
+            ))
+            {
+                throw new InvalidOperationException(
+                    "The transparent-block safety filters could not be configured."
+                );
+            }
             renderOit.Invoke(chunkRenderer, new object[] { deltaTime });
             RestoreLiquidPools(hiddenLiquidPools);
             runAfterOit.Invoke(
@@ -724,7 +1236,11 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 view,
                 cameraPosition,
                 waterStillCounter,
-                waterFlowCounter
+                waterFlowCounter,
+                hideUndergroundCaves,
+                surfaceHeightTexture,
+                fogEnabled,
+                disclosureRadius
             );
 
             // Compose at the Primary framebuffer's own resolution before the
@@ -814,7 +1330,11 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         double[] view,
         Vec3d cameraPosition,
         float waterStillCounter,
-        float waterFlowCounter
+        float waterFlowCounter,
+        bool hideUndergroundCaves,
+        AtlasSurfaceHeightTexture? surfaceHeightTexture,
+        bool fogEnabled,
+        int disclosureRadius
     )
     {
         IShaderProgram? activeLiquidShader = stableLiquidShaderProvider();
@@ -832,9 +1352,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         if (textureIdsField.GetValue(chunkRenderer) is not int[] textureIds) return;
 
         IRenderAPI render = capi.Render;
-        UpdateLiquidChunkMask();
-        LoadedTexture? activeChunkMask = liquidChunkMask;
-        if (activeChunkMask == null || activeChunkMask.TextureId <= 0) return;
         render.CurrentActiveShader?.Stop();
         render.GLEnableDepthTest();
         render.GLDepthMask(false);
@@ -853,14 +1370,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             (float)cameraPosition.Y,
             (float)cameraPosition.Z
         );
-        activeLiquidShader.BindTexture2D("loadedChunkMask", activeChunkMask.TextureId, 7);
-        activeLiquidShader.Uniform(
-            "maskChunkOrigin",
-            (float)liquidMaskOriginX,
-            (float)liquidMaskOriginZ
-        );
-        activeLiquidShader.Uniform("maskSize", (float)liquidMaskSize);
-        activeLiquidShader.Uniform("chunkSize", (float)GlobalConstants.ChunkSize);
         activeLiquidShader.Uniform(
             "disclosureCenterXZ",
             (float)capi.World.Player.Entity.Pos.X,
@@ -868,8 +1377,47 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         );
         activeLiquidShader.Uniform(
             "disclosureRadius",
-            (float)Math.Max(GlobalConstants.ChunkSize, capi.Settings.Int["viewDistance"])
+            (float)Math.Max(GlobalConstants.ChunkSize, disclosureRadius)
         );
+        float radius = Math.Max(GlobalConstants.ChunkSize, disclosureRadius);
+        float boundaryFeather = fogEnabled
+            ? Math.Min(
+                radius * 0.25f,
+                Math.Max(GlobalConstants.ChunkSize * 2f, radius * 0.10f)
+            )
+            : Math.Min(
+                radius * 0.25f,
+                Math.Max(GlobalConstants.ChunkSize * 0.5f, radius * 0.03f)
+            );
+        activeLiquidShader.Uniform("disclosureFeather", boundaryFeather);
+        activeLiquidShader.Uniform(
+            "boundaryFogColor",
+            fogEnabled
+                ? new Vec3f(0.32f, 0.38f, 0.40f)
+                : new Vec3f(0.035f, 0.075f, 0.11f)
+        );
+        bool applySurfaceFilter = hideUndergroundCaves
+            && surfaceHeightTexture?.Ready == true
+            && surfaceHeightTexture.TextureId > 0;
+        activeLiquidShader.Uniform("atlasHideCaves", applySurfaceFilter ? 1 : 0);
+        if (applySurfaceFilter && surfaceHeightTexture != null)
+        {
+            activeLiquidShader.BindTexture2D(
+                "atlasSurfaceHeightTex",
+                surfaceHeightTexture.TextureId,
+                CaveFilterTextureUnit
+            );
+            activeLiquidShader.Uniform(
+                "atlasSurfaceOriginXZ",
+                (float)surfaceHeightTexture.OriginX,
+                (float)surfaceHeightTexture.OriginZ
+            );
+            activeLiquidShader.Uniform(
+                "atlasSurfaceSampleSize",
+                (float)AtlasSurfaceHeightTexture.HorizontalSampleSize
+            );
+            activeLiquidShader.Uniform("atlasVisibleSubsurfaceDepth", VisibleSubsurfaceDepth);
+        }
         activeLiquidShader.Uniform("atlasSunDirection", atlasSunDirection);
         activeLiquidShader.Uniform("atlasExposure", atlasExposure);
         int blockTexturePixels = capi.Settings.Int["textureSize"];
@@ -891,22 +1439,35 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         long renderedTriangles = 0;
         long allocatedTriangles = 0;
         int activeManagers = 0;
-        for (int index = 0; index < managers.Length && index < textureIds.Length; index++)
+        liquidChunkCompletion.Clear();
+        allowedLiquidLocationCount = 0;
+        rejectedLiquidLocationCount = 0;
+        atlasLiquidAdapter = this;
+        atlasLiquidVisibilityOverride = true;
+        try
         {
-            if (managers[index] == null) continue;
-            activeManagers++;
-            activeLiquidShader.BindTexture2D("terrainTex", textureIds[index], 0);
-            managers[index].Render(cameraPosition, "origin", EnumFrustumCullMode.CullInstant);
-            long usedVideoMemory = 0;
-            long managerRenderedTriangles = 0;
-            long managerAllocatedTriangles = 0;
-            managers[index].GetStats(
-                ref usedVideoMemory,
-                ref managerRenderedTriangles,
-                ref managerAllocatedTriangles
-            );
-            renderedTriangles += managerRenderedTriangles;
-            allocatedTriangles += managerAllocatedTriangles;
+            for (int index = 0; index < managers.Length && index < textureIds.Length; index++)
+            {
+                if (managers[index] == null) continue;
+                activeManagers++;
+                activeLiquidShader.BindTexture2D("terrainTex", textureIds[index], 0);
+                managers[index].Render(cameraPosition, "origin", EnumFrustumCullMode.CullInstant);
+                long usedVideoMemory = 0;
+                long managerRenderedTriangles = 0;
+                long managerAllocatedTriangles = 0;
+                managers[index].GetStats(
+                    ref usedVideoMemory,
+                    ref managerRenderedTriangles,
+                    ref managerAllocatedTriangles
+                );
+                renderedTriangles += managerRenderedTriangles;
+                allocatedTriangles += managerAllocatedTriangles;
+            }
+        }
+        finally
+        {
+            atlasLiquidVisibilityOverride = false;
+            atlasLiquidAdapter = null;
         }
         activeLiquidShader.Stop();
         render.GLDepthMask(true);
@@ -917,82 +1478,48 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         {
             loggedStableLiquidDiagnostics = true;
             capi.Logger.Notification(
-                "[ModernAtlas] Stable liquid draw: shader pass {0}, {1} atlas managers, {2} rendered triangles, {3} allocated triangles.",
+                "[ModernAtlas] Stable liquid draw: shader pass {0}, {1} atlas managers, {2} rendered triangles, {3} allocated triangles; {4} completed liquid mesh locations allowed and {5} rejected.",
                 activeLiquidShader.PassId,
                 activeManagers,
                 renderedTriangles,
-                allocatedTriangles
+                allocatedTriangles,
+                allowedLiquidLocationCount,
+                rejectedLiquidLocationCount
             );
         }
     }
 
-    private void UpdateLiquidChunkMask()
+    private bool IsCompletedLiquidChunk(ModelDataPoolLocation location)
     {
         int chunkSize = GlobalConstants.ChunkSize;
-        int playerChunkX = FloorDiv(
-            (int)Math.Floor(capi.World.Player.Entity.Pos.X),
-            chunkSize
-        );
-        int playerChunkZ = FloorDiv(
-            (int)Math.Floor(capi.World.Player.Entity.Pos.Z),
-            chunkSize
-        );
-        int radius = Math.Clamp(capi.Settings.Int["viewDistance"] / chunkSize + 2, 2, 64);
-        int size = radius * 2 + 1;
-        int originX = playerChunkX - radius;
-        int originZ = playerChunkZ - radius;
-        long now = capi.ElapsedMilliseconds;
-        if (liquidChunkMask != null
-            && liquidMaskOriginX == originX
-            && liquidMaskOriginZ == originZ
-            && liquidMaskSize == size
-            && now - lastLiquidMaskUpdateMilliseconds < 1000)
-        {
-            return;
-        }
+        (int chunkX, int chunkY, int chunkZ) chunk = GetMeshChunk(location, chunkSize);
+        if (liquidChunkCompletion.TryGetValue(chunk, out bool cached)) return cached;
 
-        int[] pixels = new int[size * size];
-        int center = chunkSize / 2;
-        for (int z = 0; z < size; z++)
-        {
-            for (int x = 0; x < size; x++)
-            {
-                int chunkX = originX + x;
-                int chunkZ = originZ + z;
-                IMapChunk? mapChunk = capi.World.BlockAccessor.GetMapChunk(chunkX, chunkZ);
-                if (mapChunk == null) continue;
-
-                int heightIndex = center * chunkSize + center;
-                ushort[] rainHeights = mapChunk.RainHeightMap;
-                int surfaceY = heightIndex < rainHeights.Length
-                    ? rainHeights[heightIndex]
-                    : capi.World.SeaLevel;
-                IWorldChunk? surfaceChunk = capi.World.BlockAccessor.GetChunk(
-                    chunkX,
-                    surfaceY / chunkSize,
-                    chunkZ
-                );
-                if (surfaceChunk is IClientChunk { LoadedFromServer: true })
-                {
-                    pixels[z * size + x] = unchecked((int)0xffffffff);
-                }
-            }
-        }
-
-        if (liquidChunkMask == null || liquidChunkMask.Width != size || liquidChunkMask.Height != size)
-        {
-            liquidChunkMask?.Dispose();
-            liquidChunkMask = new LoadedTexture(capi, 0, size, size);
-        }
-        capi.Render.LoadOrUpdateTextureFromRgba(pixels, false, 0, ref liquidChunkMask);
-        liquidMaskOriginX = originX;
-        liquidMaskOriginZ = originZ;
-        liquidMaskSize = size;
-        lastLiquidMaskUpdateMilliseconds = now;
+        // Match liquids to a visible, completed terrain column rather than
+        // demanding same-height terrain and a fully loaded 3x3 guard band.
+        // Ocean floors may be several vertical chunks below their surface,
+        // and the old guard band removed valid edge water before terrain.
+        bool completed = visibleTerrainColumns.Contains((chunk.chunkX, chunk.chunkZ))
+            && capi.World.BlockAccessor.GetChunk(chunk.chunkX, chunk.chunkY, chunk.chunkZ)
+                is IClientChunk { LoadedFromServer: true };
+        liquidChunkCompletion[chunk] = completed;
+        if (completed) allowedLiquidLocationCount++;
+        else rejectedLiquidLocationCount++;
+        return completed;
     }
 
     private static int FloorDiv(int value, int divisor) =>
         value >= 0 ? value / divisor : (value - divisor + 1) / divisor;
+
+    private static (int X, int Y, int Z) GetMeshChunk(
+        ModelDataPoolLocation location,
+        int chunkSize
+    ) =>
+    (
+        FloorDiv((int)Math.Floor(location.FrustumCullSphere.x), chunkSize),
+        FloorDiv((int)Math.Floor(location.FrustumCullSphere.y), chunkSize),
+        FloorDiv((int)Math.Floor(location.FrustumCullSphere.z), chunkSize)
+    );
 
     private void ReplacePoolFrustums(
         FrustumCulling atlasFrustum,
