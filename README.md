@@ -65,9 +65,10 @@ client-side; an optional server component supplies fog and living-entity policy.
   registered ore blocks from already loaded chunk columns;
 - includes an atlas-only visual lab under Settings for exposure, layer opacity,
   boundary softness, cave-mask brightness and neutral fog palettes;
-- uses a compact overlay with a normal Settings switch for map-layer controls,
-  a Creative/Cheat-only panel for cave mode, loaded-map search and camera-angle
-  locking, plus a `Hide UI` view that `Escape` restores;
+- uses compact translucent controls with white typography, a normal Settings
+  switch for map-layer controls, a Creative/Cheat-only panel for cave mode,
+  loaded-map search and camera-angle locking, plus a `Hide UI` view that
+  `Escape` restores;
 - forces the unexplored-area mask in multiplayer while using only exact chunk
   data that the server has already sent to the client;
 - can render the game's live animated 3D models for already client-loaded

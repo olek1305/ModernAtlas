@@ -31,10 +31,10 @@ internal sealed class CheatModeConsentDialog : GuiDialog
             .WithAlignment(EnumDialogArea.CenterMiddle);
         ElementBounds background = ElementBounds.Fixed(0, 0, 610, 300);
         SingleComposer = capi.Gui.CreateCompo("modernatlas-cheat-consent", root)
-            .AddShadedDialogBG(background, true)
+            .AddStaticCustomDraw(background, AtlasUiStyle.DrawCard)
             .AddStaticText(
-                "Enable Cheat Mode for this world?",
-                CairoFont.WhiteSmallishText().WithFontSize(22),
+                "ENABLE CHEAT MODE FOR THIS WORLD?",
+                AtlasUiStyle.TitleFont(20),
                 ElementBounds.Fixed(24, 22, 560, 38)
             )
             .AddRichtext(
@@ -42,23 +42,22 @@ internal sealed class CheatModeConsentDialog : GuiDialog
                     + "dropped-item markers and ore heatmaps. This can spoil exploration.\n\n"
                     + "ModernAtlas still uses only data already available to the client and never "
                     + "requests unexplored chunks. Multiplayer keeps these spoiler layers locked.",
-                CairoFont.WhiteDetailText(),
+                AtlasUiStyle.DetailFont(13),
                 ElementBounds.Fixed(26, 76, 558, 128),
                 "consent-text"
             )
-            .AddButton(
-                "Keep caves hidden",
+            .AddAtlasButton(
+                "SAFE MODE",
                 ChooseSafeMode,
-                ElementBounds.Fixed(32, 232, 220, 42),
-                EnumButtonStyle.Normal,
+                ElementBounds.Fixed(32, 228, 220, 48),
                 "safe-mode"
             )
-            .AddButton(
-                "Enable Cheat Mode",
+            .AddAtlasButton(
+                "ENABLE CHEAT MODE",
                 ChooseCheatMode,
-                ElementBounds.Fixed(358, 232, 220, 42),
-                EnumButtonStyle.Normal,
-                "cheat-mode"
+                ElementBounds.Fixed(358, 228, 220, 48),
+                "cheat-mode",
+                AtlasButtonStyle.Dark
             )
             .Compose();
     }

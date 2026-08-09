@@ -21,6 +21,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     private const int DefaultViewDistance = 500;
     private const int MaximumGameViewDistance = 1536;
     private const int FogTextureDownsample = 4;
+    private const string SmokeScreenshotEnvironmentVariable =
+        "MODERNATLAS_SMOKE_SCREENSHOT";
 
     private ExactChunkRendererAdapter? exactChunkRenderer;
     private readonly float[] projection = Mat4f.Create();
@@ -99,6 +101,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private int automatedSmokeTestMapLayerPhase;
     private bool automatedSmokeTestMapLayerPassed;
     private bool automatedSmokeTestPreferencesCaptured;
+    private int automatedSmokeScreenshotPhase;
     private bool automatedOriginalMapLayersEnabled;
     private bool automatedOriginalCaveModeEnabled;
     private bool automatedOriginalSearchModeEnabled;
@@ -361,6 +364,7 @@ public sealed class ModernAtlasDialog : GuiDialog
                 visualLabModal?.Render(deltaTime);
             }
         }
+        CaptureAutomatedSmokeScreenshot();
         AdvanceAutomatedSmokeTest();
     }
 
@@ -802,6 +806,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestSearchPassed = false;
         automatedSmokeTestMapLayerPhase = 0;
         automatedSmokeTestMapLayerPassed = false;
+        automatedSmokeScreenshotPhase = 0;
         AutomatedSmokeTestRenderedExactWorld = false;
     }
 
@@ -835,10 +840,45 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestInterfaceControlsAttempted = true;
 
         bool accessAvailable = CreativeCheatSettingsAvailable;
-        bool settingsOpened = accessAvailable
-            && OpenCreativeSettingsModal()
+        bool settingsOpenedByClick = ClickAtlasControlForAutomatedTest(
+                overlay,
+                "settings-button"
+            )
+            && settingsModalOpen;
+        bool mapLayersBeforeClick = config.MapLayersEnabled;
+        bool settingsSwitchClicked = settingsOpenedByClick
+            && ClickAtlasControlForAutomatedTest(settingsModal, "map-layers")
+            && config.MapLayersEnabled != mapLayersBeforeClick;
+        bool settingsSwitchRestored = settingsSwitchClicked
+            && ClickAtlasControlForAutomatedTest(settingsModal, "map-layers")
+            && config.MapLayersEnabled == mapLayersBeforeClick;
+        int fixedSunHourBeforeDrag = config.FixedSunHour;
+        bool dragSliderToMaximum = fixedSunHourBeforeDrag != 23;
+        bool sliderBoundaryDragHandled = settingsOpenedByClick
+            && DragAtlasSliderBeyondBoundsForAutomatedTest(
+                settingsModal,
+                "fixed-sun-hour",
+                dragSliderToMaximum
+            );
+        bool sliderBoundaryDragClamped = config.FixedSunHour
+            == (dragSliderToMaximum ? 23 : 0);
+        config.FixedSunHour = fixedSunHourBeforeDrag;
+        settingsModal?.GetAtlasSlider("fixed-sun-hour")?.SetValue(fixedSunHourBeforeDrag);
+        bool settingsClosedByClick = settingsOpenedByClick
+            && ClickAtlasControlForAutomatedTest(settingsModal, "settings-close")
+            && !settingsModalOpen;
+        bool creativeOpenedByClick = accessAvailable
+            && ClickAtlasControlForAutomatedTest(
+                creativeSettingsShortcut,
+                "creative-settings-button"
+            )
             && creativeSettingsModalOpen;
-        CloseCreativeSettingsModal();
+        bool creativeClosedByClick = creativeOpenedByClick
+            && ClickAtlasControlForAutomatedTest(
+                creativeSettingsModal,
+                "creative-settings-close"
+            )
+            && !creativeSettingsModalOpen;
 
         float originalYaw = targetYawDegrees;
         float originalPitch = targetPitchDegrees;
@@ -857,13 +897,27 @@ public sealed class ModernAtlasDialog : GuiDialog
         bool caveModeActivated = !SurfaceSafetyEnabled;
         PrepareSurfaceSafetyFilter();
 
-        bool hidden = HideInterface() && interfaceHidden;
+        bool hidden = ClickAtlasControlForAutomatedTest(overlay, "hide-ui-button")
+            && interfaceHidden;
         bool restored = HandleEscape() && !interfaceHidden && IsOpened();
+        bool neumorphicControls = overlay?.GetElement("settings-button")
+                is GuiElementAtlasButton
+            && settingsModal?.GetElement("map-layers") is GuiElementAtlasSwitch
+            && creativeSettingsModal?.GetElement("camera-angle-lock")
+                is GuiElementAtlasSwitch
+            && mapLayerPanel?.GetElement("map-layer") is GuiElementDropDown;
         int renderedEntityCount = exactChunkRenderer?.LastRenderedEntityCount ?? 0;
         bool heldItemsSuppressed = renderedEntityCount > 0
             && exactChunkRenderer?.LastSuppressedHeldItemCount == renderedEntityCount;
         automatedSmokeTestInterfaceControlsPassed = accessAvailable
-            && settingsOpened
+            && settingsOpenedByClick
+            && settingsSwitchClicked
+            && settingsSwitchRestored
+            && sliderBoundaryDragHandled
+            && sliderBoundaryDragClamped
+            && settingsClosedByClick
+            && creativeOpenedByClick
+            && creativeClosedByClick
             && MapLayerControlsVisible
             && SearchModeActive
             && safeSurfaceWasActive
@@ -872,20 +926,28 @@ public sealed class ModernAtlasDialog : GuiDialog
             && cameraYawStayedFree
             && hidden
             && restored
+            && neumorphicControls
             && heldItemsSuppressed;
         if (automatedSmokeTestInterfaceControlsPassed)
         {
             capi.Logger.Notification(
-                "[ModernAtlas] Automated smoke test exercised the compact map-layer switch, Creative/Cheat cave/search/camera controls, Escape-restored hidden UI and held-item suppression for {0} living models.",
+                "[ModernAtlas] Automated smoke test exercised the compact neumorphic controls, map-layer switch, Creative/Cheat cave/search/camera controls, Escape-restored hidden UI and held-item suppression for {0} living models.",
                 renderedEntityCount
             );
         }
         else
         {
             capi.Logger.Error(
-                "[ModernAtlas] Automated interface-controls test failed: access={0}, modal={1}, layers={2}, search={3}, safeSurface={4}, cave={5}, angleLock={6}, yaw={7}, hidden={8}, restored={9}, heldItems={10}/{11}.",
+                "[ModernAtlas] Automated interface-controls test failed: access={0}, settingsOpen={1}, settingsSwitch={2}/{3}, sliderBoundary={4}/{5}, settingsClose={6}, creativeOpen={7}, creativeClose={8}, layers={9}, search={10}, safeSurface={11}, cave={12}, angleLock={13}, yaw={14}, hidden={15}, restored={16}, neumorphic={17}, heldItems={18}/{19}.",
                 accessAvailable,
-                settingsOpened,
+                settingsOpenedByClick,
+                settingsSwitchClicked,
+                settingsSwitchRestored,
+                sliderBoundaryDragHandled,
+                sliderBoundaryDragClamped,
+                settingsClosedByClick,
+                creativeOpenedByClick,
+                creativeClosedByClick,
                 MapLayerControlsVisible,
                 SearchModeActive,
                 safeSurfaceWasActive,
@@ -894,9 +956,125 @@ public sealed class ModernAtlasDialog : GuiDialog
                 cameraYawStayedFree,
                 hidden,
                 restored,
+                neumorphicControls,
                 exactChunkRenderer?.LastSuppressedHeldItemCount ?? 0,
                 renderedEntityCount
             );
+        }
+    }
+
+    private bool ClickAtlasControlForAutomatedTest(GuiComposer? composer, string key)
+    {
+        GuiElement? element = composer?.GetElement(key);
+        if (element == null) return false;
+
+        int x = (int)Math.Round(element.Bounds.absX + element.Bounds.OuterWidth * 0.5);
+        int y = (int)Math.Round(element.Bounds.absY + element.Bounds.OuterHeight * 0.5);
+        MouseEvent down = new(x, y, EnumMouseButton.Left, 0);
+        OnMouseDown(down);
+        MouseEvent up = new(x, y, EnumMouseButton.Left, 0);
+        OnMouseUp(up);
+        return down.Handled && up.Handled;
+    }
+
+    private bool DragAtlasSliderBeyondBoundsForAutomatedTest(
+        GuiComposer? composer,
+        string key,
+        bool towardMaximum
+    )
+    {
+        GuiElementAtlasSlider? slider = composer?.GetElement(key) as GuiElementAtlasSlider;
+        if (slider == null) return false;
+
+        int startX = (int)Math.Round(slider.Bounds.absX + slider.Bounds.OuterWidth * 0.5);
+        int startY = (int)Math.Round(slider.Bounds.absY + slider.Bounds.OuterHeight * 0.5);
+        int endX = (int)Math.Round(
+            towardMaximum
+                ? slider.Bounds.absX + slider.Bounds.OuterWidth + 160
+                : slider.Bounds.absX - 160
+        );
+        int endY = (int)Math.Round(slider.Bounds.absY - slider.Bounds.OuterHeight - 80);
+
+        MouseEvent down = new(startX, startY, EnumMouseButton.Left, 0);
+        OnMouseDown(down);
+        MouseEvent move = new(endX, endY, endX - startX, endY - startY);
+        OnMouseMove(move);
+        MouseEvent up = new(endX, endY, EnumMouseButton.Left, 0);
+        OnMouseUp(up);
+        return down.Handled && move.Handled && up.Handled;
+    }
+
+    private void CaptureAutomatedSmokeScreenshot()
+    {
+        if (!automatedSmokeTestActive
+            || !AutomatedSmokeTestRenderedExactWorld
+            || !automatedSmokeTestInterfaceControlsPassed
+            || automatedSmokeScreenshotPhase >= 4)
+        {
+            return;
+        }
+
+        string? configuredPath = Environment.GetEnvironmentVariable(
+            SmokeScreenshotEnvironmentVariable
+        );
+        if (string.IsNullOrWhiteSpace(configuredPath))
+        {
+            automatedSmokeScreenshotPhase = 4;
+            return;
+        }
+
+        string prefix = configuredPath.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
+            ? configuredPath[..^4]
+            : configuredPath;
+        string suffix = automatedSmokeScreenshotPhase switch
+        {
+            0 => "atlas",
+            1 => "settings",
+            2 => "creative",
+            _ => "visual-lab"
+        };
+        string path = $"{prefix}-{suffix}.png";
+        try
+        {
+            using BitmapRef screenshot = capi.Render.GrabScreenshot(
+                capi.Render.FrameWidth,
+                capi.Render.FrameHeight,
+                false,
+                true,
+                true
+            );
+            screenshot.Save(path);
+            capi.Logger.Notification(
+                "[ModernAtlas] Saved automated atlas UI screenshot: {0}",
+                path
+            );
+        }
+        catch (Exception exception)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated atlas UI screenshot failed for {0}: {1}",
+                path,
+                exception.Message
+            );
+            automatedSmokeScreenshotPhase = 4;
+            return;
+        }
+
+        automatedSmokeScreenshotPhase++;
+        switch (automatedSmokeScreenshotPhase)
+        {
+            case 1:
+                OpenSettingsModal();
+                break;
+            case 2:
+                OpenCreativeSettingsModal();
+                break;
+            case 3:
+                OpenVisualLab();
+                break;
+            default:
+                CloseSettingsModal();
+                break;
         }
     }
 
@@ -1310,45 +1488,48 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         ElementBounds root = ElementBounds.Fill;
         double guiWidth = capi.Gui.WindowBounds.InnerWidth / Math.Max(0.5, RuntimeEnv.GUIScale);
-        double actionX = Math.Max(18, guiWidth - 214);
+        double actionX = Math.Max(18, guiWidth - 232);
+        double headerWidth = Math.Min(820, Math.Max(430, actionX - 34));
 
         overlay = capi.Gui.CreateCompo("modernatlas-3d", root)
+            .AddStaticCustomDraw(
+                ElementBounds.Fixed(12, 10, headerWidth, 88),
+                AtlasUiStyle.DrawCard
+            )
             .AddStaticText(
-                "ModernAtlas",
-                CairoFont.WhiteSmallishText().WithFontSize(22),
-                ElementBounds.Fixed(20, 14, 320, 32)
+                "MODERNATLAS",
+                AtlasUiStyle.TitleFont(20),
+                ElementBounds.Fixed(30, 25, 190, 30)
             )
             .AddStaticText(
                 Lang.Get("modernatlas:controls-help"),
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 44, 850, 28)
+                AtlasUiStyle.DetailFont(12),
+                ElementBounds.Fixed(208, 28, Math.Max(205, headerWidth - 226), 24)
             )
             .AddDynamicText(
                 "",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 70, 720, 28),
+                AtlasUiStyle.DetailFont(12),
+                ElementBounds.Fixed(30, 62, Math.Max(390, headerWidth - 48), 24),
                 "status"
             )
-            .AddButton(
-                "Exit",
-                CloseAtlas,
-                ElementBounds.Fixed(actionX, 16, 190, 32),
-                EnumButtonStyle.Normal,
-                "exit-button"
-            )
-            .AddButton(
-                "Settings",
+            .AddAtlasButton(
+                "SETTINGS",
                 OpenSettingsModal,
-                ElementBounds.Fixed(actionX, 54, 190, 32),
-                EnumButtonStyle.Normal,
+                ElementBounds.Fixed(actionX, 10, 128, 44),
                 "settings-button"
             )
-            .AddButton(
-                "Hide UI",
+            .AddAtlasButton(
+                "EXIT",
+                CloseAtlas,
+                ElementBounds.Fixed(actionX + 136, 10, 78, 44),
+                "exit-button"
+            )
+            .AddAtlasButton(
+                "HIDE UI",
                 HideInterface,
-                ElementBounds.Fixed(actionX, 130, 190, 32),
-                EnumButtonStyle.Normal,
-                "hide-ui-button"
+                ElementBounds.Fixed(actionX, 102, 214, 44),
+                "hide-ui-button",
+                AtlasButtonStyle.Dark
             )
             .Compose(false);
 
@@ -1356,40 +1537,39 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "modernatlas-creative-settings-shortcut",
                 ElementBounds.Fill
             )
-            .AddButton(
-                "Creative/Cheat Settings",
+            .AddAtlasButton(
+                "CREATIVE / CHEAT SETTINGS",
                 OpenCreativeSettingsModal,
-                ElementBounds.Fixed(actionX, 92, 190, 32),
-                EnumButtonStyle.Normal,
+                ElementBounds.Fixed(actionX, 56, 214, 44),
                 "creative-settings-button"
             )
             .Compose(false);
 
-        ElementBounds searchRoot = ElementBounds.Fixed(18, 104, 540, 76);
+        ElementBounds searchRoot = ElementBounds.Fixed(18, 112, 560, 82);
         searchPanel = capi.Gui.CreateCompo("modernatlas-search", searchRoot)
-            .AddShadedDialogBG(ElementBounds.Fixed(0, 0, 540, 76), true)
+            .AddStaticCustomDraw(ElementBounds.Fixed(0, 0, 560, 82), AtlasUiStyle.DrawCard)
             .AddStaticText(
-                "Search loaded map",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(12, 10, 132, 26)
+                "SEARCH",
+                AtlasUiStyle.LabelFont(12),
+                ElementBounds.Fixed(18, 17, 124, 24)
             )
-            .AddTextInput(
-                ElementBounds.Fixed(146, 6, 300, 32),
+            .AddAtlasTextInput(
+                ElementBounds.Fixed(142, 10, 328, 40),
                 OnSearchTextChanged,
-                CairoFont.SmallTextInput().WithColor(ColorUtil.WhiteArgbDouble),
+                AtlasUiStyle.InputFont(13),
                 "search-input"
             )
-            .AddButton(
-                "Clear",
+            .AddAtlasButton(
+                "×",
                 ClearSearch,
-                ElementBounds.Fixed(454, 6, 74, 32),
-                EnumButtonStyle.Normal,
-                "search-clear"
+                ElementBounds.Fixed(478, 8, 64, 44),
+                "search-clear",
+                AtlasButtonStyle.Icon
             )
             .AddDynamicText(
                 "",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(12, 44, 516, 24),
+                AtlasUiStyle.DetailFont(11),
+                ElementBounds.Fixed(18, 55, 524, 20),
                 "search-status"
             )
             .Compose(false);
@@ -1398,212 +1578,213 @@ public sealed class ModernAtlasDialog : GuiDialog
             "Block, creature, player or dropped item"
         );
 
-        ElementBounds mapLayerRoot = ElementBounds.Fixed(18, 186, 540, 76);
+        ElementBounds mapLayerRoot = ElementBounds.Fixed(18, 202, 560, 82);
         mapLayerPanel = capi.Gui.CreateCompo("modernatlas-map-layer", mapLayerRoot)
-            .AddShadedDialogBG(ElementBounds.Fixed(0, 0, 540, 76), true)
+            .AddStaticCustomDraw(ElementBounds.Fixed(0, 0, 560, 82), AtlasUiStyle.DrawCard)
             .AddStaticText(
-                "Map layer",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(12, 10, 132, 26)
+                "MAP LAYER",
+                AtlasUiStyle.LabelFont(12),
+                ElementBounds.Fixed(18, 17, 124, 24)
             )
             .AddDropDown(
                 AtlasMapLayerInfo.Values,
                 AtlasMapLayerInfo.Names,
                 (int)activeMapLayer,
                 OnMapLayerChanged,
-                ElementBounds.Fixed(146, 6, 382, 32),
+                ElementBounds.Fixed(142, 8, 400, 44),
                 "map-layer"
             )
             .AddDynamicText(
                 "",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(12, 44, 516, 24),
+                AtlasUiStyle.DetailFont(11),
+                ElementBounds.Fixed(18, 55, 524, 20),
                 "layer-status"
             )
             .Compose(false);
 
-        ElementBounds unitRoot = ElementBounds.Fixed(0, 0, 340, 250)
+        ElementBounds unitRoot = ElementBounds.Fixed(0, 0, 370, 258)
             .WithAlignment(EnumDialogArea.RightMiddle)
             .WithFixedOffset(-24, 0);
         unitPanel = capi.Gui.CreateCompo("modernatlas-unit-inspection", unitRoot)
-            .AddShadedDialogBG(ElementBounds.Fixed(0, 0, 340, 250), true)
+            .AddStaticCustomDraw(ElementBounds.Fixed(0, 0, 370, 258), AtlasUiStyle.DrawCard)
             .AddDynamicText(
                 "",
-                CairoFont.WhiteSmallishText().WithFontSize(20),
-                ElementBounds.Fixed(20, 18, 220, 34),
+                AtlasUiStyle.TitleFont(18),
+                ElementBounds.Fixed(24, 22, 260, 32),
                 "unit-name"
             )
-            .AddButton(
-                "Close",
+            .AddAtlasButton(
+                "×",
                 CloseUnitInspection,
-                ElementBounds.Fixed(245, 14, 75, 30),
-                EnumButtonStyle.Normal,
-                "unit-close"
+                ElementBounds.Fixed(310, 12, 48, 44),
+                "unit-close",
+                AtlasButtonStyle.Icon
+            )
+            .AddStaticCustomDraw(
+                ElementBounds.Fixed(22, 62, 326, 2),
+                AtlasUiStyle.DrawSeparator
             )
             .AddDynamicText(
                 "",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 64, 300, 168),
+                AtlasUiStyle.DetailFont(13),
+                ElementBounds.Fixed(24, 76, 322, 160),
                 "unit-details"
             )
             .Compose();
 
-        ElementBounds modalRoot = ElementBounds.Fixed(0, 0, 340, 510)
+        ElementBounds modalRoot = ElementBounds.Fixed(0, 0, 430, 590)
             .WithAlignment(EnumDialogArea.CenterMiddle);
-        ElementBounds modalBackground = ElementBounds.Fixed(0, 0, 340, 510);
         settingsModal = capi.Gui.CreateCompo("modernatlas-settings", modalRoot)
-            .AddShadedDialogBG(modalBackground, true)
+            .AddStaticCustomDraw(ElementBounds.Fixed(0, 0, 430, 590), AtlasUiStyle.DrawCard)
             .AddStaticText(
-                "Settings",
-                CairoFont.WhiteSmallishText().WithFontSize(20),
-                ElementBounds.Fixed(20, 18, 200, 30)
+                "SETTINGS",
+                AtlasUiStyle.TitleFont(20),
+                ElementBounds.Fixed(26, 24, 260, 30)
             )
-            .AddButton(
-                "Close",
+            .AddAtlasButton(
+                "×",
                 CloseSettingsModal,
-                ElementBounds.Fixed(240, 14, 80, 30),
-                EnumButtonStyle.Normal,
-                "settings-close"
+                ElementBounds.Fixed(366, 12, 50, 46),
+                "settings-close",
+                AtlasButtonStyle.Icon
+            )
+            .AddStaticText(
+                "DISPLAY",
+                AtlasUiStyle.LabelFont(11),
+                ElementBounds.Fixed(26, 66, 180, 22)
             )
             .AddStaticText(
                 "Map layer",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 59, 180, 26)
+                AtlasUiStyle.DetailFont(13),
+                ElementBounds.Fixed(28, 94, 240, 26)
             )
-            .AddSwitch(
+            .AddAtlasSwitch(
                 OnMapLayersToggled,
-                ElementBounds.Fixed(264, 55, 46, 28),
-                "map-layers",
-                24,
-                4
+                ElementBounds.Fixed(350, 88, 62, 38),
+                "map-layers"
             )
             .AddStaticText(
                 capi.IsSinglePlayer ? "Unexplored fog" : "Server fog (locked)",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 93, 180, 26)
+                AtlasUiStyle.DetailFont(13),
+                ElementBounds.Fixed(28, 130, 260, 26)
             )
-            .AddSwitch(
+            .AddAtlasSwitch(
                 OnFogToggled,
-                ElementBounds.Fixed(264, 89, 46, 28),
-                "fog",
-                24,
-                4
+                ElementBounds.Fixed(350, 124, 62, 38),
+                "fog"
             )
             .AddStaticText(
                 "Atlas animations",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 127, 180, 26)
+                AtlasUiStyle.DetailFont(13),
+                ElementBounds.Fixed(28, 166, 240, 26)
             )
-            .AddSwitch(
+            .AddAtlasSwitch(
                 OnAnimationsToggled,
-                ElementBounds.Fixed(264, 123, 46, 28),
-                "animations",
-                24,
-                4
+                ElementBounds.Fixed(350, 160, 62, 38),
+                "animations"
             )
             .AddStaticText(
                 "Live clouds",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 161, 180, 26)
+                AtlasUiStyle.DetailFont(13),
+                ElementBounds.Fixed(28, 202, 240, 26)
             )
-            .AddSwitch(
+            .AddAtlasSwitch(
                 OnCloudsToggled,
-                ElementBounds.Fixed(264, 157, 46, 28),
-                "clouds",
-                24,
-                4
+                ElementBounds.Fixed(350, 196, 62, 38),
+                "clouds"
+            )
+            .AddStaticCustomDraw(
+                ElementBounds.Fixed(26, 239, 378, 2),
+                AtlasUiStyle.DrawSeparator
+            )
+            .AddStaticText(
+                "LIVING MODELS",
+                AtlasUiStyle.LabelFont(11),
+                ElementBounds.Fixed(26, 252, 200, 22)
             )
             .AddStaticText(
                 "Living entities",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 195, 180, 26)
+                AtlasUiStyle.DetailFont(13),
+                ElementBounds.Fixed(28, 280, 240, 26)
             )
-            .AddSwitch(
+            .AddAtlasSwitch(
                 OnLivingEntitiesToggled,
-                ElementBounds.Fixed(264, 191, 46, 28),
-                "entities",
-                24,
-                4
+                ElementBounds.Fixed(350, 274, 62, 38),
+                "entities"
             )
             .AddStaticText(
                 "Players",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(40, 229, 160, 26)
+                AtlasUiStyle.DetailFont(12),
+                ElementBounds.Fixed(48, 316, 200, 24)
             )
-            .AddSwitch(
+            .AddAtlasSwitch(
                 OnPlayersToggled,
-                ElementBounds.Fixed(264, 225, 46, 28),
-                "players",
-                24,
-                4
+                ElementBounds.Fixed(350, 310, 62, 38),
+                "players"
             )
             .AddStaticText(
                 "Animals",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(40, 263, 160, 26)
+                AtlasUiStyle.DetailFont(12),
+                ElementBounds.Fixed(48, 350, 200, 24)
             )
-            .AddSwitch(
+            .AddAtlasSwitch(
                 OnAnimalsToggled,
-                ElementBounds.Fixed(264, 259, 46, 28),
-                "animals",
-                24,
-                4
+                ElementBounds.Fixed(350, 344, 62, 38),
+                "animals"
             )
             .AddStaticText(
                 "Hostile mobs",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(40, 297, 160, 26)
+                AtlasUiStyle.DetailFont(12),
+                ElementBounds.Fixed(48, 384, 200, 24)
             )
-            .AddSwitch(
+            .AddAtlasSwitch(
                 OnMobsToggled,
-                ElementBounds.Fixed(264, 293, 46, 28),
-                "mobs",
-                24,
-                4
+                ElementBounds.Fixed(350, 378, 62, 38),
+                "mobs"
             )
             .AddStaticText(
                 "NPCs",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(40, 331, 160, 26)
+                AtlasUiStyle.DetailFont(12),
+                ElementBounds.Fixed(48, 418, 200, 24)
             )
-            .AddSwitch(
+            .AddAtlasSwitch(
                 OnNpcsToggled,
-                ElementBounds.Fixed(264, 327, 46, 28),
-                "npcs",
-                24,
-                4
+                ElementBounds.Fixed(350, 412, 62, 38),
+                "npcs"
+            )
+            .AddStaticCustomDraw(
+                ElementBounds.Fixed(26, 454, 378, 2),
+                AtlasUiStyle.DrawSeparator
             )
             .AddStaticText(
                 "Live sun and weather",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 365, 200, 26)
+                AtlasUiStyle.DetailFont(12),
+                ElementBounds.Fixed(28, 468, 200, 24)
             )
-            .AddSwitch(
+            .AddAtlasSwitch(
                 OnLiveLightingToggled,
-                ElementBounds.Fixed(264, 361, 46, 28),
-                "live-lighting",
-                24,
-                4
+                ElementBounds.Fixed(350, 460, 62, 38),
+                "live-lighting"
             )
             .AddStaticText(
                 "Fixed sun hour",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 399, 140, 26)
+                AtlasUiStyle.DetailFont(12),
+                ElementBounds.Fixed(28, 505, 130, 24)
             )
-            .AddSlider(
+            .AddAtlasSlider(
                 OnFixedSunHourChanged,
-                ElementBounds.Fixed(170, 393, 140, 32),
+                ElementBounds.Fixed(166, 496, 246, 42),
                 "fixed-sun-hour"
             )
-            .AddButton(
-                "Atlas visual lab",
+            .AddAtlasButton(
+                "ATLAS VISUAL LAB",
                 OpenVisualLab,
-                ElementBounds.Fixed(20, 452, 300, 34),
-                EnumButtonStyle.Normal,
-                "visual-lab-open"
+                ElementBounds.Fixed(24, 540, 382, 44),
+                "visual-lab-open",
+                AtlasButtonStyle.Dark
             )
             .Compose();
-        settingsModal.GetSlider("fixed-sun-hour")?.SetValues(
+        settingsModal.GetAtlasSlider("fixed-sun-hour")?.SetValues(
             Math.Clamp(config.FixedSunHour, 0, 23),
             0,
             23,
@@ -1611,148 +1792,155 @@ public sealed class ModernAtlasDialog : GuiDialog
             "h"
         );
 
-        ElementBounds creativeRoot = ElementBounds.Fixed(0, 0, 390, 255)
+        ElementBounds creativeRoot = ElementBounds.Fixed(0, 0, 440, 294)
             .WithAlignment(EnumDialogArea.CenterMiddle);
         creativeSettingsModal = capi.Gui.CreateCompo(
                 "modernatlas-creative-settings",
                 creativeRoot
             )
-            .AddShadedDialogBG(ElementBounds.Fixed(0, 0, 390, 255), true)
+            .AddStaticCustomDraw(ElementBounds.Fixed(0, 0, 440, 294), AtlasUiStyle.DrawCard)
             .AddStaticText(
-                "Creative/Cheat Settings",
-                CairoFont.WhiteSmallishText().WithFontSize(20),
-                ElementBounds.Fixed(20, 18, 265, 30)
+                "CREATIVE / CHEAT",
+                AtlasUiStyle.TitleFont(20),
+                ElementBounds.Fixed(26, 24, 300, 30)
             )
-            .AddButton(
-                "Close",
+            .AddAtlasButton(
+                "×",
                 CloseCreativeSettingsModal,
-                ElementBounds.Fixed(294, 14, 76, 30),
-                EnumButtonStyle.Normal,
-                "creative-settings-close"
+                ElementBounds.Fixed(376, 12, 50, 46),
+                "creative-settings-close",
+                AtlasButtonStyle.Icon
             )
             .AddStaticText(
                 "Singleplayer Creative or accepted Cheat Mode only.",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 55, 350, 28)
+                AtlasUiStyle.DetailFont(12),
+                ElementBounds.Fixed(26, 59, 382, 24)
+            )
+            .AddStaticCustomDraw(
+                ElementBounds.Fixed(26, 88, 388, 2),
+                AtlasUiStyle.DrawSeparator
             )
             .AddStaticText(
                 "Cave mode (show underground)",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 101, 270, 28)
+                AtlasUiStyle.DetailFont(13),
+                ElementBounds.Fixed(28, 108, 300, 26)
             )
-            .AddSwitch(
+            .AddAtlasSwitch(
                 OnCaveModeToggled,
-                ElementBounds.Fixed(314, 97, 46, 30),
-                "cave-mode",
-                24,
-                4
+                ElementBounds.Fixed(358, 101, 64, 40),
+                "cave-mode"
             )
             .AddStaticText(
                 "Search loaded map",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 145, 270, 28)
+                AtlasUiStyle.DetailFont(13),
+                ElementBounds.Fixed(28, 156, 300, 26)
             )
-            .AddSwitch(
+            .AddAtlasSwitch(
                 OnSearchModeToggled,
-                ElementBounds.Fixed(314, 141, 46, 30),
-                "search-mode",
-                24,
-                4
+                ElementBounds.Fixed(358, 149, 64, 40),
+                "search-mode"
             )
             .AddStaticText(
                 "Lock camera angle",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 189, 270, 28)
+                AtlasUiStyle.DetailFont(13),
+                ElementBounds.Fixed(28, 204, 300, 26)
             )
-            .AddSwitch(
+            .AddAtlasSwitch(
                 OnCameraAngleLockToggled,
-                ElementBounds.Fixed(314, 185, 46, 30),
-                "camera-angle-lock",
-                24,
-                4
+                ElementBounds.Fixed(358, 197, 64, 40),
+                "camera-angle-lock"
+            )
+            .AddStaticText(
+                "Rotation remains free while the current tilt is held.",
+                AtlasUiStyle.DetailFont(11),
+                ElementBounds.Fixed(28, 250, 382, 22)
             )
             .Compose(false);
 
-        ElementBounds labRoot = ElementBounds.Fixed(0, 0, 430, 440)
+        ElementBounds labRoot = ElementBounds.Fixed(0, 0, 470, 474)
             .WithAlignment(EnumDialogArea.CenterMiddle);
         visualLabModal = capi.Gui.CreateCompo("modernatlas-visual-lab", labRoot)
-            .AddShadedDialogBG(ElementBounds.Fixed(0, 0, 430, 440), true)
+            .AddStaticCustomDraw(ElementBounds.Fixed(0, 0, 470, 474), AtlasUiStyle.DrawCard)
             .AddStaticText(
-                "Atlas visual lab",
-                CairoFont.WhiteSmallishText().WithFontSize(20),
-                ElementBounds.Fixed(20, 18, 240, 30)
+                "ATLAS VISUAL LAB",
+                AtlasUiStyle.TitleFont(20),
+                ElementBounds.Fixed(72, 24, 300, 30)
             )
-            .AddButton(
-                "Back",
+            .AddAtlasButton(
+                "‹",
                 CloseVisualLab,
-                ElementBounds.Fixed(330, 14, 80, 30),
-                EnumButtonStyle.Normal,
-                "visual-lab-back"
+                ElementBounds.Fixed(14, 12, 50, 46),
+                "visual-lab-back",
+                AtlasButtonStyle.Icon
             )
             .AddStaticText(
                 "Atlas-only controls; the normal world is never changed.",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 54, 390, 28)
+                AtlasUiStyle.DetailFont(12),
+                ElementBounds.Fixed(72, 59, 370, 24)
+            )
+            .AddStaticCustomDraw(
+                ElementBounds.Fixed(26, 88, 418, 2),
+                AtlasUiStyle.DrawSeparator
             )
             .AddStaticText(
                 "Exposure",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 96, 160, 28)
+                AtlasUiStyle.DetailFont(13),
+                ElementBounds.Fixed(28, 108, 170, 26)
             )
-            .AddSlider(
+            .AddAtlasSlider(
                 OnAtlasExposureChanged,
-                ElementBounds.Fixed(205, 90, 205, 34),
+                ElementBounds.Fixed(202, 99, 240, 44),
                 "atlas-exposure"
             )
             .AddStaticText(
                 "Data-layer color strength",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 146, 175, 28)
+                AtlasUiStyle.DetailFont(13),
+                ElementBounds.Fixed(28, 160, 174, 26)
             )
-            .AddSlider(
+            .AddAtlasSlider(
                 OnMapLayerOpacityChanged,
-                ElementBounds.Fixed(205, 140, 205, 34),
+                ElementBounds.Fixed(202, 151, 240, 44),
                 "layer-opacity"
             )
             .AddStaticText(
                 "Boundary softness",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 196, 175, 28)
+                AtlasUiStyle.DetailFont(13),
+                ElementBounds.Fixed(28, 212, 174, 26)
             )
-            .AddSlider(
+            .AddAtlasSlider(
                 OnBoundarySoftnessChanged,
-                ElementBounds.Fixed(205, 190, 205, 34),
+                ElementBounds.Fixed(202, 203, 240, 44),
                 "boundary-softness"
             )
             .AddStaticText(
                 "Cave mask brightness",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 246, 180, 28)
+                AtlasUiStyle.DetailFont(13),
+                ElementBounds.Fixed(28, 264, 174, 26)
             )
-            .AddSlider(
+            .AddAtlasSlider(
                 OnCaveMaskBrightnessChanged,
-                ElementBounds.Fixed(205, 240, 205, 34),
+                ElementBounds.Fixed(202, 255, 240, 44),
                 "cave-mask-brightness"
             )
             .AddStaticText(
                 "Fog palette",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 296, 160, 28)
+                AtlasUiStyle.DetailFont(13),
+                ElementBounds.Fixed(28, 318, 170, 26)
             )
-            .AddDropDown(
+            .AddAtlasChoice(
                 AtlasVisualPalettes.Values,
                 AtlasVisualPalettes.Names,
                 AtlasVisualPalettes.IndexOf(config.FogPalette),
                 OnFogPaletteChanged,
-                ElementBounds.Fixed(205, 290, 205, 34),
+                ElementBounds.Fixed(202, 307, 240, 46),
                 "fog-palette"
             )
-            .AddButton(
-                "Reset visual tuning",
+            .AddAtlasButton(
+                "RESET VISUAL TUNING",
                 ResetVisualTuning,
-                ElementBounds.Fixed(20, 370, 390, 38),
-                EnumButtonStyle.Normal,
-                "visual-lab-reset"
+                ElementBounds.Fixed(26, 394, 418, 48),
+                "visual-lab-reset",
+                AtlasButtonStyle.Dark
             )
             .Compose();
         ConfigureVisualLabSliders();
@@ -1763,6 +1951,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool OpenSettingsModal()
     {
         ResetPointerDrag();
+        selectedEntityId = null;
         visualLabModalOpen = false;
         creativeSettingsModalOpen = false;
         settingsModalOpen = true;
@@ -1784,6 +1973,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
         ResetPointerDrag();
         searchPanel?.UnfocusOwnElements();
+        selectedEntityId = null;
         settingsModalOpen = false;
         visualLabModalOpen = false;
         creativeSettingsModalOpen = true;
@@ -1800,6 +1990,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool OpenVisualLab()
     {
         ResetPointerDrag();
+        selectedEntityId = null;
         settingsModalOpen = false;
         creativeSettingsModalOpen = false;
         visualLabModalOpen = true;
@@ -1817,28 +2008,28 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private void ConfigureVisualLabSliders()
     {
-        visualLabModal?.GetSlider("atlas-exposure")?.SetValues(
+        visualLabModal.GetAtlasSlider("atlas-exposure")?.SetValues(
             Math.Clamp(config.AtlasExposurePercent, 50, 150),
             50,
             150,
             5,
             "%"
         );
-        visualLabModal?.GetSlider("layer-opacity")?.SetValues(
+        visualLabModal.GetAtlasSlider("layer-opacity")?.SetValues(
             Math.Clamp(config.MapLayerOpacityPercent, 0, 100),
             0,
             100,
             5,
             "%"
         );
-        visualLabModal?.GetSlider("boundary-softness")?.SetValues(
+        visualLabModal.GetAtlasSlider("boundary-softness")?.SetValues(
             Math.Clamp(config.BoundarySoftnessPercent, 25, 200),
             25,
             200,
             5,
             "%"
         );
-        visualLabModal?.GetSlider("cave-mask-brightness")?.SetValues(
+        visualLabModal.GetAtlasSlider("cave-mask-brightness")?.SetValues(
             Math.Clamp(config.CaveMaskBrightnessPercent, 50, 150),
             50,
             150,
@@ -1850,7 +2041,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private void SyncVisualLabControls()
     {
         ConfigureVisualLabSliders();
-        visualLabModal?.GetDropDown("fog-palette")?.SetSelectedIndex(
+        visualLabModal.GetAtlasChoice("fog-palette")?.SetSelectedIndex(
             AtlasVisualPalettes.IndexOf(config.FogPalette)
         );
     }
@@ -2609,16 +2800,16 @@ public sealed class ModernAtlasDialog : GuiDialog
     private void SyncSettingsControls()
     {
         if (settingsModal == null) return;
-        settingsModal.GetSwitch("map-layers")?.SetValue(config.MapLayersEnabled);
-        settingsModal.GetSwitch("fog")?.SetValue(EffectiveFogEnabled);
-        settingsModal.GetSwitch("fog").Enabled = capi.IsSinglePlayer;
-        settingsModal.GetSwitch("animations")?.SetValue(config.AnimationsEnabled);
-        settingsModal.GetSwitch("clouds")?.SetValue(config.CloudsEnabled);
-        settingsModal.GetSwitch("live-lighting")?.SetValue(config.LiveLightingEnabled);
-        settingsModal.GetSlider("fixed-sun-hour").Enabled = !config.LiveLightingEnabled;
+        settingsModal.GetAtlasSwitch("map-layers")?.SetValue(config.MapLayersEnabled);
+        settingsModal.GetAtlasSwitch("fog")?.SetValue(EffectiveFogEnabled);
+        settingsModal.GetAtlasSwitch("fog")!.Enabled = capi.IsSinglePlayer;
+        settingsModal.GetAtlasSwitch("animations")?.SetValue(config.AnimationsEnabled);
+        settingsModal.GetAtlasSwitch("clouds")?.SetValue(config.CloudsEnabled);
+        settingsModal.GetAtlasSwitch("live-lighting")?.SetValue(config.LiveLightingEnabled);
+        settingsModal.GetAtlasSlider("fixed-sun-hour")!.Enabled = !config.LiveLightingEnabled;
         bool serverAllowsAny = capi.IsSinglePlayer || serverPolicy.AnyEntityModels;
-        settingsModal.GetSwitch("entities")?.SetValue(config.LivingEntitiesEnabled && serverAllowsAny);
-        settingsModal.GetSwitch("entities").Enabled = serverAllowsAny;
+        settingsModal.GetAtlasSwitch("entities")?.SetValue(config.LivingEntitiesEnabled && serverAllowsAny);
+        settingsModal.GetAtlasSwitch("entities")!.Enabled = serverAllowsAny;
         SyncEntityCategorySwitch("players", config.ShowPlayers, serverPolicy.ShowPlayers);
         SyncEntityCategorySwitch("animals", config.ShowAnimals, serverPolicy.ShowAnimals);
         SyncEntityCategorySwitch("mobs", config.ShowMobs, serverPolicy.ShowMobs);
@@ -2630,25 +2821,25 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (creativeSettingsModal == null) return;
 
         bool available = CreativeCheatSettingsAvailable;
-        creativeSettingsModal.GetSwitch("cave-mode")?.SetValue(
+        creativeSettingsModal.GetAtlasSwitch("cave-mode")?.SetValue(
             available && config.CaveModeEnabled
         );
-        creativeSettingsModal.GetSwitch("search-mode")?.SetValue(
+        creativeSettingsModal.GetAtlasSwitch("search-mode")?.SetValue(
             available && config.SearchModeEnabled
         );
-        creativeSettingsModal.GetSwitch("camera-angle-lock")?.SetValue(
+        creativeSettingsModal.GetAtlasSwitch("camera-angle-lock")?.SetValue(
             available && config.CameraAngleLocked
         );
-        creativeSettingsModal.GetSwitch("cave-mode").Enabled = available;
-        creativeSettingsModal.GetSwitch("search-mode").Enabled = available;
-        creativeSettingsModal.GetSwitch("camera-angle-lock").Enabled = available;
+        creativeSettingsModal.GetAtlasSwitch("cave-mode")!.Enabled = available;
+        creativeSettingsModal.GetAtlasSwitch("search-mode")!.Enabled = available;
+        creativeSettingsModal.GetAtlasSwitch("camera-angle-lock")!.Enabled = available;
     }
 
     private void SyncEntityCategorySwitch(string key, bool clientEnabled, bool serverEnabled)
     {
         bool categoryAllowed = capi.IsSinglePlayer || serverEnabled;
-        settingsModal?.GetSwitch(key)?.SetValue(clientEnabled && categoryAllowed);
-        settingsModal.GetSwitch(key).Enabled = config.LivingEntitiesEnabled && categoryAllowed;
+        settingsModal.GetAtlasSwitch(key)?.SetValue(clientEnabled && categoryAllowed);
+        settingsModal.GetAtlasSwitch(key)!.Enabled = config.LivingEntitiesEnabled && categoryAllowed;
     }
 
     private void FocusOnExteriorSurface()

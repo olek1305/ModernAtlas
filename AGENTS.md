@@ -116,6 +116,8 @@ the product scope when the atlas itself is correct.
   atlas without depending on keyboard focus. A compact `Hide UI` action may
   conceal all atlas controls for inspection; the first `Escape` restores that
   UI and a later `Escape` closes the atlas.
+- Keep atlas panels translucent with high-contrast white typography so controls
+  remain readable without covering more exact terrain than necessary.
 - Draw the full-screen atlas after ordinary mod HUD dialogs so class HUDs,
   clocks and other overlays cannot cover the map.
 
@@ -295,6 +297,9 @@ the product scope when the atlas itself is correct.
     --dataPath /home/arcylisz/.config/VintagestoryData -o 'test creative'
   ```
 
+  Add `MODERNATLAS_SMOKE_SCREENSHOT=/tmp/modernatlas-smoke` to capture the base
+  atlas, Settings, Creative/Cheat and visual-lab frames for UI inspection.
+
   The `-o` argument performs the world join. `OnLevelFinalize` waits for that
   world to be ready, then `BeginAutomatedSmokeTest` and `TryOpen` open the same
   atlas dialog normally toggled by `G`. Do not use `xdotool`, `sendkey`, fake
@@ -308,9 +313,10 @@ the product scope when the atlas itself is correct.
   atlas), focus release, unit inspection, entity and block search, a climate
   layer, the Creative/Cheat ore layer, atlas closure and the normal soft-exit
   path.
-  Drive those controls through the dialog's own methods: set the pitch target,
-  select a rendered entity, submit search queries, switch map layers and call
-  `TryClose`. Schedule the final `ClientPlatform.WindowExit(..., SoftExit)`
+  Route button and switch press/release events through the dialog's own
+  composers, then use the dialog's control methods for pitch, entity selection,
+  search queries and map layers. Schedule the final
+  `ClientPlatform.WindowExit(..., SoftExit)`
   request through `ScreenManager.EnqueueCallBack` so it runs between frames;
   invoking `ExitOrRedirect` from inside the atlas render or pre-setting
   `exitToMainMenu` can invalidate or bypass game-session teardown.
