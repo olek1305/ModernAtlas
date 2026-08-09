@@ -24,6 +24,7 @@ internal sealed class AtlasSearchController
     private const int DynamicRefreshMilliseconds = 200;
 
     private readonly ICoreClientAPI capi;
+    private readonly AtlasSearchLanguageIndex languageIndex;
     private readonly HashSet<int> matchingBlockIds = new();
     private readonly HashSet<(int X, int Y, int Z)> occupiedBlockCells = new();
     private readonly List<int> fuzzyBlockIds = new();
@@ -33,6 +34,7 @@ internal sealed class AtlasSearchController
     private readonly List<AtlasSearchResult> dynamicResults = new();
 
     private string query = "";
+    private string compactQuery = "";
     private SearchStage stage;
     private long queryChangedMilliseconds;
     private long lastDynamicRefreshMilliseconds;
@@ -65,6 +67,7 @@ internal sealed class AtlasSearchController
     public bool HasActiveQuery => query.Length >= MinimumQueryLength;
     public bool BlockScanComplete => stage == SearchStage.Complete;
     public string Query => query;
+    public string SearchLanguageSummary => languageIndex.LanguageSummary;
     public string DiagnosticSummary =>
         $"blockTypes={matchingBlockIds.Count}, columns={chunkColumns.Count}, probedCoordinates={probedChunkCoordinates}, inspectedChunks={inspectedChunks}, readyChunks={readyChunks}, paletteChunks={paletteMatchingChunks}, scannedPositions={scannedBlockPositions}, rawMatches={rawBlockMatches}, radiusRejected={radiusRejectedMatches}, surfaceRejected={surfaceRejectedMatches}, markers={blockResults.Count}";
 
@@ -85,6 +88,7 @@ internal sealed class AtlasSearchController
             string scanText = stage switch
             {
                 SearchStage.Debounce => "waiting for input",
+                SearchStage.ResolveLanguageAliases => "matching translated names",
                 SearchStage.ResolveBlockTypes => "matching block types",
                 SearchStage.PrepareChunks => "collecting loaded chunks",
                 SearchStage.ScanChunks =>
@@ -110,30 +114,34 @@ internal sealed class AtlasSearchController
     public AtlasSearchController(ICoreClientAPI capi)
     {
         this.capi = capi;
+        languageIndex = new AtlasSearchLanguageIndex(capi);
     }
 
     public void SetQuery(string? value)
     {
-        string normalized = (value ?? "").Trim().ToLowerInvariant();
+        string normalized = AtlasSearchLanguageIndex.Normalize(value);
         if (string.Equals(query, normalized, StringComparison.Ordinal)) return;
 
         query = normalized;
+        compactQuery = AtlasSearchLanguageIndex.Compact(query);
         queryChangedMilliseconds = capi.ElapsedMilliseconds;
         RestartSearch(SearchStage.Debounce);
     }
 
     internal void SetQueryImmediatelyForAutomatedTest(string value)
     {
-        query = (value ?? "").Trim().ToLowerInvariant();
+        query = AtlasSearchLanguageIndex.Normalize(value);
+        compactQuery = AtlasSearchLanguageIndex.Compact(query);
         queryChangedMilliseconds = 0;
         RestartSearch(query.Length >= MinimumQueryLength
-            ? SearchStage.ResolveBlockTypes
+            ? SearchStage.ResolveLanguageAliases
             : SearchStage.Idle);
     }
 
     public void Clear()
     {
         query = "";
+        compactQuery = "";
         queryChangedMilliseconds = 0;
         RestartSearch(SearchStage.Idle);
     }
@@ -156,7 +164,7 @@ internal sealed class AtlasSearchController
             && (requestedViewDistance != viewDistanceBlocks
                 || requestedSurfaceSafety != surfaceSafety))
         {
-            RestartSearch(SearchStage.ResolveBlockTypes);
+            RestartSearch(SearchStage.ResolveLanguageAliases);
         }
         requestedViewDistance = viewDistanceBlocks;
         requestedSurfaceSafety = surfaceSafety;
@@ -177,12 +185,20 @@ internal sealed class AtlasSearchController
             {
                 return;
             }
-            stage = SearchStage.ResolveBlockTypes;
+            stage = SearchStage.ResolveLanguageAliases;
         }
 
         long started = Stopwatch.GetTimestamp();
         while (WithinBudget(started))
         {
+            if (stage == SearchStage.ResolveLanguageAliases)
+            {
+                if (!languageIndex.ResolveBlockQueryStep(query, compactQuery))
+                {
+                    stage = SearchStage.ResolveBlockTypes;
+                }
+                continue;
+            }
             if (stage == SearchStage.ResolveBlockTypes)
             {
                 if (!ResolveBlockTypesStep()) break;
@@ -219,7 +235,11 @@ internal sealed class AtlasSearchController
         // while Vintage Story builds the handbook on a worker thread. Calling
         // GetHeldItemName here would concurrently mutate the engine's global
         // translation service and can corrupt its non-concurrent hash sets.
-        if (Matches(block.Code.ToString())) matchingBlockIds.Add(block.Id);
+        if (Matches(block.Code.ToString())
+            || languageIndex.MatchesPreparedBlock(block.Code))
+        {
+            matchingBlockIds.Add(block.Id);
+        }
         return true;
     }
 
@@ -560,7 +580,17 @@ internal sealed class AtlasSearchController
                     stack,
                     "Dropped item"
                 );
-                if (!Matches(code) && !Matches(name)) continue;
+                if (!Matches(code)
+                    && !Matches(name)
+                    && !languageIndex.Matches(
+                        stack?.Collectible?.Code,
+                        AtlasSearchAliasKind.Item,
+                        query,
+                        compactQuery
+                    ))
+                {
+                    continue;
+                }
                 dynamicResults.Add(new AtlasSearchResult(
                     entity.Pos.X,
                     entity.Pos.Y + 0.35,
@@ -581,14 +611,27 @@ internal sealed class AtlasSearchController
     {
         return Matches(AtlasSafeDisplayName.ForEntity(entity))
             || Matches(entity.Code?.ToString())
-            || Matches(entity.Properties?.Class);
+            || Matches(entity.Properties?.Class)
+            || languageIndex.Matches(
+                entity.Code,
+                AtlasSearchAliasKind.Entity,
+                query,
+                compactQuery
+            );
     }
 
     private bool Matches(string? candidate)
     {
-        return !string.IsNullOrWhiteSpace(candidate)
-            && candidate.Contains(query, StringComparison.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(candidate)) return false;
+        string normalized = AtlasSearchLanguageIndex.Normalize(candidate);
+        return normalized.Contains(query, StringComparison.Ordinal)
+            || compactQuery.Length > 0
+                && AtlasSearchLanguageIndex.Compact(normalized)
+                    .Contains(compactQuery, StringComparison.Ordinal);
     }
+
+    internal bool ValidateBilingualSearchForAutomatedTest(out string diagnostic) =>
+        languageIndex.ValidateForAutomatedTest(out diagnostic);
 
     private bool IsInsidePlayerRadius(double worldX, double worldZ)
     {
@@ -672,6 +715,7 @@ internal sealed class AtlasSearchController
         radiusRejectedMatches = 0;
         surfaceRejectedMatches = 0;
         lastDynamicRefreshMilliseconds = 0;
+        languageIndex.BeginBlockQuery();
     }
 
     private static bool WithinBudget(long started)
@@ -691,6 +735,7 @@ internal sealed class AtlasSearchController
     {
         Idle,
         Debounce,
+        ResolveLanguageAliases,
         ResolveBlockTypes,
         PrepareChunks,
         ScanChunks,

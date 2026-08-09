@@ -241,9 +241,10 @@ the product scope when the atlas itself is correct.
   `0.98` so ordinary third-party HUDs remain behind the full-screen map.
 - Persistent ModernAtlas terrain cache code, shaders and Settings controls are
   removed. The atlas renders only current exact chunk meshes.
-- Cave openings use a neutral gray atlas-only concealment material, while a
-  one-block exterior envelope preserves cliff sides, building walls and floor
-  faces near the three-block safety allowance.
+- Cave openings use a thin neutral-gray atlas-only band of real geometry,
+  while deeper cave faces are discarded so their tunnels cannot appear as a
+  visible underground network. A one-block exterior envelope preserves cliff
+  sides, building walls and floor faces near the three-block safety allowance.
 - Singleplayer Creative and accepted Cheat Mode permit a zero-degree pitch
   floor, optional cave and loaded-map search modes, unit inspection,
   dropped-item search, camera-angle locking and ore-density analysis. The
@@ -253,14 +254,16 @@ the product scope when the atlas itself is correct.
   slots and the renderer's held-item path before `BeforeRender`, then restore
   every entity and renderer field in `finally` so camera-relative shields,
   tools and modded accessories cannot float over the atlas or alter gameplay.
-- Loaded-data search resolves registered block asset codes incrementally, then
-  scans only already loaded chunks under a strict per-frame budget. Entity
-  results come only from models already authorized and rendered by the atlas.
-  During world startup, do not call translated `GetHeldItemName`,
-  `ItemStack.GetName` or `Entity.GetName` from atlas search or unit inspection:
-  the survival handbook can concurrently mutate Vintage Story's non-thread-safe
-  translation diagnostics. Use stable asset codes, explicit custom names and
-  player nicknames instead.
+- Loaded-data search resolves registered block asset codes plus English and
+  active-game-language aliases incrementally, then scans only already loaded
+  chunks under a strict per-frame budget. Search aliases use private isolated
+  translation services and never mutate Vintage Story's global translation
+  diagnostics. Entity results come only from models already authorized and
+  rendered by the atlas. During world startup, do not call translated
+  `GetHeldItemName`, `ItemStack.GetName` or `Entity.GetName` from atlas search
+  or unit inspection: the survival handbook can concurrently mutate Vintage
+  Story's non-thread-safe translation diagnostics. Use the isolated search
+  services, stable asset codes, explicit custom names and player nicknames.
 - The 0.6.1 test-cycle feature checkpoints include `7fe0f01` (surface safety,
   lifecycle smoke test and Creative camera), `6640a5d` (unit inspection) and
   `5bba376` (loaded-data search). Commit `669c4bb` adds loaded-data analysis
@@ -297,7 +300,8 @@ the product scope when the atlas itself is correct.
     --dataPath /home/arcylisz/.config/VintagestoryData -o 'test creative'
   ```
 
-  Add `MODERNATLAS_SMOKE_SCREENSHOT=/tmp/modernatlas-smoke` to capture the base
+  Add `MODERNATLAS_SMOKE_SCREENSHOT=/tmp/modernatlas-smoke` to capture the
+  Survival-safe surface before Cave Mode is enabled, followed by the base
   atlas, Settings, Creative/Cheat and visual-lab frames for UI inspection.
 
   The `-o` argument performs the world join. `OnLevelFinalize` waits for that
@@ -310,9 +314,9 @@ the product scope when the atlas itself is correct.
   Creative pitch, the map-layer switch, Creative/Cheat cave, search and
   camera-angle controls, hidden UI restored by `Escape`, an initially unfocused
   search box, focused text entry (including typing `G` without closing the
-  atlas), focus release, unit inspection, entity and block search, a climate
-  layer, the Creative/Cheat ore layer, atlas closure and the normal soft-exit
-  path.
+  atlas), focus release, English plus active-game-language aliases, unit
+  inspection, entity and block search, a climate layer, the Creative/Cheat ore
+  layer, atlas closure and the normal soft-exit path.
   Route button and switch press/release events through the dialog's own
   composers, then use the dialog's control methods for pitch, entity selection,
   search queries and map layers. Schedule the final

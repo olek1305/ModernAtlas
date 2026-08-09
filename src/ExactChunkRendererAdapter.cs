@@ -26,6 +26,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private const int CaveFilterTextureUnit = 12;
     private const int MapLayerTextureUnit = 13;
     private const float VisibleSubsurfaceDepth = 3f;
+    private const float CaveEntranceConcealmentDepth = 1.5f;
     private static readonly Vec3f CaveConcealmentColor = new(0.24f, 0.25f, 0.25f);
 
     private static readonly EnumShaderProgram[] AtlasFilterPrograms =
@@ -918,6 +919,13 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                         (float)AtlasSurfaceHeightTexture.HorizontalSampleSize
                     );
                     shader.Uniform("atlasVisibleSubsurfaceDepth", VisibleSubsurfaceDepth);
+                    if (shader.HasUniform("atlasCaveConcealmentDepth"))
+                    {
+                        shader.Uniform(
+                            "atlasCaveConcealmentDepth",
+                            CaveEntranceConcealmentDepth
+                        );
+                    }
                 }
                 if (shader.HasUniform("atlasLayerEnabled"))
                 {
@@ -991,8 +999,9 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         {
             loggedCaveFilterReady = true;
             capi.Logger.Notification(
-                "[ModernAtlas] Surface-only terrain and vegetation safety is active with a {0}-block cave depth allowance and a player-anchored fog boundary.",
-                VisibleSubsurfaceDepth
+                "[ModernAtlas] Surface-only terrain safety is active with a {0}-block exterior allowance, a {1:0.0}-block cave-entrance concealment band, deep-cave discard and a player-anchored fog boundary.",
+                VisibleSubsurfaceDepth,
+                CaveEntranceConcealmentDepth
             );
         }
         return true;
@@ -1190,12 +1199,16 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     if (atlasHideCaves > 0
         && modernAtlasBelowSurface(modernAtlasAbsoluteWorldPosition))
     {
-        // Keep the nearest real opaque face in the depth buffer, but replace
-        // its underground material with a quiet neutral mask. This closes
-        // distracting cave-mouth voids without generating a wall or cache.
-        modernAtlasOriginalMain();
-        outColor = vec4(atlasCaveConcealmentColor, 1.0);
-        return;
+        if (modernAtlasInCaveEntranceBand(modernAtlasAbsoluteWorldPosition))
+        {
+            // Keep only a thin band of real opaque faces near the exterior to
+            // quiet clipped cave mouths. Deeper cave walls are discarded so
+            // they cannot trace an underground tunnel network from the side.
+            modernAtlasOriginalMain();
+            outColor = vec4(atlasCaveConcealmentColor, 1.0);
+            return;
+        }
+        discard;
     }
 """
             : """
@@ -1214,6 +1227,7 @@ uniform sampler2D atlasSurfaceHeightTex;
 uniform vec2 atlasSurfaceOriginXZ;
 uniform float atlasSurfaceSampleSize;
 uniform float atlasVisibleSubsurfaceDepth;
+uniform float atlasCaveConcealmentDepth;
 uniform vec3 atlasWorldOffset;
 uniform vec3 atlasCaveConcealmentColor;
 uniform int atlasBoundaryEnabled;
@@ -1261,6 +1275,22 @@ bool modernAtlasBelowSurface(vec3 absoluteWorldPosition)
     // terrain-covered cave faces still remain below the envelope.
     return absoluteWorldPosition.y
         < exteriorSurfaceHeight - atlasVisibleSubsurfaceDepth;
+}
+
+bool modernAtlasInCaveEntranceBand(vec3 absoluteWorldPosition)
+{
+    ivec2 samplePosition = ivec2(floor(
+        (absoluteWorldPosition.xz - atlasSurfaceOriginXZ) / atlasSurfaceSampleSize
+    ));
+    float exteriorSurfaceHeight;
+    if (!modernAtlasReadSurfaceHeight(samplePosition, exteriorSurfaceHeight))
+    {
+        return false;
+    }
+
+    float safeSurfaceFloor = exteriorSurfaceHeight - atlasVisibleSubsurfaceDepth;
+    return absoluteWorldPosition.y
+        >= safeSurfaceFloor - atlasCaveConcealmentDepth;
 }
 
 void main()

@@ -50,14 +50,16 @@ client-side; an optional server component supplies fog and living-entity policy.
   Mode may tilt to exactly zero degrees but never below the ground plane;
 - draws only the game's exact loaded chunk geometry and does not generate an
   artificial textured surface or wall around the atlas radius;
-- covers clipped cave openings with a quiet neutral-gray atlas material while
-  retaining real cliff sides, building walls and floor faces near the surface;
+- keeps a thin band of real faces near clipped cave openings under a quiet
+  neutral-gray atlas material, discards deeper cave geometry, and retains real
+  cliff sides, building walls and floor faces near the surface;
 - provides Creative/Cheat unit frames for clicked, already rendered living
   models, including name, category, health and loaded public details;
 - provides loaded-map search only in singleplayer Creative or a per-world
-  accepted Cheat Mode; it searches loaded blocks and permitted entities
-  incrementally with visible markers and no distant chunk requests, while
-  dropped-item matches use markers without invoking the global item stage;
+  accepted Cheat Mode; it accepts both English names and names from the active
+  game language, searches loaded blocks and permitted entities incrementally
+  with visible markers and no distant chunk requests, and represents
+  dropped-item matches without invoking the global item stage;
 - offers strongly differentiated fertility, moisture and temperature
   overlays, plus a Creative/Cheat ore-density layer, by colorizing only the
   exact 3D geometry already present in the atlas while retaining its relief;

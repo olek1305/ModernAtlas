@@ -96,6 +96,9 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool automatedSmokeTestUnitInspectionPassed;
     private bool automatedSmokeTestSearchInputAttempted;
     private bool automatedSmokeTestSearchInputPassed;
+    private bool automatedSmokeTestBilingualSearchPassed;
+    private bool automatedSmokeTestSafeSurfaceFrameRendered;
+    private bool automatedSmokeTestSafeSurfaceScreenshotHandled;
     private int automatedSmokeTestSearchPhase;
     private bool automatedSmokeTestSearchPassed;
     private int automatedSmokeTestMapLayerPhase;
@@ -252,10 +255,10 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (automatedSmokeTestActive && HasUnlockedCameraPitch)
         {
             automatedSmokeTestRequiresUnlockedPitch = true;
-            targetPitchDegrees = UnlockedMinimumPitchDegrees;
-            pitchDegrees = UnlockedMinimumPitchDegrees;
+            targetPitchDegrees = StandardMinimumPitchDegrees;
+            pitchDegrees = StandardMinimumPitchDegrees;
             capi.Logger.Notification(
-                "[ModernAtlas] Automated smoke test is exercising the unlocked 0-degree camera pitch."
+                "[ModernAtlas] Automated smoke test is rendering the Survival-safe 20-degree camera floor before exercising the unlocked 0-degree pitch."
             );
         }
         FocusOnExteriorSurface();
@@ -289,17 +292,23 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
         if (rendered && automatedSmokeTestActive)
         {
+            bool safeSurfaceFrameWasAlreadyRendered =
+                automatedSmokeTestSafeSurfaceFrameRendered;
             AutomatedSmokeTestRenderedExactWorld = true;
             if (automatedSmokeTestRequiresUnlockedPitch
                 && pitchDegrees <= UnlockedMinimumPitchDegrees + 0.01f)
             {
                 automatedSmokeTestRenderedAtPitchFloor = true;
             }
-            ExerciseAutomatedInterfaceControls();
-            ExerciseAutomatedSearchInput();
-            ExerciseAutomatedUnitInspection();
-            ExerciseAutomatedSearch();
-            ExerciseAutomatedMapLayers();
+            automatedSmokeTestSafeSurfaceFrameRendered |= SurfaceSafetyEnabled;
+            if (safeSurfaceFrameWasAlreadyRendered)
+            {
+                ExerciseAutomatedInterfaceControls();
+                ExerciseAutomatedSearchInput();
+                ExerciseAutomatedUnitInspection();
+                ExerciseAutomatedSearch();
+                ExerciseAutomatedMapLayers();
+            }
         }
         if (rendered && !loggedEntityModels && visibleEntityPolicy.AnyEntityModels)
         {
@@ -802,6 +811,26 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestUnitInspectionPassed = false;
         automatedSmokeTestSearchInputAttempted = false;
         automatedSmokeTestSearchInputPassed = false;
+        automatedSmokeTestBilingualSearchPassed =
+            searchController.ValidateBilingualSearchForAutomatedTest(
+                out string languageDiagnostic
+            );
+        if (automatedSmokeTestBilingualSearchPassed)
+        {
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated bilingual search check passed: {0}.",
+                languageDiagnostic
+            );
+        }
+        else
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated bilingual search check failed: {0}.",
+                languageDiagnostic
+            );
+        }
+        automatedSmokeTestSafeSurfaceFrameRendered = false;
+        automatedSmokeTestSafeSurfaceScreenshotHandled = false;
         automatedSmokeTestSearchPhase = 0;
         automatedSmokeTestSearchPassed = false;
         automatedSmokeTestMapLayerPhase = 0;
@@ -816,12 +845,14 @@ public sealed class ModernAtlasDialog : GuiDialog
 
         automatedSmokeTestElapsedSeconds += atlasRealDeltaTime;
         bool passed = AutomatedSmokeTestRenderedExactWorld
+            && automatedSmokeTestSafeSurfaceFrameRendered
             && (!automatedSmokeTestRequiresUnlockedPitch
                 || automatedSmokeTestRenderedAtPitchFloor)
             && automatedSmokeTestInterfaceControlsPassed
             && (!automatedSmokeTestUnitInspectionAttempted
                 || automatedSmokeTestUnitInspectionPassed)
             && automatedSmokeTestSearchInputPassed
+            && automatedSmokeTestBilingualSearchPassed
             && automatedSmokeTestSearchPassed
             && automatedSmokeTestMapLayerPassed;
         if (passed && automatedSmokeTestElapsedSeconds < 3f) return;
@@ -1007,9 +1038,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private void CaptureAutomatedSmokeScreenshot()
     {
         if (!automatedSmokeTestActive
-            || !AutomatedSmokeTestRenderedExactWorld
-            || !automatedSmokeTestInterfaceControlsPassed
-            || automatedSmokeScreenshotPhase >= 4)
+            || !AutomatedSmokeTestRenderedExactWorld)
         {
             return;
         }
@@ -1017,6 +1046,39 @@ public sealed class ModernAtlasDialog : GuiDialog
         string? configuredPath = Environment.GetEnvironmentVariable(
             SmokeScreenshotEnvironmentVariable
         );
+        if (!automatedSmokeTestSafeSurfaceScreenshotHandled)
+        {
+            automatedSmokeTestSafeSurfaceScreenshotHandled = true;
+            if (!string.IsNullOrWhiteSpace(configuredPath))
+            {
+                string safePrefix = configuredPath.EndsWith(
+                    ".png",
+                    StringComparison.OrdinalIgnoreCase
+                )
+                    ? configuredPath[..^4]
+                    : configuredPath;
+                TrySaveAutomatedSmokeScreenshot(
+                    $"{safePrefix}-survival-safe.png"
+                );
+            }
+            if (automatedSmokeTestRequiresUnlockedPitch)
+            {
+                targetPitchDegrees = UnlockedMinimumPitchDegrees;
+                pitchDegrees = UnlockedMinimumPitchDegrees;
+                FitLoadedTerrain();
+                zoom = targetZoom;
+                capi.Logger.Notification(
+                    "[ModernAtlas] Automated smoke test is now exercising the unlocked 0-degree camera pitch."
+                );
+            }
+            return;
+        }
+
+        if (!automatedSmokeTestInterfaceControlsPassed
+            || automatedSmokeScreenshotPhase >= 4)
+        {
+            return;
+        }
         if (string.IsNullOrWhiteSpace(configuredPath))
         {
             automatedSmokeScreenshotPhase = 4;
@@ -1034,28 +1096,8 @@ public sealed class ModernAtlasDialog : GuiDialog
             _ => "visual-lab"
         };
         string path = $"{prefix}-{suffix}.png";
-        try
+        if (!TrySaveAutomatedSmokeScreenshot(path))
         {
-            using BitmapRef screenshot = capi.Render.GrabScreenshot(
-                capi.Render.FrameWidth,
-                capi.Render.FrameHeight,
-                false,
-                true,
-                true
-            );
-            screenshot.Save(path);
-            capi.Logger.Notification(
-                "[ModernAtlas] Saved automated atlas UI screenshot: {0}",
-                path
-            );
-        }
-        catch (Exception exception)
-        {
-            capi.Logger.Error(
-                "[ModernAtlas] Automated atlas UI screenshot failed for {0}: {1}",
-                path,
-                exception.Message
-            );
             automatedSmokeScreenshotPhase = 4;
             return;
         }
@@ -1075,6 +1117,35 @@ public sealed class ModernAtlasDialog : GuiDialog
             default:
                 CloseSettingsModal();
                 break;
+        }
+    }
+
+    private bool TrySaveAutomatedSmokeScreenshot(string path)
+    {
+        try
+        {
+            using BitmapRef screenshot = capi.Render.GrabScreenshot(
+                capi.Render.FrameWidth,
+                capi.Render.FrameHeight,
+                false,
+                true,
+                true
+            );
+            screenshot.Save(path);
+            capi.Logger.Notification(
+                "[ModernAtlas] Saved automated atlas UI screenshot: {0}",
+                path
+            );
+            return true;
+        }
+        catch (Exception exception)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated atlas UI screenshot failed for {0}: {1}",
+                path,
+                exception.Message
+            );
+            return false;
         }
     }
 
@@ -1390,6 +1461,9 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestUnitInspectionPassed = false;
         automatedSmokeTestSearchInputAttempted = false;
         automatedSmokeTestSearchInputPassed = false;
+        automatedSmokeTestBilingualSearchPassed = false;
+        automatedSmokeTestSafeSurfaceFrameRendered = false;
+        automatedSmokeTestSafeSurfaceScreenshotHandled = false;
         automatedSmokeTestSearchPhase = 0;
         automatedSmokeTestSearchPassed = false;
         automatedSmokeTestMapLayerPhase = 0;
@@ -1575,7 +1649,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             .Compose(false);
         searchPanel.GetTextInput("search-input")?.SetMaxLength(80);
         searchPanel.GetTextInput("search-input")?.SetPlaceHolderText(
-            "Block, creature, player or dropped item"
+            $"Block, creature, player or item — {searchController.SearchLanguageSummary}"
         );
 
         ElementBounds mapLayerRoot = ElementBounds.Fixed(18, 202, 560, 82);
