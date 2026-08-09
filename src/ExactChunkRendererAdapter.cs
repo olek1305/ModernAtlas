@@ -56,6 +56,11 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private bool loggedSuccess;
     private bool loggedTransparentSuccess;
     private bool loggedStableLiquidDiagnostics;
+    private LoadedTexture? liquidChunkMask;
+    private int liquidMaskOriginX;
+    private int liquidMaskOriginZ;
+    private int liquidMaskSize;
+    private long lastLiquidMaskUpdateMilliseconds;
 
     public int LastRenderedEntityCount { get; private set; }
 
@@ -306,6 +311,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         float waterStillCounter,
         float waterFlowCounter,
         bool cloudsEnabled,
+        bool liveLightingEnabled,
+        int fixedSunHour,
         float pausedCloudAnimationDeltaTime,
         ModernAtlasServerPolicy entityPolicy
     )
@@ -353,8 +360,15 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             ambientFogDensityProperty.SetValue(ambient, 0f);
             ambient.BlendedFlatFogDensity = 0;
             ambientFogMinimumProperty.SetValue(ambient, 0f);
-            ambientColorProperty.SetValue(ambient, new Vec3f(0.9f, 0.9f, 0.9f));
-            ambientSceneBrightnessProperty.SetValue(ambient, 1f);
+            ApplyAtlasLighting(
+                ambient,
+                shaderUniforms,
+                liveLightingEnabled,
+                fixedSunHour,
+                savedAmbientColor,
+                savedSceneBrightness,
+                savedLightPosition
+            );
             shaderUniforms.CameraUnderwater = 0;
             shaderUniforms.FogSphereQuantity = 0;
             shaderUniforms.FlagFogDensity = 0;
@@ -369,7 +383,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             // square per chunk, especially around dusk. Keep only the stock
             // normal-based directional shading with a fixed atlas light.
             shaderUniforms.DropShadowIntensity = 0;
-            shaderUniforms.LightPosition3D = new Vec3f(-0.34f, 0.86f, -0.38f);
+            // The atlas uses either the live game sun/weather state or a
+            // deterministic fixed-hour direction selected in Settings.
             // RenderOpaque also feeds the current sky daylight and sunset
             // state into the chunk shader. Around dusk its haxy-fade branch
             // blends loaded pools with the changing sky color, which exposes
@@ -546,9 +561,50 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         }
     }
 
+    private void ApplyAtlasLighting(
+        IAmbientManager ambient,
+        DefaultShaderUniforms shaderUniforms,
+        bool liveLightingEnabled,
+        int fixedSunHour,
+        Vec3f liveAmbientColor,
+        float liveSceneBrightness,
+        Vec3f liveLightPosition
+    )
+    {
+        if (liveLightingEnabled)
+        {
+            ambientColorProperty.SetValue(ambient, liveAmbientColor);
+            ambientSceneBrightnessProperty.SetValue(ambient, liveSceneBrightness);
+            shaderUniforms.LightPosition3D = liveLightPosition;
+            return;
+        }
+
+        float phase = (Math.Clamp(fixedSunHour, 0, 23) - 6f) / 24f * GameMath.TWOPI;
+        float daylight = Math.Clamp(MathF.Sin(phase), 0f, 1f);
+        float lightY = Math.Max(0.16f, daylight);
+        float horizontal = MathF.Sqrt(Math.Max(0f, 1f - lightY * lightY));
+        float azimuth = phase + 0.45f;
+        shaderUniforms.LightPosition3D = new Vec3f(
+            MathF.Cos(azimuth) * horizontal,
+            lightY,
+            MathF.Sin(azimuth) * horizontal
+        );
+        ambientColorProperty.SetValue(
+            ambient,
+            new Vec3f(
+                0.24f + daylight * 0.66f,
+                0.29f + daylight * 0.61f,
+                0.42f + daylight * 0.48f
+            )
+        );
+        ambientSceneBrightnessProperty.SetValue(ambient, 0.22f + daylight * 0.78f);
+    }
+
     public void Dispose()
     {
         cloudRenderer?.Dispose();
+        liquidChunkMask?.Dispose();
+        liquidChunkMask = null;
     }
 
     private bool RenderTransparentChunks(
@@ -703,6 +759,9 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         if (textureIdsField.GetValue(chunkRenderer) is not int[] textureIds) return;
 
         IRenderAPI render = capi.Render;
+        UpdateLiquidChunkMask();
+        LoadedTexture? activeChunkMask = liquidChunkMask;
+        if (activeChunkMask == null || activeChunkMask.TextureId <= 0) return;
         render.CurrentActiveShader?.Stop();
         render.GLEnableDepthTest();
         render.GLDepthMask(false);
@@ -721,6 +780,14 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             (float)cameraPosition.Y,
             (float)cameraPosition.Z
         );
+        activeLiquidShader.BindTexture2D("loadedChunkMask", activeChunkMask.TextureId, 7);
+        activeLiquidShader.Uniform(
+            "maskChunkOrigin",
+            (float)liquidMaskOriginX,
+            (float)liquidMaskOriginZ
+        );
+        activeLiquidShader.Uniform("maskSize", (float)liquidMaskSize);
+        activeLiquidShader.Uniform("chunkSize", (float)GlobalConstants.ChunkSize);
         int blockTexturePixels = capi.Settings.Int["textureSize"];
         if (blockTexturePixels <= 0) blockTexturePixels = 32;
         float atlasPixels = capi.BlockTextureAtlas.Size.Width;
@@ -774,6 +841,74 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             );
         }
     }
+
+    private void UpdateLiquidChunkMask()
+    {
+        int chunkSize = GlobalConstants.ChunkSize;
+        int playerChunkX = FloorDiv(
+            (int)Math.Floor(capi.World.Player.Entity.Pos.X),
+            chunkSize
+        );
+        int playerChunkZ = FloorDiv(
+            (int)Math.Floor(capi.World.Player.Entity.Pos.Z),
+            chunkSize
+        );
+        int radius = Math.Clamp(capi.Settings.Int["viewDistance"] / chunkSize + 2, 2, 64);
+        int size = radius * 2 + 1;
+        int originX = playerChunkX - radius;
+        int originZ = playerChunkZ - radius;
+        long now = capi.ElapsedMilliseconds;
+        if (liquidChunkMask != null
+            && liquidMaskOriginX == originX
+            && liquidMaskOriginZ == originZ
+            && liquidMaskSize == size
+            && now - lastLiquidMaskUpdateMilliseconds < 1000)
+        {
+            return;
+        }
+
+        int[] pixels = new int[size * size];
+        int center = chunkSize / 2;
+        for (int z = 0; z < size; z++)
+        {
+            for (int x = 0; x < size; x++)
+            {
+                int chunkX = originX + x;
+                int chunkZ = originZ + z;
+                IMapChunk? mapChunk = capi.World.BlockAccessor.GetMapChunk(chunkX, chunkZ);
+                if (mapChunk == null) continue;
+
+                int heightIndex = center * chunkSize + center;
+                ushort[] rainHeights = mapChunk.RainHeightMap;
+                int surfaceY = heightIndex < rainHeights.Length
+                    ? rainHeights[heightIndex]
+                    : capi.World.SeaLevel;
+                IWorldChunk? surfaceChunk = capi.World.BlockAccessor.GetChunk(
+                    chunkX,
+                    surfaceY / chunkSize,
+                    chunkZ
+                );
+                if (surfaceChunk is IClientChunk { LoadedFromServer: true })
+                {
+                    pixels[z * size + x] = unchecked((int)0xffffffff);
+                }
+            }
+        }
+
+        if (liquidChunkMask == null || liquidChunkMask.Width != size || liquidChunkMask.Height != size)
+        {
+            liquidChunkMask?.Dispose();
+            liquidChunkMask = new LoadedTexture(capi, 0, size, size);
+        }
+        capi.Render.LoadOrUpdateTextureFromRgba(pixels, false, 0, ref liquidChunkMask);
+        liquidMaskOriginX = originX;
+        liquidMaskOriginZ = originZ;
+        liquidMaskSize = size;
+        lastLiquidMaskUpdateMilliseconds = now;
+    }
+
+    private static int FloorDiv(int value, int divisor) =>
+        value >= 0 ? value / divisor : (value - divisor + 1) / divisor;
 
     private void ReplacePoolFrustums(
         FrustumCulling atlasFrustum,

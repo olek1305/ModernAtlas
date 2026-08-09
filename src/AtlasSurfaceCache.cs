@@ -50,7 +50,6 @@ internal sealed class AtlasSurfaceCache : IDisposable
     private bool initialized;
     private bool renderDisabled;
     private string status = "Cache waiting for world";
-    private string relightStatus = "";
 
     public AtlasSurfaceCache(ICoreClientAPI capi, Func<IShaderProgram?> shaderProvider)
     {
@@ -58,16 +57,7 @@ internal sealed class AtlasSurfaceCache : IDisposable
         this.shaderProvider = shaderProvider;
     }
 
-    public string Status => string.IsNullOrEmpty(relightStatus)
-        ? status
-        : $"{status}; {relightStatus}";
-
-    public void SetRelightProgress(int completed, int total, bool finished)
-    {
-        relightStatus = finished
-            ? $"Lighting repaired: {completed}/{total} loaded chunks"
-            : $"Repairing lighting: {completed}/{total} loaded chunks";
-    }
+    public string Status => status;
 
     public void InitializeWorld()
     {
@@ -129,7 +119,6 @@ internal sealed class AtlasSurfaceCache : IDisposable
         revision++;
         DisposeMesh();
         status = "Cache cleared; nearby chunks will refresh";
-        relightStatus = "";
         QueueNearbyLoadedChunks(force: true);
         capi.Logger.Notification("[ModernAtlas] Cleared only the ModernAtlas cache for this world.");
         return true;

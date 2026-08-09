@@ -162,6 +162,9 @@ public sealed class ModernAtlasDialog : GuiDialog
         string fogStatus = EffectiveFogEnabled ? "fog on" : "fog off";
         string animationStatus = config.AnimationsEnabled ? "animations on" : "animations paused";
         string cloudStatus = config.CloudsEnabled ? "clouds on" : "clouds off";
+        string lightingStatus = config.LiveLightingEnabled
+            ? "live sun/weather"
+            : $"fixed sun {config.FixedSunHour:00}:00";
         string entityStatus = visibleEntityPolicy.AnyEntityModels
             ? "living models on"
             : capi.IsSinglePlayer || serverPolicy.AnyEntityModels
@@ -169,7 +172,7 @@ public sealed class ModernAtlasDialog : GuiDialog
                 : "living models blocked by server";
         string multiplayerStatus = capi.IsSinglePlayer ? "singleplayer controls" : "multiplayer safe limits locked";
         string pauseStatus = capi.IsSinglePlayer ? "game paused" : "live server";
-        string status = $"Game view distance {GameViewDistance} blocks • {surfaceCache.Status} • {fogStatus} • {animationStatus} • {cloudStatus} • {entityStatus} • exterior surface • {pauseStatus} • {multiplayerStatus} • {rendererStatus} • no distant chunk requests";
+        string status = $"Game view distance {GameViewDistance} blocks • {surfaceCache.Status} • {fogStatus} • {lightingStatus} • {animationStatus} • {cloudStatus} • {entityStatus} • exterior surface • {pauseStatus} • {multiplayerStatus} • {rendererStatus} • no distant chunk requests";
         overlay?.GetDynamicText("status").SetNewText(status);
         overlay?.Render(deltaTime);
         if (settingsModalOpen)
@@ -446,9 +449,9 @@ public sealed class ModernAtlasDialog : GuiDialog
             )
             .Compose();
 
-        ElementBounds modalRoot = ElementBounds.Fixed(0, 0, 340, 500)
+        ElementBounds modalRoot = ElementBounds.Fixed(0, 0, 340, 610)
             .WithAlignment(EnumDialogArea.CenterMiddle);
-        ElementBounds modalBackground = ElementBounds.Fixed(0, 0, 340, 500);
+        ElementBounds modalBackground = ElementBounds.Fixed(0, 0, 340, 610);
         settingsModal = capi.Gui.CreateCompo("modernatlas-settings", modalRoot)
             .AddShadedDialogBG(modalBackground, true)
             .AddStaticText(
@@ -560,24 +563,53 @@ public sealed class ModernAtlasDialog : GuiDialog
                 4
             )
             .AddStaticText(
+                "Live sun and weather",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(20, 385, 200, 28)
+            )
+            .AddSwitch(
+                OnLiveLightingToggled,
+                ElementBounds.Fixed(264, 381, 46, 30),
+                "live-lighting",
+                24,
+                4
+            )
+            .AddStaticText(
+                "Fixed sun hour",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(20, 425, 140, 28)
+            )
+            .AddSlider(
+                OnFixedSunHourChanged,
+                ElementBounds.Fixed(170, 419, 140, 34),
+                "fixed-sun-hour"
+            )
+            .AddStaticText(
                 "Map cache",
                 CairoFont.WhiteSmallishText(),
-                ElementBounds.Fixed(20, 392, 180, 28)
+                ElementBounds.Fixed(20, 480, 180, 28)
             )
             .AddDynamicText(
                 "",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 421, 300, 28),
+                ElementBounds.Fixed(20, 509, 300, 28),
                 "cache-status"
             )
             .AddButton(
                 "Clear cache",
                 () => clearCache(GameViewDistance),
-                ElementBounds.Fixed(20, 450, 140, 34),
+                ElementBounds.Fixed(20, 548, 140, 34),
                 EnumButtonStyle.Normal,
                 "cache-clear"
             )
             .Compose();
+        settingsModal.GetSlider("fixed-sun-hour")?.SetValues(
+            Math.Clamp(config.FixedSunHour, 0, 23),
+            0,
+            23,
+            1,
+            "h"
+        );
         SyncSettingsControls();
     }
 
@@ -637,6 +669,8 @@ public sealed class ModernAtlasDialog : GuiDialog
             waterStillCounter,
             waterFlowCounter,
             config.CloudsEnabled,
+            config.LiveLightingEnabled,
+            config.FixedSunHour,
             config.AnimationsEnabled && capi.IsSinglePlayer && capi.IsGamePaused
                 ? atlasRealDeltaTime
                 : 0,
@@ -749,6 +783,20 @@ public sealed class ModernAtlasDialog : GuiDialog
         SaveEntitySettings();
     }
 
+    private void OnLiveLightingToggled(bool enabled)
+    {
+        config.LiveLightingEnabled = enabled;
+        saveConfig();
+        SyncSettingsControls();
+    }
+
+    private bool OnFixedSunHourChanged(int hour)
+    {
+        config.FixedSunHour = Math.Clamp(hour, 0, 23);
+        saveConfig();
+        return true;
+    }
+
     private void SaveEntitySettings()
     {
         RefreshVisibleEntityPolicy();
@@ -781,6 +829,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         settingsModal.GetSwitch("fog").Enabled = capi.IsSinglePlayer;
         settingsModal.GetSwitch("animations")?.SetValue(config.AnimationsEnabled);
         settingsModal.GetSwitch("clouds")?.SetValue(config.CloudsEnabled);
+        settingsModal.GetSwitch("live-lighting")?.SetValue(config.LiveLightingEnabled);
+        settingsModal.GetSlider("fixed-sun-hour").Enabled = !config.LiveLightingEnabled;
         bool serverAllowsAny = capi.IsSinglePlayer || serverPolicy.AnyEntityModels;
         settingsModal.GetSwitch("entities")?.SetValue(config.LivingEntitiesEnabled && serverAllowsAny);
         settingsModal.GetSwitch("entities").Enabled = serverAllowsAny;

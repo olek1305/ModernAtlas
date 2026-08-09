@@ -1,9 +1,6 @@
-using System;
-using System.Collections.Generic;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Config;
-using Vintagestory.API.MathTools;
 using Vintagestory.API.Server;
 
 namespace ModernAtlas;
@@ -17,8 +14,6 @@ public sealed class ModernAtlasSystem : ModSystem
     private const string ConfigFileName = "ModernAtlas.json";
     private const string ServerConfigFileName = "ModernAtlasServer.json";
     private const string PolicyChannelName = "modernatlas-policy";
-    private const int RelightIntervalMilliseconds = 500;
-    private const int MaximumRelightRadiusBlocks = 1024;
 
     private ModernAtlasDialog? dialog;
     private ICoreClientAPI? clientApi;
@@ -27,18 +22,12 @@ public sealed class ModernAtlasSystem : ModSystem
     private ModernAtlasServerConfig? serverConfig;
     private readonly ModernAtlasServerPolicy serverPolicy = new();
     private IServerNetworkChannel? serverPolicyChannel;
-    private IClientNetworkChannel? clientPolicyChannel;
     private IShaderProgram? stableLiquidShader;
     private IShaderProgram? atlasCloudShader;
     private IShaderProgram? atlasCacheShader;
     private IShaderProgram? atlasOpacityShader;
     private AtlasSurfaceCache? surfaceCache;
     private long cacheTickListenerId;
-    private long relightTickListenerId;
-    private readonly Queue<Vec2i> relightQueue = new();
-    private IServerPlayer? relightPlayer;
-    private int relightCompleted;
-    private int relightTotal;
 
     public override bool ShouldLoad(EnumAppSide side) => true;
 
@@ -51,15 +40,8 @@ public sealed class ModernAtlasSystem : ModSystem
 
         serverPolicyChannel = api.Network
             .RegisterChannel(PolicyChannelName)
-            .RegisterMessageType<ModernAtlasServerPolicy>()
-            .RegisterMessageType<ModernAtlasRelightRequest>()
-            .RegisterMessageType<ModernAtlasRelightProgress>()
-            .SetMessageHandler<ModernAtlasRelightRequest>(OnRelightRequested);
+            .RegisterMessageType<ModernAtlasServerPolicy>();
         api.Event.PlayerNowPlaying += OnPlayerNowPlaying;
-        relightTickListenerId = api.Event.RegisterGameTickListener(
-            ProcessRelightQueue,
-            RelightIntervalMilliseconds
-        );
 
         ModernAtlasServerPolicy policy = serverConfig.ToPolicy();
         api.Logger.Notification(
@@ -79,13 +61,10 @@ public sealed class ModernAtlasSystem : ModSystem
         SaveConfig();
         serverPolicy.ResetToSafeDefaults();
 
-        clientPolicyChannel = api.Network
+        api.Network
             .RegisterChannel(PolicyChannelName)
             .RegisterMessageType<ModernAtlasServerPolicy>()
-            .RegisterMessageType<ModernAtlasRelightRequest>()
-            .RegisterMessageType<ModernAtlasRelightProgress>()
-            .SetMessageHandler<ModernAtlasServerPolicy>(OnServerPolicyReceived)
-            .SetMessageHandler<ModernAtlasRelightProgress>(OnRelightProgress);
+            .SetMessageHandler<ModernAtlasServerPolicy>(OnServerPolicyReceived);
         api.Event.LeaveWorld += OnLeaveWorld;
         api.Event.LevelFinalize += OnLevelFinalize;
         api.Event.BlockChanged += OnBlockChanged;
@@ -119,7 +98,7 @@ public sealed class ModernAtlasSystem : ModSystem
             GetAtlasCloudShader,
             GetAtlasOpacityShader,
             surfaceCache,
-            ClearCacheAndRepairLighting
+            ClearCacheOnly
         );
 
         api.Input.RegisterHotKey(
@@ -156,10 +135,6 @@ public sealed class ModernAtlasSystem : ModSystem
         if (serverApi != null)
         {
             serverApi.Event.PlayerNowPlaying -= OnPlayerNowPlaying;
-            if (relightTickListenerId != 0)
-            {
-                serverApi.Event.UnregisterGameTickListener(relightTickListenerId);
-            }
         }
         dialog?.Dispose();
         dialog = null;
@@ -174,9 +149,6 @@ public sealed class ModernAtlasSystem : ModSystem
         config = null;
         serverConfig = null;
         serverPolicyChannel = null;
-        clientPolicyChannel = null;
-        relightQueue.Clear();
-        relightPlayer = null;
         base.Dispose();
     }
 
@@ -202,132 +174,9 @@ public sealed class ModernAtlasSystem : ModSystem
         );
     }
 
-    private bool ClearCacheAndRepairLighting(int viewDistanceBlocks)
+    private bool ClearCacheOnly(int viewDistanceBlocks)
     {
-        bool cleared = surfaceCache?.Clear() ?? true;
-        if (clientApi?.IsSinglePlayer == true)
-        {
-            surfaceCache?.SetRelightProgress(0, 0, false);
-            clientPolicyChannel?.SendPacket(new ModernAtlasRelightRequest
-            {
-                ViewDistanceBlocks = viewDistanceBlocks
-            });
-        }
-        return cleared;
-    }
-
-    private void OnRelightRequested(IServerPlayer player, ModernAtlasRelightRequest request)
-    {
-        if (serverApi == null || !player.HasPrivilege(Privilege.controlserver))
-        {
-            return;
-        }
-
-        int chunkSize = serverApi.WorldManager.ChunkSize;
-        int radiusBlocks = Math.Clamp(
-            request.ViewDistanceBlocks,
-            chunkSize,
-            MaximumRelightRadiusBlocks
-        );
-        int radiusChunks = (radiusBlocks + chunkSize - 1) / chunkSize;
-        int playerChunkX = (int)Math.Floor(player.Entity.Pos.X / chunkSize);
-        int playerChunkZ = (int)Math.Floor(player.Entity.Pos.Z / chunkSize);
-        int chunkMapSizeX = serverApi.WorldManager.MapSizeX / chunkSize;
-
-        List<Vec2i> loadedColumns = new();
-        foreach (long index in serverApi.World.LoadedMapChunkIndices)
-        {
-            int chunkX = (int)(index % chunkMapSizeX);
-            int chunkZ = (int)(index / chunkMapSizeX);
-            if (Math.Abs(chunkX - playerChunkX) > radiusChunks
-                || Math.Abs(chunkZ - playerChunkZ) > radiusChunks)
-            {
-                continue;
-            }
-            loadedColumns.Add(new Vec2i(chunkX, chunkZ));
-        }
-        loadedColumns.Sort((left, right) =>
-        {
-            int leftDistance = Math.Max(
-                Math.Abs(left.X - playerChunkX),
-                Math.Abs(left.Y - playerChunkZ)
-            );
-            int rightDistance = Math.Max(
-                Math.Abs(right.X - playerChunkX),
-                Math.Abs(right.Y - playerChunkZ)
-            );
-            return leftDistance.CompareTo(rightDistance);
-        });
-
-        relightQueue.Clear();
-        foreach (Vec2i column in loadedColumns)
-        {
-            relightQueue.Enqueue(column);
-        }
-        relightPlayer = player;
-        relightCompleted = 0;
-        relightTotal = relightQueue.Count;
-        SendRelightProgress(finished: relightTotal == 0);
-        serverApi.Logger.Notification(
-            "[ModernAtlas] Queued vanilla relighting for {0} loaded chunk columns after cache clear.",
-            relightTotal
-        );
-    }
-
-    private void ProcessRelightQueue(float deltaTime)
-    {
-        if (serverApi == null || relightPlayer == null || relightQueue.Count == 0) return;
-
-        Vec2i column = relightQueue.Dequeue();
-        int chunkSize = serverApi.WorldManager.ChunkSize;
-        if (serverApi.WorldManager.GetMapChunk(column.X, column.Y) != null)
-        {
-            BlockPos min = new(column.X * chunkSize, 0, column.Y * chunkSize);
-            BlockPos max = new(
-                (column.X + 1) * chunkSize - 1,
-                serverApi.WorldManager.MapSizeY - 1,
-                (column.Y + 1) * chunkSize - 1
-            );
-            serverApi.WorldManager.FullRelight(min, max, true);
-        }
-        relightCompleted++;
-
-        bool finished = relightQueue.Count == 0;
-        if (finished || relightCompleted % 4 == 0)
-        {
-            SendRelightProgress(finished);
-        }
-        if (finished)
-        {
-            serverApi.Logger.Notification(
-                "[ModernAtlas] Completed vanilla relighting for {0} loaded chunk columns.",
-                relightCompleted
-            );
-            relightPlayer = null;
-        }
-    }
-
-    private void SendRelightProgress(bool finished)
-    {
-        if (relightPlayer == null) return;
-        serverPolicyChannel?.SendPacket(new ModernAtlasRelightProgress
-        {
-            Completed = relightCompleted,
-            Total = relightTotal,
-            Finished = finished
-        }, relightPlayer);
-    }
-
-    private void OnRelightProgress(ModernAtlasRelightProgress progress)
-    {
-        surfaceCache?.SetRelightProgress(progress.Completed, progress.Total, progress.Finished);
-        if (progress.Finished)
-        {
-            clientApi?.Logger.Notification(
-                "[ModernAtlas] Vanilla lighting repair completed for {0} loaded chunk columns.",
-                progress.Completed
-            );
-        }
+        return surfaceCache?.Clear() ?? true;
     }
 
     private void OnLeaveWorld()

@@ -4,11 +4,16 @@ uniform sampler2D terrainTex;
 uniform vec2 blockTextureSize;
 uniform vec2 textureAtlasSize;
 uniform float waterFlowCounter;
+uniform sampler2D loadedChunkMask;
+uniform vec2 maskChunkOrigin;
+uniform float maskSize;
+uniform float chunkSize;
 
 in vec2 uv;
 in vec2 uvSize;
 in float stillFrameWeight;
 in vec2 flowVectorf;
+in vec2 absoluteWorldXZ;
 flat in vec2 uvBase;
 flat in int waterFlags;
 
@@ -18,6 +23,12 @@ layout(location = 0) out vec4 outColor;
 
 void main(void)
 {
+    vec2 maskCell = floor(absoluteWorldXZ / chunkSize) - maskChunkOrigin;
+    if (any(lessThan(maskCell, vec2(0.0)))
+        || any(greaterThanEqual(maskCell, vec2(maskSize)))) discard;
+    vec2 maskUv = (maskCell + vec2(0.5)) / maskSize;
+    if (texture(loadedChunkMask, maskUv).r < 0.5) discard;
+
     bool isLava = (waterFlags & (1 << 27)) != 0;
     float speed = isLava ? waterFlowCounter * 0.1 : waterFlowCounter;
     float flowSpeed = length(flowVectorf);
