@@ -19,7 +19,10 @@ internal sealed class AtlasEntityModelRendererAdapter
     private const int MaximumEntities = 512;
 
     private readonly ICoreClientAPI capi;
+    private readonly List<AtlasRenderedEntity> lastRenderedEntities = new();
     private bool disabled;
+
+    public IReadOnlyList<AtlasRenderedEntity> LastRenderedEntities => lastRenderedEntities;
 
     public AtlasEntityModelRendererAdapter(ICoreClientAPI capi)
     {
@@ -35,13 +38,21 @@ internal sealed class AtlasEntityModelRendererAdapter
         AtlasSurfaceHeightTexture? surfaceHeightTexture
     )
     {
-        if (disabled || !policy.AnyEntityModels) return 0;
+        if (disabled || !policy.AnyEntityModels)
+        {
+            lastRenderedEntities.Clear();
+            return 0;
+        }
 
         List<RenderEntry>? entries = null;
         try
         {
             entries = CollectEntries(viewDistanceBlocks, policy, surfaceHeightTexture);
-            if (entries.Count == 0) return 0;
+            if (entries.Count == 0)
+            {
+                lastRenderedEntities.Clear();
+                return 0;
+            }
 
             foreach (RenderEntry entry in entries)
             {
@@ -99,11 +110,17 @@ internal sealed class AtlasEntityModelRendererAdapter
                 shader.Stop();
             }
 
+            lastRenderedEntities.Clear();
+            foreach (RenderEntry entry in entries)
+            {
+                lastRenderedEntities.Add(new AtlasRenderedEntity(entry.Entity, entry.Kind));
+            }
             return entries.Count;
         }
         catch (Exception exception)
         {
             disabled = true;
+            lastRenderedEntities.Clear();
             capi.Logger.Error(
                 "[ModernAtlas] Live 3D entity rendering failed and was disabled for this session: {0}",
                 exception.Message
@@ -155,18 +172,18 @@ internal sealed class AtlasEntityModelRendererAdapter
                 continue;
             }
 
-            EntityKind kind = Classify(entity);
+            AtlasEntityKind kind = Classify(entity);
             if (!IsAllowed(kind, policy)) continue;
 
             EntityRenderer? renderer = entity.Properties?.Client?.Renderer;
             if (renderer == null) continue;
-            entries.Add(new RenderEntry(entity, renderer));
+            entries.Add(new RenderEntry(entity, renderer, kind));
         }
 
         return entries;
     }
 
-    private static EntityKind Classify(Entity entity)
+    private static AtlasEntityKind Classify(Entity entity)
     {
         string runtimeGroup = entity.Properties?.Server?.SpawnConditions?.Runtime?.Group ?? "";
         string worldgenGroup = entity.Properties?.Server?.SpawnConditions?.Worldgen?.Group ?? "";
@@ -174,7 +191,7 @@ internal sealed class AtlasEntityModelRendererAdapter
             || worldgenGroup.Equals("hostile", StringComparison.OrdinalIgnoreCase)
             || IsHostileMonsterIdentity(entity))
         {
-            return EntityKind.Mob;
+            return AtlasEntityKind.Mob;
         }
 
         string className = entity.Properties?.Class ?? entity.GetType().Name;
@@ -183,10 +200,10 @@ internal sealed class AtlasEntityModelRendererAdapter
             || className.Contains("villager", StringComparison.OrdinalIgnoreCase)
             || className.Contains("playerbot", StringComparison.OrdinalIgnoreCase))
         {
-            return EntityKind.Npc;
+            return AtlasEntityKind.Npc;
         }
 
-        return entity is EntityPlayer ? EntityKind.Player : EntityKind.Animal;
+        return entity is EntityPlayer ? AtlasEntityKind.Player : AtlasEntityKind.Animal;
     }
 
     private static bool IsHostileMonsterIdentity(Entity entity)
@@ -212,24 +229,16 @@ internal sealed class AtlasEntityModelRendererAdapter
             || value.Contains("arachnid", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool IsAllowed(EntityKind kind, ModernAtlasServerPolicy policy)
+    private static bool IsAllowed(AtlasEntityKind kind, ModernAtlasServerPolicy policy)
     {
         return kind switch
         {
-            EntityKind.Player => policy.ShowPlayers,
-            EntityKind.Animal => policy.ShowAnimals,
-            EntityKind.Mob => policy.ShowMobs,
-            EntityKind.Npc => policy.ShowNpcs,
+            AtlasEntityKind.Player => policy.ShowPlayers,
+            AtlasEntityKind.Animal => policy.ShowAnimals,
+            AtlasEntityKind.Mob => policy.ShowMobs,
+            AtlasEntityKind.Npc => policy.ShowNpcs,
             _ => false
         };
-    }
-
-    private enum EntityKind
-    {
-        Player,
-        Animal,
-        Mob,
-        Npc
     }
 
     private sealed class RenderEntry
@@ -246,11 +255,17 @@ internal sealed class AtlasEntityModelRendererAdapter
 
         public Entity Entity { get; }
         public EntityRenderer Renderer { get; }
+        public AtlasEntityKind Kind { get; }
 
-        public RenderEntry(Entity entity, EntityRenderer renderer)
+        public RenderEntry(
+            Entity entity,
+            EntityRenderer renderer,
+            AtlasEntityKind kind
+        )
         {
             Entity = entity;
             Renderer = renderer;
+            Kind = kind;
         }
 
         public void ForceThirdPerson(Entity localPlayer)

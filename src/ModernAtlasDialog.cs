@@ -3,6 +3,7 @@ using Cairo;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Config;
+using Vintagestory.API.Common.Entities;
 using Vintagestory.API.MathTools;
 
 namespace ModernAtlas;
@@ -33,11 +34,14 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private GuiComposer? overlay;
     private GuiComposer? settingsModal;
+    private GuiComposer? unitPanel;
     private bool settingsModalOpen;
     private LoadedTexture? fogTexture;
     private MeshRef? opacityQuad;
     private bool leftDragging;
     private bool rightDragging;
+    private double leftDragDistance;
+    private long? selectedEntityId;
     private double centerX;
     private double centerY;
     private double centerZ;
@@ -71,6 +75,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     private Action<bool>? automatedSmokeTestCompletion;
     private bool automatedSmokeTestRequiresUnlockedPitch;
     private bool automatedSmokeTestRenderedAtPitchFloor;
+    private bool automatedSmokeTestUnitInspectionAttempted;
+    private bool automatedSmokeTestUnitInspectionPassed;
 
     internal bool AutomatedSmokeTestRenderedExactWorld { get; private set; }
 
@@ -90,6 +96,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool SurfaceSafetyEnabled => !capi.IsSinglePlayer || !cheatModeEnabled;
     private bool HasUnlockedCameraPitch => cheatModeEnabled
         || capi.World.Player.WorldData.CurrentGameMode == EnumGameMode.Creative;
+    private bool UnitInspectionEnabled => capi.IsSinglePlayer && HasUnlockedCameraPitch;
     private float MinimumPitchDegrees => HasUnlockedCameraPitch
         ? UnlockedMinimumPitchDegrees
         : StandardMinimumPitchDegrees;
@@ -126,6 +133,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         base.OnGuiOpened();
         settingsModalOpen = false;
+        selectedEntityId = null;
         ResetPointerDrag();
         PauseSingleplayerForAtlas();
         atlasAnimationSeconds = 0;
@@ -184,6 +192,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             {
                 automatedSmokeTestRenderedAtPitchFloor = true;
             }
+            ExerciseAutomatedUnitInspection();
         }
         if (rendered && !loggedEntityModels && visibleEntityPolicy.AnyEntityModels)
         {
@@ -225,6 +234,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         string status = $"Game view distance {GameViewDistance} blocks • {fogStatus} • {lightingStatus} • {animationStatus} • {cloudStatus} • {entityStatus} • {caveStatus} • exterior surface • {pauseStatus} • {multiplayerStatus} • {rendererStatus} • no distant chunk requests";
         overlay?.GetDynamicText("status").SetNewText(status);
         overlay?.Render(deltaTime);
+        RenderUnitInspection(deltaTime);
         if (settingsModalOpen)
         {
             settingsModal?.Render(deltaTime);
@@ -240,12 +250,18 @@ public sealed class ModernAtlasDialog : GuiDialog
             args.Handled = true;
             return;
         }
+        if (selectedEntityId != null)
+        {
+            unitPanel?.OnMouseDown(args);
+            if (args.Handled) return;
+        }
         overlay?.OnMouseDown(args);
         if (args.Handled) return;
 
         if (args.Button == EnumMouseButton.Left)
         {
             leftDragging = true;
+            leftDragDistance = 0;
         }
         if (args.Button == EnumMouseButton.Right)
         {
@@ -263,6 +279,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             args.Handled = true;
             return;
         }
+        if (selectedEntityId != null)
+        {
+            unitPanel?.OnMouseUp(args);
+            if (args.Handled) return;
+        }
         // Once a map drag begins, keep ownership of the gesture even if the
         // pointer crosses the settings panel. Letting the overlay consume the
         // release leaves the drag latched and the next move jumps the camera.
@@ -270,6 +291,10 @@ public sealed class ModernAtlasDialog : GuiDialog
         {
             leftDragging = false;
             InvalidateFogTexture();
+            if (leftDragDistance <= 5)
+            {
+                TrySelectRenderedEntity(args.X, args.Y);
+            }
             args.Handled = true;
             return;
         }
@@ -314,6 +339,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
             if (leftDragging)
             {
+                leftDragDistance += Math.Abs(deltaX) + Math.Abs(deltaY);
                 double worldPerPixel = targetZoom * 2.0 / Math.Max(1, capi.Render.FrameHeight);
                 double yaw = targetYawDegrees * GameMath.DEG2RAD;
                 double rightX = Math.Cos(yaw);
@@ -330,6 +356,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             return;
         }
 
+        if (selectedEntityId != null)
+        {
+            unitPanel?.OnMouseMove(args);
+            if (args.Handled) return;
+        }
         overlay?.OnMouseMove(args);
         // The atlas covers the entire screen. Do not leak hover interaction to
         // hotbar slots, creative inventory elements or dialogs underneath it.
@@ -435,6 +466,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     public override void OnGuiClosed()
     {
         settingsModalOpen = false;
+        selectedEntityId = null;
         preparingSurfaceFilter = false;
         surfaceHeightTexture.Reset();
         ResetPointerDrag();
@@ -475,6 +507,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestCompletion = completion;
         automatedSmokeTestRequiresUnlockedPitch = false;
         automatedSmokeTestRenderedAtPitchFloor = false;
+        automatedSmokeTestUnitInspectionAttempted = false;
+        automatedSmokeTestUnitInspectionPassed = false;
         AutomatedSmokeTestRenderedExactWorld = false;
     }
 
@@ -490,8 +524,66 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestCompletion = null;
         bool passed = AutomatedSmokeTestRenderedExactWorld
             && (!automatedSmokeTestRequiresUnlockedPitch
-                || automatedSmokeTestRenderedAtPitchFloor);
+                || automatedSmokeTestRenderedAtPitchFloor)
+            && (!automatedSmokeTestUnitInspectionAttempted
+                || automatedSmokeTestUnitInspectionPassed);
         completion?.Invoke(passed);
+    }
+
+    private void ExerciseAutomatedUnitInspection()
+    {
+        if (automatedSmokeTestUnitInspectionAttempted
+            || !UnitInspectionEnabled
+            || exactChunkRenderer == null
+            || exactChunkRenderer.LastRenderedEntities.Count == 0)
+        {
+            return;
+        }
+
+        automatedSmokeTestUnitInspectionAttempted = true;
+        AtlasRenderedEntity candidate = exactChunkRenderer.LastRenderedEntities[0];
+        foreach (AtlasRenderedEntity renderedEntity in exactChunkRenderer.LastRenderedEntities)
+        {
+            if (renderedEntity.Entity.EntityId == capi.World.Player.Entity.EntityId)
+            {
+                candidate = renderedEntity;
+                break;
+            }
+        }
+
+        Entity entity = candidate.Entity;
+        float selectionMiddle = (entity.SelectionBox.Y1 + entity.SelectionBox.Y2) * 0.5f;
+        bool projected = TryProjectAtlasPosition(
+            entity.Pos.X,
+            entity.Pos.Y + selectionMiddle,
+            entity.Pos.Z,
+            out double screenX,
+            out double screenY,
+            out _
+        );
+        bool selected = projected
+            && TrySelectRenderedEntity((int)Math.Round(screenX), (int)Math.Round(screenY));
+        bool healthAvailable = AtlasEntityInspectionAdapter.TryGetHealth(
+            entity,
+            out _,
+            out _
+        );
+        automatedSmokeTestUnitInspectionPassed = selected && healthAvailable;
+        if (automatedSmokeTestUnitInspectionPassed)
+        {
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated smoke test selected a rendered living model and read its unit-frame health."
+            );
+        }
+        else
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated unit-frame test failed: projected={0}, selected={1}, health={2}.",
+                projected,
+                selected,
+                healthAvailable
+            );
+        }
     }
 
     internal void OnWorldLeave()
@@ -501,9 +593,12 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestCompletion = null;
         automatedSmokeTestRequiresUnlockedPitch = false;
         automatedSmokeTestRenderedAtPitchFloor = false;
+        automatedSmokeTestUnitInspectionAttempted = false;
+        automatedSmokeTestUnitInspectionPassed = false;
         AutomatedSmokeTestRenderedExactWorld = false;
         cheatModeEnabled = false;
         settingsModalOpen = false;
+        selectedEntityId = null;
         preparingSurfaceFilter = false;
         ResetPointerDrag();
 
@@ -565,6 +660,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         overlay = null;
         settingsModal?.Dispose();
         settingsModal = null;
+        unitPanel?.Dispose();
+        unitPanel = null;
         base.Dispose();
     }
 
@@ -596,6 +693,32 @@ public sealed class ModernAtlasDialog : GuiDialog
                 ElementBounds.Fixed(Math.Max(24, guiWidth - 150), 24, 120, 34),
                 EnumButtonStyle.Normal,
                 "settings-button"
+            )
+            .Compose();
+
+        ElementBounds unitRoot = ElementBounds.Fixed(0, 0, 340, 250)
+            .WithAlignment(EnumDialogArea.RightMiddle)
+            .WithFixedOffset(-24, 0);
+        unitPanel = capi.Gui.CreateCompo("modernatlas-unit-inspection", unitRoot)
+            .AddShadedDialogBG(ElementBounds.Fixed(0, 0, 340, 250), true)
+            .AddDynamicText(
+                "",
+                CairoFont.WhiteSmallishText().WithFontSize(20),
+                ElementBounds.Fixed(20, 18, 220, 34),
+                "unit-name"
+            )
+            .AddButton(
+                "Close",
+                CloseUnitInspection,
+                ElementBounds.Fixed(245, 14, 75, 30),
+                EnumButtonStyle.Normal,
+                "unit-close"
+            )
+            .AddDynamicText(
+                "",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(20, 64, 300, 168),
+                "unit-details"
             )
             .Compose();
 
@@ -759,6 +882,171 @@ public sealed class ModernAtlasDialog : GuiDialog
         return true;
     }
 
+    private bool CloseUnitInspection()
+    {
+        selectedEntityId = null;
+        return true;
+    }
+
+    private void RenderUnitInspection(float deltaTime)
+    {
+        if (selectedEntityId == null) return;
+        if (!UnitInspectionEnabled || exactChunkRenderer == null)
+        {
+            selectedEntityId = null;
+            return;
+        }
+
+        AtlasRenderedEntity? selected = null;
+        foreach (AtlasRenderedEntity candidate in exactChunkRenderer.LastRenderedEntities)
+        {
+            if (candidate.Entity.EntityId == selectedEntityId.Value)
+            {
+                selected = candidate;
+                break;
+            }
+        }
+        if (selected == null)
+        {
+            selectedEntityId = null;
+            return;
+        }
+
+        Entity entity = selected.Value.Entity;
+        string name = entity.GetName();
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            name = entity.Code?.Path ?? "Living entity";
+        }
+
+        double dx = entity.Pos.X - capi.World.Player.Entity.Pos.X;
+        double dy = entity.Pos.Y - capi.World.Player.Entity.Pos.Y;
+        double dz = entity.Pos.Z - capi.World.Player.Entity.Pos.Z;
+        double distance = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+        string health = AtlasEntityInspectionAdapter.TryGetHealth(
+            entity,
+            out float currentHealth,
+            out float maximumHealth
+        )
+            ? FormattableString.Invariant(
+                $"Health: {currentHealth:0.#} / {maximumHealth:0.#} ({Math.Clamp(currentHealth / maximumHealth * 100f, 0, 100):0}%)"
+            )
+            : "Health: unavailable";
+        string category = selected.Value.Kind switch
+        {
+            AtlasEntityKind.Player => "Player",
+            AtlasEntityKind.Animal => "Animal",
+            AtlasEntityKind.Mob => "Hostile mob",
+            AtlasEntityKind.Npc => "NPC",
+            _ => "Living entity"
+        };
+        string details = FormattableString.Invariant(
+            $"{health}\nCategory: {category}\nType: {entity.Code}\nEntity ID: {entity.EntityId}\nPosition: {entity.Pos.X:0.0}, {entity.Pos.Y:0.0}, {entity.Pos.Z:0.0}\nDistance: {distance:0.0} blocks"
+        );
+
+        unitPanel?.GetDynamicText("unit-name").SetNewText(name);
+        unitPanel?.GetDynamicText("unit-details").SetNewText(details);
+        unitPanel?.Render(deltaTime);
+    }
+
+    private bool TrySelectRenderedEntity(int mouseX, int mouseY)
+    {
+        if (!UnitInspectionEnabled || exactChunkRenderer == null) return false;
+
+        AtlasRenderedEntity? best = null;
+        double bestDistanceSquared = double.MaxValue;
+        double bestDepth = double.MaxValue;
+        double guiScale = Math.Max(0.5, RuntimeEnv.GUIScale);
+        foreach (AtlasRenderedEntity candidate in exactChunkRenderer.LastRenderedEntities)
+        {
+            Entity entity = candidate.Entity;
+            if (!entity.Alive) continue;
+
+            float selectionMiddle = (entity.SelectionBox.Y1 + entity.SelectionBox.Y2) * 0.5f;
+            if (!TryProjectAtlasPosition(
+                entity.Pos.X,
+                entity.Pos.Y + selectionMiddle,
+                entity.Pos.Z,
+                out double screenX,
+                out double screenY,
+                out double depth
+            ))
+            {
+                continue;
+            }
+
+            double modelHeight = Math.Max(0.5, entity.SelectionBox.Y2 - entity.SelectionBox.Y1);
+            double pixelsPerBlock = capi.Render.FrameHeight / (2.0 * zoom);
+            double hitRadius = Math.Clamp(
+                modelHeight * pixelsPerBlock * 0.5 + 10 * guiScale,
+                14 * guiScale,
+                36 * guiScale
+            );
+            double deltaX = mouseX - screenX;
+            double deltaY = mouseY - screenY;
+            double distanceSquared = deltaX * deltaX + deltaY * deltaY;
+            if (distanceSquared > hitRadius * hitRadius
+                || distanceSquared > bestDistanceSquared + 0.01
+                || (Math.Abs(distanceSquared - bestDistanceSquared) <= 0.01
+                    && depth >= bestDepth))
+            {
+                continue;
+            }
+
+            best = candidate;
+            bestDistanceSquared = distanceSquared;
+            bestDepth = depth;
+        }
+
+        if (best == null)
+        {
+            selectedEntityId = null;
+            return false;
+        }
+
+        selectedEntityId = best.Value.Entity.EntityId;
+        capi.Logger.Notification(
+            "[ModernAtlas] Selected loaded {0} entity {1} for atlas inspection.",
+            best.Value.Kind,
+            selectedEntityId.Value
+        );
+        return true;
+    }
+
+    private bool TryProjectAtlasPosition(
+        double worldX,
+        double worldY,
+        double worldZ,
+        out double screenX,
+        out double screenY,
+        out double depth
+    )
+    {
+        double deltaX = worldX - centerX;
+        double deltaY = worldY - centerY;
+        double deltaZ = worldZ - centerZ;
+        double yaw = yawDegrees * GameMath.DEG2RAD;
+        double pitch = pitchDegrees * GameMath.DEG2RAD;
+        double sinYaw = Math.Sin(yaw);
+        double cosYaw = Math.Cos(yaw);
+        double sinPitch = Math.Sin(pitch);
+        double cosPitch = Math.Cos(pitch);
+        double projectedRight = deltaX * cosYaw - deltaZ * sinYaw;
+        double projectedUp = -deltaX * sinYaw * sinPitch
+            + deltaY * cosPitch
+            - deltaZ * cosYaw * sinPitch;
+        depth = deltaX * -sinYaw * cosPitch
+            + deltaY * -sinPitch
+            + deltaZ * -cosYaw * cosPitch;
+        double pixelsPerBlock = capi.Render.FrameHeight / (2.0 * zoom);
+        screenX = capi.Render.FrameWidth / 2.0 + projectedRight * pixelsPerBlock;
+        screenY = capi.Render.FrameHeight / 2.0 - projectedUp * pixelsPerBlock;
+        return screenX >= 0
+            && screenX <= capi.Render.FrameWidth
+            && screenY >= 0
+            && screenY <= capi.Render.FrameHeight;
+    }
+
     private bool RenderLiveWorld(float deltaTime)
     {
         IRenderAPI render = capi.Render;
@@ -848,6 +1136,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         leftDragging = false;
         rightDragging = false;
+        leftDragDistance = 0;
     }
 
     private void PrepareSurfaceSafetyFilter()

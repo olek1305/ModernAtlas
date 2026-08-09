@@ -97,6 +97,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private bool loggedPreparationClearFailure;
 
     public int LastRenderedEntityCount { get; private set; }
+    public IReadOnlyList<AtlasRenderedEntity> LastRenderedEntities =>
+        entityModelRenderer.LastRenderedEntities;
 
     private sealed class AtlasFilterShaderState
     {
