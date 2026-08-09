@@ -6,7 +6,7 @@
     "arcylisz"
   ],
   "description": "Interactive 3D block atlas with live clouds, animated living models and server-controlled fog and entity policy.",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "side": "Universal",
   "requiredOnServer": false,
   "requiredOnClient": false,
