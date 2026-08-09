@@ -18,7 +18,7 @@ public sealed class ModernAtlasConfig
     public bool ShowMobs { get; set; } = true;
     public bool ShowNpcs { get; set; } = true;
     public int AtlasExposurePercent { get; set; } = 100;
-    public int MapLayerOpacityPercent { get; set; } = 62;
+    public int MapLayerOpacityPercent { get; set; } = 75;
     public int BoundarySoftnessPercent { get; set; } = 100;
     public int CaveMaskBrightnessPercent { get; set; } = 100;
     public string FogPalette { get; set; } = "neutral";

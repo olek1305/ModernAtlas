@@ -113,6 +113,16 @@ public sealed class ModernAtlasDialog : GuiDialog
         ? UnlockedMinimumPitchDegrees
         : StandardMinimumPitchDegrees;
     private Vec3f AtlasFogColor => AtlasVisualPalettes.FogColor(config.FogPalette);
+    private float EffectiveMapLayerOpacity
+    {
+        get
+        {
+            float configured = Math.Clamp(config.MapLayerOpacityPercent, 0, 100) / 100f;
+            // A perceptual response makes middle slider values visibly useful
+            // while preserving exact zero and full-strength endpoints.
+            return 1f - MathF.Pow(1f - configured, 1.35f);
+        }
+    }
 
     public override string ToggleKeyCombinationCode => "modernatlas-open";
     public override EnumDialogType DialogType => EnumDialogType.HUD;
@@ -1179,7 +1189,7 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "atlas-exposure"
             )
             .AddStaticText(
-                "Data-layer opacity",
+                "Data-layer color strength",
                 CairoFont.WhiteDetailText(),
                 ElementBounds.Fixed(20, 146, 175, 28)
             )
@@ -1347,7 +1357,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool ResetVisualTuning()
     {
         config.AtlasExposurePercent = 100;
-        config.MapLayerOpacityPercent = 62;
+        config.MapLayerOpacityPercent = 75;
         config.BoundarySoftnessPercent = 100;
         config.CaveMaskBrightnessPercent = 100;
         config.FogPalette = "neutral";
@@ -1754,7 +1764,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             SurfaceSafetyEnabled,
             SurfaceSafetyEnabled ? surfaceHeightTexture : null,
             mapLayerTexture,
-            Math.Clamp(config.MapLayerOpacityPercent, 0, 100) / 100f,
+            EffectiveMapLayerOpacity,
             AtlasFogColor,
             Math.Clamp(config.AtlasExposurePercent, 50, 150) / 100f,
             Math.Clamp(config.BoundarySoftnessPercent, 25, 200) / 100f,

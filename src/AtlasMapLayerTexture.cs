@@ -276,8 +276,6 @@ internal sealed class AtlasMapLayerTexture : IDisposable
                 AtlasMapLayer.Moisture => climate.WorldgenRainfall,
                 AtlasMapLayer.Temperature =>
                     (climate.WorldGenTemperature + 20f) / 60f,
-                AtlasMapLayer.ForestDensity => climate.ForestDensity,
-                AtlasMapLayer.GeologicActivity => climate.GeologicActivity,
                 _ => 0f
             };
         }
@@ -398,47 +396,42 @@ internal sealed class AtlasMapLayerTexture : IDisposable
 
     private static int ColorForLayer(AtlasMapLayer layer, float value)
     {
+        value = ExpandColorContrast(value);
         (float R, float G, float B) color = layer switch
         {
             AtlasMapLayer.SoilFertility => ThreeStop(
                 value,
-                (0.34f, 0.16f, 0.07f),
-                (0.77f, 0.63f, 0.18f),
-                (0.12f, 0.64f, 0.22f)
+                (0.43f, 0.18f, 0.07f),
+                (0.95f, 0.71f, 0.08f),
+                (0.10f, 0.75f, 0.21f)
             ),
             AtlasMapLayer.Moisture => ThreeStop(
                 value,
-                (0.65f, 0.33f, 0.08f),
-                (0.18f, 0.72f, 0.68f),
-                (0.04f, 0.20f, 0.82f)
+                (0.90f, 0.43f, 0.05f),
+                (0.09f, 0.77f, 0.81f),
+                (0.09f, 0.27f, 0.92f)
             ),
             AtlasMapLayer.Temperature => ThreeStop(
                 value,
-                (0.08f, 0.25f, 0.88f),
-                (0.96f, 0.82f, 0.20f),
-                (0.88f, 0.10f, 0.04f)
-            ),
-            AtlasMapLayer.ForestDensity => ThreeStop(
-                value,
-                (0.74f, 0.65f, 0.42f),
-                (0.28f, 0.62f, 0.22f),
-                (0.03f, 0.24f, 0.08f)
-            ),
-            AtlasMapLayer.GeologicActivity => ThreeStop(
-                value,
-                (0.30f, 0.34f, 0.40f),
-                (0.56f, 0.22f, 0.68f),
-                (1.00f, 0.34f, 0.04f)
+                (0.09f, 0.47f, 1.00f),
+                (1.00f, 0.88f, 0.12f),
+                (1.00f, 0.15f, 0.09f)
             ),
             AtlasMapLayer.OreDensity => ThreeStop(
                 value,
-                (0.20f, 0.08f, 0.28f),
-                (0.93f, 0.30f, 0.04f),
-                (1.00f, 0.94f, 0.34f)
+                (0.24f, 0.06f, 0.40f),
+                (0.96f, 0.11f, 0.55f),
+                (1.00f, 0.94f, 0.17f)
             ),
             _ => (0f, 0f, 0f)
         };
-        return EncodeBgra(color.R, color.G, color.B, 0.92f);
+        return EncodeBgra(color.R, color.G, color.B, 1f);
+    }
+
+    private static float ExpandColorContrast(float value)
+    {
+        float expanded = Math.Clamp((value - 0.5f) * 1.5f + 0.5f, 0f, 1f);
+        return expanded * expanded * (3f - 2f * expanded);
     }
 
     private static (float R, float G, float B) ThreeStop(

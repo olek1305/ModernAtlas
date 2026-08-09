@@ -57,11 +57,11 @@ client-side; an optional server component supplies fog and living-entity policy.
 - searches already loaded blocks and permitted entities incrementally, with
   visible atlas markers and no distant chunk requests; Creative/Cheat may also
   search already loaded dropped items without rendering the global item stage;
-- offers reversible fertility, moisture, temperature, forest-density and
-  geologic-activity overlays, plus a Creative/Cheat ore-density layer, by
-  tinting only the exact 3D geometry already present in the atlas; ore density
-  uses loaded regional data when available and otherwise samples registered ore
-  blocks from already loaded chunk columns;
+- offers strongly differentiated fertility, moisture and temperature
+  overlays, plus a Creative/Cheat ore-density layer, by colorizing only the
+  exact 3D geometry already present in the atlas while retaining its relief;
+  ore density uses loaded regional data when available and otherwise samples
+  registered ore blocks from already loaded chunk columns;
 - includes an atlas-only visual lab under Settings for exposure, layer opacity,
   boundary softness, cave-mask brightness and neutral fog palettes;
 - forces the unexplored-area mask in multiplayer while using only exact chunk

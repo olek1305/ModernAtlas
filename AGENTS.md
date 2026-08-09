@@ -130,11 +130,13 @@ the product scope when the atlas itself is correct.
   global item/entity render stage. Multiplayer never enables dropped-item
   search without a future explicit server policy.
 - Add selectable atlas data layers where live loaded data supports them,
-  including soil fertility, moisture/rainfall, temperature and other useful
-  climate or land properties. Ore heatmaps and similarly revealing layers are
-  restricted to singleplayer Creative or accepted Cheat Mode. Layers must be
-  visually distinguishable, reversible and must not overwrite the textured 3D
-  base map or persist a terrain cache.
+  specifically soil fertility, moisture/rainfall and temperature. Do not expose
+  forest density because the exact 3D trees already communicate it, and do not
+  expose the unclear geologic-activity value. Ore heatmaps and similarly
+  revealing layers are restricted to singleplayer Creative or accepted Cheat
+  Mode. Layers must use clearly differentiated colors, preserve visible 3D
+  relief, remain reversible and must not overwrite the textured base map or
+  persist a terrain cache.
 - Expose the useful ambient/developer controls formerly reached through the
   `~` editor from the atlas Settings UI. Clearly label them as developer visual
   controls, scope them to the atlas framebuffer and restore all engine state

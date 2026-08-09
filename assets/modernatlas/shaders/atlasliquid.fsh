@@ -132,9 +132,14 @@ void main(void)
         {
             vec2 layerUv = layerPosition / vec2(layerDimensions);
             vec4 layerColor = texture(atlasLayerTex, layerUv);
+            float baseLuminance = dot(
+                clamp(color.rgb, vec3(0.0), vec3(1.0)),
+                vec3(0.2126, 0.7152, 0.0722)
+            );
+            vec3 reliefColor = layerColor.rgb * mix(0.68, 1.18, baseLuminance);
             color.rgb = mix(
                 color.rgb,
-                layerColor.rgb,
+                reliefColor,
                 clamp(layerColor.a * atlasLayerOpacity, 0.0, 1.0)
             );
         }

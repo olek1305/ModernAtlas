@@ -10,8 +10,6 @@ internal enum AtlasMapLayer
     SoilFertility,
     Moisture,
     Temperature,
-    ForestDensity,
-    GeologicActivity,
     OreDensity
 }
 
@@ -23,8 +21,6 @@ internal static class AtlasMapLayerInfo
         "fertility",
         "moisture",
         "temperature",
-        "forest",
-        "geologic",
         "ore"
     };
 
@@ -34,8 +30,6 @@ internal static class AtlasMapLayerInfo
         "Soil fertility",
         "Moisture",
         "Temperature",
-        "Forest density",
-        "Geologic activity",
         "Ore density (Cheat/Creative)"
     };
 
@@ -45,8 +39,6 @@ internal static class AtlasMapLayerInfo
         AtlasMapLayer.SoilFertility => "Soil fertility",
         AtlasMapLayer.Moisture => "Moisture",
         AtlasMapLayer.Temperature => "Temperature",
-        AtlasMapLayer.ForestDensity => "Forest density",
-        AtlasMapLayer.GeologicActivity => "Geologic activity",
         AtlasMapLayer.OreDensity => "Ore density",
         _ => "Textured terrain"
     };
@@ -56,8 +48,6 @@ internal static class AtlasMapLayerInfo
         AtlasMapLayer.SoilFertility => "barren → fertile",
         AtlasMapLayer.Moisture => "dry → wet",
         AtlasMapLayer.Temperature => "cold → hot",
-        AtlasMapLayer.ForestDensity => "open → dense",
-        AtlasMapLayer.GeologicActivity => "quiet → active",
         AtlasMapLayer.OreDensity => "low → high potential",
         _ => "live block materials"
     };
