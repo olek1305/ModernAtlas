@@ -116,6 +116,14 @@ public sealed class ModernAtlasSystem : ModSystem
             return true;
         }
 
+        // HelpAndOverlays hotkeys can be evaluated independently from dialog
+        // key events. A focused atlas search box owns G as text, not as the
+        // open/close command.
+        if (dialog?.SearchInputHasFocus == true)
+        {
+            return true;
+        }
+
         dialog?.Toggle();
         return true;
     }

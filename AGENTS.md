@@ -107,7 +107,13 @@ the product scope when the atlas itself is correct.
   time so controls continue to animate while singleplayer is paused. Keep fog
   texture uploads throttled while the camera is moving.
 - Keep atlas GUI controls clickable and prevent atlas input from leaking into
-  the hotbar, inventories or dialogs underneath it.
+  the hotbar, inventories or dialogs underneath it. Forward both `OnKeyDown`
+  and `OnKeyPress` to the active atlas composer because editable text inserts
+  printable characters during `OnKeyPress`. When the search input has focus,
+  it owns printable hotkeys such as `G`; only `Escape` still closes the atlas.
+  Opening the atlas must leave search unfocused, clicking outside the text box
+  must release its focus, and an always-visible `Exit` button must close the
+  atlas without depending on keyboard focus.
 - Draw the full-screen atlas after ordinary mod HUD dialogs so class HUDs,
   clocks and other overlays cannot cover the map.
 
@@ -287,8 +293,10 @@ the product scope when the atlas itself is correct.
   are unreliable and may control the wrong window. Reserve real `G`, `Escape`
   and mouse controls for the owner's final visual inspection.
 - The smoke test must exercise exact terrain, stable liquids, the zero-degree
-  Creative pitch, unit inspection, entity and block search, a climate layer,
-  the Creative/Cheat ore layer, atlas closure and the normal soft-exit path.
+  Creative pitch, an initially unfocused search box, focused text entry
+  (including typing `G` without closing the atlas), focus release, unit
+  inspection, entity and block search, a climate layer, the Creative/Cheat ore
+  layer, atlas closure and the normal soft-exit path.
   Drive those controls through the dialog's own methods: set the pitch target,
   select a rendered entity, submit search queries, switch map layers and call
   `TryClose`. Schedule the final `ClientPlatform.WindowExit(..., SoftExit)`

@@ -83,6 +83,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool automatedSmokeTestRenderedAtPitchFloor;
     private bool automatedSmokeTestUnitInspectionAttempted;
     private bool automatedSmokeTestUnitInspectionPassed;
+    private bool automatedSmokeTestSearchInputAttempted;
+    private bool automatedSmokeTestSearchInputPassed;
     private int automatedSmokeTestSearchPhase;
     private bool automatedSmokeTestSearchPassed;
     private int automatedSmokeTestMapLayerPhase;
@@ -113,6 +115,15 @@ public sealed class ModernAtlasDialog : GuiDialog
         ? UnlockedMinimumPitchDegrees
         : StandardMinimumPitchDegrees;
     private Vec3f AtlasFogColor => AtlasVisualPalettes.FogColor(config.FogPalette);
+    private GuiComposer? ActiveKeyboardComposer => visualLabModalOpen
+        ? visualLabModal
+        : settingsModalOpen
+            ? settingsModal
+            : overlay;
+    internal bool SearchInputHasFocus => IsOpened()
+        && !settingsModalOpen
+        && !visualLabModalOpen
+        && overlay?.GetTextInput("search-input")?.HasFocus == true;
     private float EffectiveMapLayerOpacity
     {
         get
@@ -157,6 +168,9 @@ public sealed class ModernAtlasDialog : GuiDialog
     public override void OnGuiOpened()
     {
         base.OnGuiOpened();
+        // Opening with G is a map action, not an implicit request to type.
+        // Search receives focus only after the player clicks its text box.
+        overlay?.UnfocusOwnElements();
         settingsModalOpen = false;
         visualLabModalOpen = false;
         selectedEntityId = null;
@@ -222,6 +236,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             {
                 automatedSmokeTestRenderedAtPitchFloor = true;
             }
+            ExerciseAutomatedSearchInput();
             ExerciseAutomatedUnitInspection();
             ExerciseAutomatedSearch();
             ExerciseAutomatedMapLayers();
@@ -295,6 +310,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             args.Handled = true;
             return;
         }
+        UnfocusSearchOutsideInput(args);
         if (selectedEntityId != null)
         {
             unitPanel?.OnMouseDown(args);
@@ -448,26 +464,39 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnKeyDown(KeyEvent args)
     {
-        if (args.KeyCode == (int)GlKeys.Escape || args.KeyCode == (int)GlKeys.G)
+        if (args.KeyCode == (int)GlKeys.Escape)
         {
             TryClose();
             args.Handled = true;
             return;
         }
 
-        if (visualLabModalOpen)
-        {
-            visualLabModal?.OnKeyDown(args, false);
-        }
-        else if (settingsModalOpen)
-        {
-            settingsModal?.OnKeyDown(args, false);
-        }
-        else
-        {
-            overlay?.OnKeyDown(args, false);
-        }
+        ActiveKeyboardComposer?.OnKeyDown(args, false);
         if (args.Handled) return;
+
+        // Printable characters arrive through OnKeyPress, but their preceding
+        // key-down must still remain owned by the focused text box. Otherwise
+        // G closes the atlas and WASD pans it while the player is typing.
+        if (SearchInputHasFocus)
+        {
+            args.Handled = true;
+            return;
+        }
+
+        // Modal controls also own the keyboard even when a particular key has
+        // no widget action. Do not move the atlas behind an open modal.
+        if (visualLabModalOpen || settingsModalOpen)
+        {
+            args.Handled = true;
+            return;
+        }
+
+        if (args.KeyCode == (int)GlKeys.G)
+        {
+            TryClose();
+            args.Handled = true;
+            return;
+        }
 
         float pan = Math.Max(1, targetZoom * 0.08f);
         double yaw = targetYawDegrees * GameMath.DEG2RAD;
@@ -520,8 +549,24 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
         else
         {
-            base.OnKeyDown(args);
+            // CaptureAllInputs promises that the full-screen atlas will not
+            // leak unused keys into gameplay or dialogs underneath it.
+            args.Handled = true;
         }
+    }
+
+    public override void OnKeyPress(KeyEvent args)
+    {
+        ActiveKeyboardComposer?.OnKeyPress(args);
+        // GuiComposer inserts text during OnKeyPress. Whether or not a widget
+        // used this character, the full-screen atlas owns the event.
+        args.Handled = true;
+    }
+
+    public override void OnKeyUp(KeyEvent args)
+    {
+        ActiveKeyboardComposer?.OnKeyUp(args);
+        args.Handled = true;
     }
 
     public override bool CaptureAllInputs() => true;
@@ -532,6 +577,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnGuiClosed()
     {
+        overlay?.UnfocusOwnElements();
         settingsModalOpen = false;
         visualLabModalOpen = false;
         selectedEntityId = null;
@@ -583,6 +629,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestRenderedAtPitchFloor = false;
         automatedSmokeTestUnitInspectionAttempted = false;
         automatedSmokeTestUnitInspectionPassed = false;
+        automatedSmokeTestSearchInputAttempted = false;
+        automatedSmokeTestSearchInputPassed = false;
         automatedSmokeTestSearchPhase = 0;
         automatedSmokeTestSearchPassed = false;
         automatedSmokeTestMapLayerPhase = 0;
@@ -600,6 +648,7 @@ public sealed class ModernAtlasDialog : GuiDialog
                 || automatedSmokeTestRenderedAtPitchFloor)
             && (!automatedSmokeTestUnitInspectionAttempted
                 || automatedSmokeTestUnitInspectionPassed)
+            && automatedSmokeTestSearchInputPassed
             && automatedSmokeTestSearchPassed
             && automatedSmokeTestMapLayerPassed;
         if (passed && automatedSmokeTestElapsedSeconds < 3f) return;
@@ -609,6 +658,82 @@ public sealed class ModernAtlasDialog : GuiDialog
         Action<bool>? completion = automatedSmokeTestCompletion;
         automatedSmokeTestCompletion = null;
         completion?.Invoke(passed);
+    }
+
+    private void ExerciseAutomatedSearchInput()
+    {
+        if (automatedSmokeTestSearchInputAttempted) return;
+
+        automatedSmokeTestSearchInputAttempted = true;
+        GuiElementTextInput? input = overlay?.GetTextInput("search-input");
+        bool initiallyUnfocused = input?.HasFocus == false;
+        bool focused = input != null
+            && overlay?.FocusElement(input.TabIndex) == true;
+        if (input == null || !focused)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated search-input test could not focus the atlas text box."
+            );
+            return;
+        }
+
+        input.SetValue("", true);
+        searchController.Clear();
+        KeyEvent keyDown = new()
+        {
+            KeyCode = (int)GlKeys.G,
+            KeyChar = 'g'
+        };
+        OnKeyDown(keyDown);
+        bool remainedOpen = IsOpened();
+        KeyEvent keyPress = new()
+        {
+            KeyCode = (int)GlKeys.G,
+            KeyChar = 'g'
+        };
+        OnKeyPress(keyPress);
+
+        string enteredText = input.GetText();
+        string enteredQuery = searchController.Query;
+        input.SetValue("", true);
+        searchController.Clear();
+        overlay?.UnfocusOwnElements();
+        bool focusReleased = !input.HasFocus;
+        automatedSmokeTestSearchInputPassed = initiallyUnfocused
+            && remainedOpen
+            && keyDown.Handled
+            && keyPress.Handled
+            && string.Equals(enteredText, "g", StringComparison.Ordinal)
+            && string.Equals(enteredQuery, "g", StringComparison.Ordinal)
+            && focusReleased;
+        if (automatedSmokeTestSearchInputPassed)
+        {
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated smoke test opened search unfocused, typed G after focusing it, then released focus without closing the atlas."
+            );
+        }
+        else
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated search-input test failed: initiallyUnfocused={0}, open={1}, keyDown={2}, keyPress={3}, focusReleased={4}, text='{5}', query='{6}'.",
+                initiallyUnfocused,
+                remainedOpen,
+                keyDown.Handled,
+                keyPress.Handled,
+                focusReleased,
+                enteredText,
+                enteredQuery
+            );
+        }
+    }
+
+    private void UnfocusSearchOutsideInput(MouseEvent args)
+    {
+        GuiElementTextInput? input = overlay?.GetTextInput("search-input");
+        if (input?.HasFocus == true && !input.IsPositionInside(args.X, args.Y))
+        {
+            overlay?.UnfocusOwnElements();
+        }
     }
 
     private void ExerciseAutomatedUnitInspection()
@@ -819,6 +944,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestRenderedAtPitchFloor = false;
         automatedSmokeTestUnitInspectionAttempted = false;
         automatedSmokeTestUnitInspectionPassed = false;
+        automatedSmokeTestSearchInputAttempted = false;
+        automatedSmokeTestSearchInputPassed = false;
         automatedSmokeTestSearchPhase = 0;
         automatedSmokeTestSearchPassed = false;
         automatedSmokeTestMapLayerPhase = 0;
@@ -932,7 +1059,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             .AddTextInput(
                 ElementBounds.Fixed(166, 122, 300, 34),
                 OnSearchTextChanged,
-                CairoFont.SmallTextInput(),
+                CairoFont.SmallTextInput().WithColor(ColorUtil.WhiteArgbDouble),
                 "search-input"
             )
             .AddButton(
@@ -968,13 +1095,20 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "layer-status"
             )
             .AddButton(
+                "Exit",
+                CloseAtlas,
+                ElementBounds.Fixed(Math.Max(24, guiWidth - 280), 24, 110, 34),
+                EnumButtonStyle.Normal,
+                "exit-button"
+            )
+            .AddButton(
                 "Settings",
                 OpenSettingsModal,
                 ElementBounds.Fixed(Math.Max(24, guiWidth - 150), 24, 120, 34),
                 EnumButtonStyle.Normal,
                 "settings-button"
             )
-            .Compose();
+            .Compose(false);
         overlay.GetTextInput("search-input")?.SetMaxLength(80);
         overlay.GetTextInput("search-input")?.SetPlaceHolderText(
             "Block, creature, player or dropped item"
@@ -1543,6 +1677,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
         return true;
     }
+
+    private bool CloseAtlas() => TryClose();
 
     private void OnMapLayerChanged(string value, bool selected)
     {
