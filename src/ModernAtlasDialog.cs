@@ -29,6 +29,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     private readonly Func<IShaderProgram?> atlasCloudShaderProvider;
 
     private GuiComposer? overlay;
+    private GuiComposer? settingsModal;
+    private bool settingsModalOpen;
     private LoadedTexture? fogTexture;
     private bool leftDragging;
     private bool rightDragging;
@@ -95,6 +97,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     public override void OnGuiOpened()
     {
         base.OnGuiOpened();
+        settingsModalOpen = false;
         ResetPointerDrag();
         PauseSingleplayerForAtlas();
         atlasAnimationSeconds = 0;
@@ -157,10 +160,20 @@ public sealed class ModernAtlasDialog : GuiDialog
         string status = $"Game view distance {GameViewDistance} blocks • {fogStatus} • {animationStatus} • {cloudStatus} • {entityStatus} • exterior surface • {pauseStatus} • {multiplayerStatus} • {rendererStatus} • no distant chunk requests";
         overlay?.GetDynamicText("status").SetNewText(status);
         overlay?.Render(deltaTime);
+        if (settingsModalOpen)
+        {
+            settingsModal?.Render(deltaTime);
+        }
     }
 
     public override void OnMouseDown(MouseEvent args)
     {
+        if (settingsModalOpen)
+        {
+            settingsModal?.OnMouseDown(args);
+            args.Handled = true;
+            return;
+        }
         overlay?.OnMouseDown(args);
         if (args.Handled) return;
 
@@ -178,6 +191,12 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnMouseUp(MouseEvent args)
     {
+        if (settingsModalOpen)
+        {
+            settingsModal?.OnMouseUp(args);
+            args.Handled = true;
+            return;
+        }
         // Once a map drag begins, keep ownership of the gesture even if the
         // pointer crosses the settings panel. Letting the overlay consume the
         // release leaves the drag latched and the next move jumps the camera.
@@ -203,6 +222,12 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnMouseMove(MouseEvent args)
     {
+        if (settingsModalOpen)
+        {
+            settingsModal?.OnMouseMove(args);
+            args.Handled = true;
+            return;
+        }
         if (leftDragging || rightDragging)
         {
             // Preserve the engine's relative delta so long pulls are not
@@ -249,6 +274,12 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnMouseWheel(MouseWheelEventArgs args)
     {
+        if (settingsModalOpen)
+        {
+            settingsModal?.OnMouseWheel(args);
+            args.SetHandled();
+            return;
+        }
         overlay?.OnMouseWheel(args);
         if (args.IsHandled) return;
 
@@ -260,7 +291,14 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnKeyDown(KeyEvent args)
     {
-        overlay?.OnKeyDown(args, false);
+        if (settingsModalOpen)
+        {
+            settingsModal?.OnKeyDown(args, false);
+        }
+        else
+        {
+            overlay?.OnKeyDown(args, false);
+        }
         if (args.Handled) return;
 
         if (args.KeyCode == (int)GlKeys.Escape || args.KeyCode == (int)GlKeys.G)
@@ -330,6 +368,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnGuiClosed()
     {
+        settingsModalOpen = false;
         ResetPointerDrag();
         ResumeSingleplayerAfterAtlas();
         base.OnGuiClosed();
@@ -351,6 +390,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         fogTexture = null;
         overlay?.Dispose();
         overlay = null;
+        settingsModal?.Dispose();
+        settingsModal = null;
         base.Dispose();
     }
 
@@ -358,7 +399,6 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         ElementBounds root = ElementBounds.Fill;
         double guiWidth = capi.Gui.WindowBounds.InnerWidth / Math.Max(0.5, RuntimeEnv.GUIScale);
-        double settingsX = Math.Max(20, guiWidth - 320);
 
         overlay = capi.Gui.CreateCompo("modernatlas-3d", root)
             .AddStaticText(
@@ -377,19 +417,40 @@ public sealed class ModernAtlasDialog : GuiDialog
                 ElementBounds.Fixed(24, 88, 650, 34),
                 "status"
             )
+            .AddButton(
+                "Settings",
+                OpenSettingsModal,
+                ElementBounds.Fixed(Math.Max(24, guiWidth - 150), 24, 120, 34),
+                EnumButtonStyle.Normal,
+                "settings-button"
+            )
+            .Compose();
+
+        ElementBounds modalRoot = ElementBounds.Fixed(0, 0, 340, 470)
+            .WithAlignment(EnumDialogArea.CenterMiddle);
+        ElementBounds modalBackground = ElementBounds.Fixed(0, 0, 340, 470);
+        settingsModal = capi.Gui.CreateCompo("modernatlas-settings", modalRoot)
+            .AddShadedDialogBG(modalBackground, true)
             .AddStaticText(
-                "Atlas settings",
+                "Settings",
                 CairoFont.WhiteSmallishText().WithFontSize(20),
-                ElementBounds.Fixed(settingsX + 20, 30, 260, 30)
+                ElementBounds.Fixed(20, 18, 200, 30)
+            )
+            .AddButton(
+                "Close",
+                CloseSettingsModal,
+                ElementBounds.Fixed(240, 14, 80, 30),
+                EnumButtonStyle.Normal,
+                "settings-close"
             )
             .AddStaticText(
                 capi.IsSinglePlayer ? "Unexplored fog" : "Server fog (locked)",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(settingsX + 20, 70, 180, 28)
+                ElementBounds.Fixed(20, 65, 180, 28)
             )
             .AddSwitch(
                 OnFogToggled,
-                ElementBounds.Fixed(settingsX + 234, 66, 46, 30),
+                ElementBounds.Fixed(264, 61, 46, 30),
                 "fog",
                 24,
                 4
@@ -397,11 +458,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             .AddStaticText(
                 "Atlas animations",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(settingsX + 20, 110, 180, 28)
+                ElementBounds.Fixed(20, 105, 180, 28)
             )
             .AddSwitch(
                 OnAnimationsToggled,
-                ElementBounds.Fixed(settingsX + 234, 106, 46, 30),
+                ElementBounds.Fixed(264, 101, 46, 30),
                 "animations",
                 24,
                 4
@@ -409,11 +470,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             .AddStaticText(
                 "Live clouds",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(settingsX + 20, 150, 180, 28)
+                ElementBounds.Fixed(20, 145, 180, 28)
             )
             .AddSwitch(
                 OnCloudsToggled,
-                ElementBounds.Fixed(settingsX + 234, 146, 46, 30),
+                ElementBounds.Fixed(264, 141, 46, 30),
                 "clouds",
                 24,
                 4
@@ -421,11 +482,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             .AddStaticText(
                 "Living entities",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(settingsX + 20, 190, 180, 28)
+                ElementBounds.Fixed(20, 185, 180, 28)
             )
             .AddSwitch(
                 OnLivingEntitiesToggled,
-                ElementBounds.Fixed(settingsX + 234, 186, 46, 30),
+                ElementBounds.Fixed(264, 181, 46, 30),
                 "entities",
                 24,
                 4
@@ -433,11 +494,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             .AddStaticText(
                 "Players",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(settingsX + 40, 230, 160, 28)
+                ElementBounds.Fixed(40, 225, 160, 28)
             )
             .AddSwitch(
                 OnPlayersToggled,
-                ElementBounds.Fixed(settingsX + 234, 226, 46, 30),
+                ElementBounds.Fixed(264, 221, 46, 30),
                 "players",
                 24,
                 4
@@ -445,11 +506,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             .AddStaticText(
                 "Animals",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(settingsX + 40, 270, 160, 28)
+                ElementBounds.Fixed(40, 265, 160, 28)
             )
             .AddSwitch(
                 OnAnimalsToggled,
-                ElementBounds.Fixed(settingsX + 234, 266, 46, 30),
+                ElementBounds.Fixed(264, 261, 46, 30),
                 "animals",
                 24,
                 4
@@ -457,11 +518,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             .AddStaticText(
                 "Hostile mobs",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(settingsX + 40, 310, 160, 28)
+                ElementBounds.Fixed(40, 305, 160, 28)
             )
             .AddSwitch(
                 OnMobsToggled,
-                ElementBounds.Fixed(settingsX + 234, 306, 46, 30),
+                ElementBounds.Fixed(264, 301, 46, 30),
                 "mobs",
                 24,
                 4
@@ -469,17 +530,31 @@ public sealed class ModernAtlasDialog : GuiDialog
             .AddStaticText(
                 "NPCs",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(settingsX + 40, 350, 160, 28)
+                ElementBounds.Fixed(40, 345, 160, 28)
             )
             .AddSwitch(
                 OnNpcsToggled,
-                ElementBounds.Fixed(settingsX + 234, 346, 46, 30),
+                ElementBounds.Fixed(264, 341, 46, 30),
                 "npcs",
                 24,
                 4
             )
             .Compose();
         SyncSettingsControls();
+    }
+
+    private bool OpenSettingsModal()
+    {
+        ResetPointerDrag();
+        settingsModalOpen = true;
+        SyncSettingsControls();
+        return true;
+    }
+
+    private bool CloseSettingsModal()
+    {
+        settingsModalOpen = false;
+        return true;
     }
 
     private bool RenderLiveWorld(float deltaTime)
@@ -656,14 +731,14 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private void SyncSettingsControls()
     {
-        if (overlay == null) return;
-        overlay.GetSwitch("fog")?.SetValue(EffectiveFogEnabled);
-        overlay.GetSwitch("fog").Enabled = capi.IsSinglePlayer;
-        overlay.GetSwitch("animations")?.SetValue(config.AnimationsEnabled);
-        overlay.GetSwitch("clouds")?.SetValue(config.CloudsEnabled);
+        if (settingsModal == null) return;
+        settingsModal.GetSwitch("fog")?.SetValue(EffectiveFogEnabled);
+        settingsModal.GetSwitch("fog").Enabled = capi.IsSinglePlayer;
+        settingsModal.GetSwitch("animations")?.SetValue(config.AnimationsEnabled);
+        settingsModal.GetSwitch("clouds")?.SetValue(config.CloudsEnabled);
         bool serverAllowsAny = capi.IsSinglePlayer || serverPolicy.AnyEntityModels;
-        overlay.GetSwitch("entities")?.SetValue(config.LivingEntitiesEnabled && serverAllowsAny);
-        overlay.GetSwitch("entities").Enabled = serverAllowsAny;
+        settingsModal.GetSwitch("entities")?.SetValue(config.LivingEntitiesEnabled && serverAllowsAny);
+        settingsModal.GetSwitch("entities").Enabled = serverAllowsAny;
         SyncEntityCategorySwitch("players", config.ShowPlayers, serverPolicy.ShowPlayers);
         SyncEntityCategorySwitch("animals", config.ShowAnimals, serverPolicy.ShowAnimals);
         SyncEntityCategorySwitch("mobs", config.ShowMobs, serverPolicy.ShowMobs);
@@ -673,8 +748,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     private void SyncEntityCategorySwitch(string key, bool clientEnabled, bool serverEnabled)
     {
         bool categoryAllowed = capi.IsSinglePlayer || serverEnabled;
-        overlay?.GetSwitch(key)?.SetValue(clientEnabled && categoryAllowed);
-        overlay.GetSwitch(key).Enabled = config.LivingEntitiesEnabled && categoryAllowed;
+        settingsModal?.GetSwitch(key)?.SetValue(clientEnabled && categoryAllowed);
+        settingsModal.GetSwitch(key).Enabled = config.LivingEntitiesEnabled && categoryAllowed;
     }
 
     private void FocusOnExteriorSurface()
