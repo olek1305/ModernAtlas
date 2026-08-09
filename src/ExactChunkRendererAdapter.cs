@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
+using HarmonyLib;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Config;
@@ -20,6 +21,10 @@ namespace ModernAtlas;
 internal sealed class ExactChunkRendererAdapter : IDisposable
 {
     private const string SupportedVersion = "1.22.6";
+    private const string VisibilityPatchId = "modernatlas.exactchunkvisibility";
+
+    [ThreadStatic]
+    private static bool atlasVisibilityOverride;
 
     private readonly ICoreClientAPI capi;
     private readonly object chunkRenderer;
@@ -50,6 +55,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private readonly PropertyInfo ambientFogMinimumProperty;
     private readonly PropertyInfo ambientColorProperty;
     private readonly PropertyInfo ambientSceneBrightnessProperty;
+    private readonly Harmony visibilityHarmony;
     private bool disabled;
     private bool transparentPassDisabled;
     private bool loggedSuccess;
@@ -93,7 +99,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         PropertyInfo ambientFogDensityProperty,
         PropertyInfo ambientFogMinimumProperty,
         PropertyInfo ambientColorProperty,
-        PropertyInfo ambientSceneBrightnessProperty
+        PropertyInfo ambientSceneBrightnessProperty,
+        Harmony visibilityHarmony
     )
     {
         this.capi = capi;
@@ -125,6 +132,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         this.ambientFogMinimumProperty = ambientFogMinimumProperty;
         this.ambientColorProperty = ambientColorProperty;
         this.ambientSceneBrightnessProperty = ambientSceneBrightnessProperty;
+        this.visibilityHarmony = visibilityHarmony;
     }
 
     public static ExactChunkRendererAdapter? TryCreate(
@@ -248,6 +256,25 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 capi.Ambient.GetType(),
                 nameof(IAmbientManager.BlendedSceneBrightness)
             );
+            MethodInfo modelVisibility = RequireMethod(
+                typeof(ModelDataPoolLocation),
+                nameof(ModelDataPoolLocation.IsVisible),
+                typeof(EnumFrustumCullMode),
+                typeof(FrustumCulling)
+            );
+            MethodInfo atlasVisibilityPrefix = RequireMethod(
+                typeof(ExactChunkRendererAdapter),
+                nameof(UseAtlasVisibility),
+                typeof(ModelDataPoolLocation),
+                typeof(EnumFrustumCullMode),
+                typeof(FrustumCulling),
+                typeof(bool).MakeByRefType()
+            );
+            Harmony visibilityHarmony = new(VisibilityPatchId);
+            visibilityHarmony.Patch(
+                modelVisibility,
+                prefix: new HarmonyMethod(atlasVisibilityPrefix)
+            );
 
             capi.Logger.Notification(
                 "[ModernAtlas] Vintage Story 1.22.6 exact chunk renderer is available."
@@ -280,7 +307,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 ambientFogDensity,
                 ambientFogMinimum,
                 ambientColor,
-                ambientSceneBrightness
+                ambientSceneBrightness,
+                visibilityHarmony
             );
         }
         catch (Exception exception)
@@ -466,6 +494,11 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 cullingView
             );
             ReplacePoolFrustums(atlasFrustum, changedPools);
+            // The engine's completed mesh locations retain an occlusion flag
+            // calculated on a worker thread for the normal player camera.
+            // During this draw only, use the atlas frustum without that stale
+            // player-camera flag. Hide and LOD/frustum checks still apply.
+            atlasVisibilityOverride = true;
 
             render.PMatrix.Push(projectionDouble);
             projectionPushed = true;
@@ -515,6 +548,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         }
         finally
         {
+            atlasVisibilityOverride = false;
             for (int index = changedPools.Count - 1; index >= 0; index--)
             {
                 (object pool, object? frustum) = changedPools[index];
@@ -597,9 +631,53 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
 
     public void Dispose()
     {
+        visibilityHarmony.UnpatchAll(VisibilityPatchId);
         cloudRenderer?.Dispose();
         liquidChunkMask?.Dispose();
         liquidChunkMask = null;
+    }
+
+    private static bool UseAtlasVisibility(
+        ModelDataPoolLocation __instance,
+        EnumFrustumCullMode mode,
+        FrustumCulling culler,
+        ref bool __result
+    )
+    {
+        if (!atlasVisibilityOverride) return true;
+
+        if (__instance.Hide)
+        {
+            __result = false;
+            return false;
+        }
+
+        switch (mode)
+        {
+            case EnumFrustumCullMode.CullInstant:
+                __result = culler.InFrustum(__instance.FrustumCullSphere);
+                break;
+            case EnumFrustumCullMode.CullInstantShadowPassNear:
+                __result = culler.InFrustumShadowPass(__instance.FrustumCullSphere);
+                break;
+            case EnumFrustumCullMode.CullInstantShadowPassFar:
+                __result = __instance.LodLevel >= 1
+                    && culler.InFrustumShadowPass(__instance.FrustumCullSphere);
+                break;
+            case EnumFrustumCullMode.CullNormal:
+                __result = culler.InFrustumAndRange(
+                    __instance.FrustumCullSphere,
+                    __instance.FrustumVisible,
+                    __instance.LodLevel
+                );
+                __instance.FrustumVisible = __result;
+                break;
+            default:
+                __result = true;
+                break;
+        }
+
+        return false;
     }
 
     private bool RenderTransparentChunks(
@@ -982,7 +1060,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     {
         return type.GetMethod(
             name,
-            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic,
             null,
             parameterTypes,
             null

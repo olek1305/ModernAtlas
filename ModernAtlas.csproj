@@ -26,5 +26,9 @@
       <HintPath>$(VintageStoryPath)/Lib/protobuf-net.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(VintageStoryPath)/Lib/0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 </Project>
