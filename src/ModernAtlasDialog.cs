@@ -36,11 +36,18 @@ public sealed class ModernAtlasDialog : GuiDialog
     private readonly AtlasSearchController searchController;
 
     private GuiComposer? overlay;
+    private GuiComposer? searchPanel;
+    private GuiComposer? mapLayerPanel;
+    private GuiComposer? creativeSettingsShortcut;
     private GuiComposer? settingsModal;
+    private GuiComposer? creativeSettingsModal;
     private GuiComposer? visualLabModal;
     private GuiComposer? unitPanel;
     private bool settingsModalOpen;
+    private bool creativeSettingsModalOpen;
     private bool visualLabModalOpen;
+    private bool interfaceHidden;
+    private long lastInterfaceRestoreMilliseconds = -10000;
     private LoadedTexture? fogTexture;
     private LoadedTexture? searchMarkerTexture;
     private MeshRef? opacityQuad;
@@ -81,6 +88,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     private Action<bool>? automatedSmokeTestCompletion;
     private bool automatedSmokeTestRequiresUnlockedPitch;
     private bool automatedSmokeTestRenderedAtPitchFloor;
+    private bool automatedSmokeTestInterfaceControlsAttempted;
+    private bool automatedSmokeTestInterfaceControlsPassed;
     private bool automatedSmokeTestUnitInspectionAttempted;
     private bool automatedSmokeTestUnitInspectionPassed;
     private bool automatedSmokeTestSearchInputAttempted;
@@ -89,6 +98,11 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool automatedSmokeTestSearchPassed;
     private int automatedSmokeTestMapLayerPhase;
     private bool automatedSmokeTestMapLayerPassed;
+    private bool automatedSmokeTestPreferencesCaptured;
+    private bool automatedOriginalMapLayersEnabled;
+    private bool automatedOriginalCaveModeEnabled;
+    private bool automatedOriginalSearchModeEnabled;
+    private bool automatedOriginalCameraAngleLocked;
     private AtlasMapLayer activeMapLayer = AtlasMapLayer.TexturedTerrain;
     private bool synchronizingMapLayerDropdown;
 
@@ -107,23 +121,57 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool EffectiveFogEnabled => capi.IsSinglePlayer
         ? config.FogEnabled
         : serverPolicy.FogEnabled;
-    private bool SurfaceSafetyEnabled => !capi.IsSinglePlayer || !cheatModeEnabled;
-    private bool HasUnlockedCameraPitch => cheatModeEnabled
-        || capi.World.Player.WorldData.CurrentGameMode == EnumGameMode.Creative;
-    private bool UnitInspectionEnabled => capi.IsSinglePlayer && HasUnlockedCameraPitch;
+    private bool CreativeCheatSettingsAvailable
+    {
+        get
+        {
+            if (!capi.IsSinglePlayer) return false;
+            if (cheatModeEnabled) return true;
+            try
+            {
+                return capi.World.Player?.WorldData.CurrentGameMode == EnumGameMode.Creative;
+            }
+            catch
+            {
+                // The dialog is composed before a world/player necessarily
+                // exists. Creative access becomes visible after level finalize.
+                return false;
+            }
+        }
+    }
+    private bool SurfaceSafetyEnabled => !CreativeCheatSettingsAvailable
+        || !config.CaveModeEnabled;
+    private bool HasUnlockedCameraPitch => CreativeCheatSettingsAvailable;
+    private bool UnitInspectionEnabled => CreativeCheatSettingsAvailable;
+    private bool SearchModeActive => CreativeCheatSettingsAvailable
+        && config.SearchModeEnabled;
+    private bool MapLayerControlsVisible => config.MapLayersEnabled;
     private float MinimumPitchDegrees => HasUnlockedCameraPitch
         ? UnlockedMinimumPitchDegrees
         : StandardMinimumPitchDegrees;
     private Vec3f AtlasFogColor => AtlasVisualPalettes.FogColor(config.FogPalette);
-    private GuiComposer? ActiveKeyboardComposer => visualLabModalOpen
-        ? visualLabModal
-        : settingsModalOpen
-            ? settingsModal
-            : overlay;
+    private GuiComposer? ActiveKeyboardComposer => interfaceHidden
+        ? null
+        : visualLabModalOpen
+            ? visualLabModal
+            : creativeSettingsModalOpen
+                ? creativeSettingsModal
+                : settingsModalOpen
+                    ? settingsModal
+                    : SearchModeActive
+                        && searchPanel?.GetTextInput("search-input")?.HasFocus == true
+                            ? searchPanel
+                            : MapLayerControlsVisible
+                                && mapLayerPanel?.CurrentTabIndexElement?.HasFocus == true
+                                    ? mapLayerPanel
+                                    : overlay;
     internal bool SearchInputHasFocus => IsOpened()
+        && !interfaceHidden
+        && SearchModeActive
         && !settingsModalOpen
+        && !creativeSettingsModalOpen
         && !visualLabModalOpen
-        && overlay?.GetTextInput("search-input")?.HasFocus == true;
+        && searchPanel?.GetTextInput("search-input")?.HasFocus == true;
     private float EffectiveMapLayerOpacity
     {
         get
@@ -171,8 +219,12 @@ public sealed class ModernAtlasDialog : GuiDialog
         // Opening with G is a map action, not an implicit request to type.
         // Search receives focus only after the player clicks its text box.
         overlay?.UnfocusOwnElements();
+        searchPanel?.UnfocusOwnElements();
         settingsModalOpen = false;
+        creativeSettingsModalOpen = false;
         visualLabModalOpen = false;
+        interfaceHidden = false;
+        lastInterfaceRestoreMilliseconds = -10000;
         selectedEntityId = null;
         ClearSearch();
         ResetPointerDrag();
@@ -209,6 +261,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         PrepareSurfaceSafetyFilter();
         PrepareMapLayer();
         SyncSettingsControls();
+        SyncCreativeSettingsControls();
         capi.Logger.Notification(
             "[ModernAtlas] Opened independent 3D atlas GUI at exterior surface height {0:0.0}; singleplayer paused: {1}.",
             centerY,
@@ -227,7 +280,10 @@ public sealed class ModernAtlasDialog : GuiDialog
             capi.Logger.Notification("[ModernAtlas] First 3D atlas GUI frame rendered.");
         }
         bool rendered = RenderLiveWorld(deltaTime);
-        AdvanceSearch();
+        if (SearchModeActive)
+        {
+            AdvanceSearch();
+        }
         if (rendered && automatedSmokeTestActive)
         {
             AutomatedSmokeTestRenderedExactWorld = true;
@@ -236,6 +292,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             {
                 automatedSmokeTestRenderedAtPitchFloor = true;
             }
+            ExerciseAutomatedInterfaceControls();
             ExerciseAutomatedSearchInput();
             ExerciseAutomatedUnitInspection();
             ExerciseAutomatedSearch();
@@ -245,8 +302,9 @@ public sealed class ModernAtlasDialog : GuiDialog
         {
             loggedEntityModels = true;
             capi.Logger.Notification(
-                "[ModernAtlas] Rendered {0} live 3D living entity models from client-loaded entities.",
-                exactChunkRenderer?.LastRenderedEntityCount ?? 0
+                "[ModernAtlas] Rendered {0} live 3D living entity models from client-loaded entities; held-item rendering suppressed for {1} models.",
+                exactChunkRenderer?.LastRenderedEntityCount ?? 0,
+                exactChunkRenderer?.LastSuppressedHeldItemCount ?? 0
             );
         }
         RenderFogMask();
@@ -255,69 +313,106 @@ public sealed class ModernAtlasDialog : GuiDialog
         capi.Render.GLDepthMask(false);
         capi.Render.GLDisableDepthTest();
         capi.Render.GlToggleBlend(true, EnumBlendMode.Standard);
-        RenderSearchMarkers();
+        if (!interfaceHidden && SearchModeActive)
+        {
+            RenderSearchMarkers();
+        }
         string rendererStatus = rendered
-            ? "exact loaded chunk geometry"
-            : "exact renderer unavailable";
+            ? "exact loaded terrain"
+            : "renderer unavailable";
         string fogStatus = EffectiveFogEnabled ? "fog on" : "fog off";
-        string animationStatus = config.AnimationsEnabled ? "animations on" : "animations paused";
-        string cloudStatus = config.CloudsEnabled ? "clouds on" : "clouds off";
-        string lightingStatus = config.LiveLightingEnabled
-            ? "live sun/weather"
-            : $"fixed sun {config.FixedSunHour:00}:00";
-        string entityStatus = visibleEntityPolicy.AnyEntityModels
-            ? "living models on"
-            : capi.IsSinglePlayer || serverPolicy.AnyEntityModels
-                ? "living models off"
-                : "living models blocked by server";
         string caveStatus = SurfaceSafetyEnabled
-            ? "underground caves hidden"
-            : "cave view (Cheat Mode)";
-        string multiplayerStatus = capi.IsSinglePlayer ? "singleplayer controls" : "multiplayer safe limits locked";
-        string pauseStatus = capi.IsSinglePlayer ? "game paused" : "live server";
+            ? "caves hidden"
+            : "cave mode";
         if (preparingSurfaceFilter)
         {
-            rendererStatus = $"preparing surface safety {surfaceHeightTexture.ProgressPercent}%";
+            rendererStatus = $"preparing safe surface {surfaceHeightTexture.ProgressPercent}%";
         }
-        string status = $"Game view distance {GameViewDistance} blocks • {fogStatus} • {lightingStatus} • {animationStatus} • {cloudStatus} • {entityStatus} • {caveStatus} • exterior surface • {pauseStatus} • {multiplayerStatus} • {rendererStatus} • no distant chunk requests";
+        string status = $"{GameViewDistance} blocks • {fogStatus} • {caveStatus} • {rendererStatus} • loaded data only";
         overlay?.GetDynamicText("status").SetNewText(status);
-        overlay?.GetDynamicText("search-status").SetNewText(searchController.StatusText);
-        overlay?.GetDynamicText("layer-status").SetNewText(mapLayerTexture.StatusText);
-        overlay?.Render(deltaTime);
-        RenderUnitInspection(deltaTime);
-        if (settingsModalOpen)
+        searchPanel?.GetDynamicText("search-status").SetNewText(searchController.StatusText);
+        mapLayerPanel?.GetDynamicText("layer-status").SetNewText(mapLayerTexture.StatusText);
+        if (!interfaceHidden)
         {
-            settingsModal?.Render(deltaTime);
-        }
-        if (visualLabModalOpen)
-        {
-            visualLabModal?.Render(deltaTime);
+            overlay?.Render(deltaTime);
+            if (CreativeCheatSettingsAvailable)
+            {
+                creativeSettingsShortcut?.Render(deltaTime);
+            }
+            if (MapLayerControlsVisible)
+            {
+                mapLayerPanel?.Render(deltaTime);
+            }
+            if (SearchModeActive)
+            {
+                searchPanel?.Render(deltaTime);
+            }
+            RenderUnitInspection(deltaTime);
+            if (settingsModalOpen)
+            {
+                settingsModal?.Render(deltaTime);
+            }
+            if (creativeSettingsModalOpen)
+            {
+                creativeSettingsModal?.Render(deltaTime);
+            }
+            if (visualLabModalOpen)
+            {
+                visualLabModal?.Render(deltaTime);
+            }
         }
         AdvanceAutomatedSmokeTest();
     }
 
     public override void OnMouseDown(MouseEvent args)
     {
-        if (visualLabModalOpen)
+        if (!interfaceHidden && visualLabModalOpen)
         {
             visualLabModal?.OnMouseDown(args);
             args.Handled = true;
             return;
         }
-        if (settingsModalOpen)
+        if (!interfaceHidden && creativeSettingsModalOpen)
+        {
+            creativeSettingsModal?.OnMouseDown(args);
+            args.Handled = true;
+            return;
+        }
+        if (!interfaceHidden && settingsModalOpen)
         {
             settingsModal?.OnMouseDown(args);
             args.Handled = true;
             return;
         }
-        UnfocusSearchOutsideInput(args);
-        if (selectedEntityId != null)
+        if (!interfaceHidden)
+        {
+            UnfocusSearchOutsideInput(args);
+        }
+        if (!interfaceHidden && selectedEntityId != null)
         {
             unitPanel?.OnMouseDown(args);
             if (args.Handled) return;
         }
-        overlay?.OnMouseDown(args);
-        if (args.Handled) return;
+        if (!interfaceHidden)
+        {
+            if (SearchModeActive)
+            {
+                searchPanel?.OnMouseDown(args);
+                if (args.Handled) return;
+            }
+            if (MapLayerControlsVisible)
+            {
+                mapLayerPanel?.OnMouseDown(args);
+                if (args.Handled) return;
+            }
+            if (CreativeCheatSettingsAvailable)
+            {
+                creativeSettingsShortcut?.OnMouseDown(args);
+                if (args.Handled) return;
+            }
+            overlay?.OnMouseDown(args);
+            if (args.Handled) return;
+        }
 
         if (args.Button == EnumMouseButton.Left)
         {
@@ -334,19 +429,25 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnMouseUp(MouseEvent args)
     {
-        if (visualLabModalOpen)
+        if (!interfaceHidden && visualLabModalOpen)
         {
             visualLabModal?.OnMouseUp(args);
             args.Handled = true;
             return;
         }
-        if (settingsModalOpen)
+        if (!interfaceHidden && creativeSettingsModalOpen)
+        {
+            creativeSettingsModal?.OnMouseUp(args);
+            args.Handled = true;
+            return;
+        }
+        if (!interfaceHidden && settingsModalOpen)
         {
             settingsModal?.OnMouseUp(args);
             args.Handled = true;
             return;
         }
-        if (selectedEntityId != null)
+        if (!interfaceHidden && selectedEntityId != null)
         {
             unitPanel?.OnMouseUp(args);
             if (args.Handled) return;
@@ -373,20 +474,44 @@ public sealed class ModernAtlasDialog : GuiDialog
             return;
         }
 
-        overlay?.OnMouseUp(args);
-        if (args.Handled) return;
+        if (!interfaceHidden)
+        {
+            if (SearchModeActive)
+            {
+                searchPanel?.OnMouseUp(args);
+                if (args.Handled) return;
+            }
+            if (MapLayerControlsVisible)
+            {
+                mapLayerPanel?.OnMouseUp(args);
+                if (args.Handled) return;
+            }
+            if (CreativeCheatSettingsAvailable)
+            {
+                creativeSettingsShortcut?.OnMouseUp(args);
+                if (args.Handled) return;
+            }
+            overlay?.OnMouseUp(args);
+            if (args.Handled) return;
+        }
         args.Handled = true;
     }
 
     public override void OnMouseMove(MouseEvent args)
     {
-        if (visualLabModalOpen)
+        if (!interfaceHidden && visualLabModalOpen)
         {
             visualLabModal?.OnMouseMove(args);
             args.Handled = true;
             return;
         }
-        if (settingsModalOpen)
+        if (!interfaceHidden && creativeSettingsModalOpen)
+        {
+            creativeSettingsModal?.OnMouseMove(args);
+            args.Handled = true;
+            return;
+        }
+        if (!interfaceHidden && settingsModalOpen)
         {
             settingsModal?.OnMouseMove(args);
             args.Handled = true;
@@ -402,12 +527,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
             if (rightDragging)
             {
-                targetYawDegrees = NormalizeDegrees(targetYawDegrees + (float)deltaX * 0.42f);
-                targetPitchDegrees = Math.Clamp(
-                    targetPitchDegrees - (float)deltaY * 0.32f,
-                    MinimumPitchDegrees,
-                    86
-                );
+                ApplyRotationDrag(deltaX, deltaY);
             }
 
             if (leftDragging)
@@ -429,12 +549,18 @@ public sealed class ModernAtlasDialog : GuiDialog
             return;
         }
 
-        if (selectedEntityId != null)
+        if (!interfaceHidden && selectedEntityId != null)
         {
             unitPanel?.OnMouseMove(args);
             if (args.Handled) return;
         }
-        overlay?.OnMouseMove(args);
+        if (!interfaceHidden)
+        {
+            if (SearchModeActive) searchPanel?.OnMouseMove(args);
+            if (MapLayerControlsVisible) mapLayerPanel?.OnMouseMove(args);
+            if (CreativeCheatSettingsAvailable) creativeSettingsShortcut?.OnMouseMove(args);
+            overlay?.OnMouseMove(args);
+        }
         // The atlas covers the entire screen. Do not leak hover interaction to
         // hotbar slots, creative inventory elements or dialogs underneath it.
         args.Handled = true;
@@ -442,20 +568,35 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnMouseWheel(MouseWheelEventArgs args)
     {
-        if (visualLabModalOpen)
+        if (!interfaceHidden && visualLabModalOpen)
         {
             visualLabModal?.OnMouseWheel(args);
             args.SetHandled();
             return;
         }
-        if (settingsModalOpen)
+        if (!interfaceHidden && creativeSettingsModalOpen)
+        {
+            creativeSettingsModal?.OnMouseWheel(args);
+            args.SetHandled();
+            return;
+        }
+        if (!interfaceHidden && settingsModalOpen)
         {
             settingsModal?.OnMouseWheel(args);
             args.SetHandled();
             return;
         }
-        overlay?.OnMouseWheel(args);
-        if (args.IsHandled) return;
+        if (!interfaceHidden)
+        {
+            if (SearchModeActive) searchPanel?.OnMouseWheel(args);
+            if (args.IsHandled) return;
+            if (MapLayerControlsVisible) mapLayerPanel?.OnMouseWheel(args);
+            if (args.IsHandled) return;
+            if (CreativeCheatSettingsAvailable) creativeSettingsShortcut?.OnMouseWheel(args);
+            if (args.IsHandled) return;
+            overlay?.OnMouseWheel(args);
+            if (args.IsHandled) return;
+        }
 
         float wheel = args.deltaPrecise != 0 ? args.deltaPrecise : args.delta;
         targetZoom = Math.Clamp(targetZoom * MathF.Pow(0.84f, wheel), 8, 30000);
@@ -466,7 +607,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         if (args.KeyCode == (int)GlKeys.Escape)
         {
-            TryClose();
+            HandleEscape();
             args.Handled = true;
             return;
         }
@@ -485,7 +626,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
         // Modal controls also own the keyboard even when a particular key has
         // no widget action. Do not move the atlas behind an open modal.
-        if (visualLabModalOpen || settingsModalOpen)
+        if (visualLabModalOpen || creativeSettingsModalOpen || settingsModalOpen)
         {
             args.Handled = true;
             return;
@@ -513,12 +654,18 @@ public sealed class ModernAtlasDialog : GuiDialog
         else if (args.KeyCode == (int)GlKeys.E) Rotate(6, args);
         else if (args.KeyCode == (int)GlKeys.R)
         {
-            targetPitchDegrees = Math.Clamp(targetPitchDegrees + 4, MinimumPitchDegrees, 86);
+            if (!config.CameraAngleLocked || !CreativeCheatSettingsAvailable)
+            {
+                targetPitchDegrees = Math.Clamp(targetPitchDegrees + 4, MinimumPitchDegrees, 86);
+            }
             args.Handled = true;
         }
         else if (args.KeyCode == (int)GlKeys.F)
         {
-            targetPitchDegrees = Math.Clamp(targetPitchDegrees - 4, MinimumPitchDegrees, 86);
+            if (!config.CameraAngleLocked || !CreativeCheatSettingsAvailable)
+            {
+                targetPitchDegrees = Math.Clamp(targetPitchDegrees - 4, MinimumPitchDegrees, 86);
+            }
             args.Handled = true;
         }
         else if (args.KeyCode == (int)GlKeys.Space)
@@ -573,13 +720,16 @@ public sealed class ModernAtlasDialog : GuiDialog
     public override bool CaptureRawMouse() => true;
     public override bool ShouldReceiveKeyboardEvents() => IsOpened();
     public override bool ShouldReceiveMouseEvents() => IsOpened();
-    public override bool OnEscapePressed() => TryClose();
+    public override bool OnEscapePressed() => HandleEscape();
 
     public override void OnGuiClosed()
     {
         overlay?.UnfocusOwnElements();
+        searchPanel?.UnfocusOwnElements();
         settingsModalOpen = false;
+        creativeSettingsModalOpen = false;
         visualLabModalOpen = false;
+        interfaceHidden = false;
         selectedEntityId = null;
         searchController.Clear();
         mapLayerTexture.Reset();
@@ -600,11 +750,17 @@ public sealed class ModernAtlasDialog : GuiDialog
     public void SetCheatMode(bool enabled)
     {
         cheatModeEnabled = capi.IsSinglePlayer && enabled;
-        if (activeMapLayer.RequiresSpoilerAccess() && !HasUnlockedCameraPitch)
+        if (activeMapLayer.RequiresSpoilerAccess() && !CreativeCheatSettingsAvailable)
         {
             SetMapLayer(AtlasMapLayer.TexturedTerrain);
         }
+        if (!CreativeCheatSettingsAvailable)
+        {
+            creativeSettingsModalOpen = false;
+            ClearSearch();
+        }
         ClampPitchToAccessLevel(!IsOpened());
+        SyncCreativeSettingsControls();
         if (!IsOpened()) return;
 
         PrepareSurfaceSafetyFilter();
@@ -622,11 +778,22 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     internal void BeginAutomatedSmokeTest(Action<bool> completion)
     {
+        automatedOriginalMapLayersEnabled = config.MapLayersEnabled;
+        automatedOriginalCaveModeEnabled = config.CaveModeEnabled;
+        automatedOriginalSearchModeEnabled = config.SearchModeEnabled;
+        automatedOriginalCameraAngleLocked = config.CameraAngleLocked;
+        automatedSmokeTestPreferencesCaptured = true;
+        config.MapLayersEnabled = true;
+        config.CaveModeEnabled = false;
+        config.SearchModeEnabled = true;
+        config.CameraAngleLocked = false;
         automatedSmokeTestActive = true;
         automatedSmokeTestElapsedSeconds = 0;
         automatedSmokeTestCompletion = completion;
         automatedSmokeTestRequiresUnlockedPitch = false;
         automatedSmokeTestRenderedAtPitchFloor = false;
+        automatedSmokeTestInterfaceControlsAttempted = false;
+        automatedSmokeTestInterfaceControlsPassed = false;
         automatedSmokeTestUnitInspectionAttempted = false;
         automatedSmokeTestUnitInspectionPassed = false;
         automatedSmokeTestSearchInputAttempted = false;
@@ -646,6 +813,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         bool passed = AutomatedSmokeTestRenderedExactWorld
             && (!automatedSmokeTestRequiresUnlockedPitch
                 || automatedSmokeTestRenderedAtPitchFloor)
+            && automatedSmokeTestInterfaceControlsPassed
             && (!automatedSmokeTestUnitInspectionAttempted
                 || automatedSmokeTestUnitInspectionPassed)
             && automatedSmokeTestSearchInputPassed
@@ -657,7 +825,102 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestActive = false;
         Action<bool>? completion = automatedSmokeTestCompletion;
         automatedSmokeTestCompletion = null;
+        RestoreAutomatedSmokeTestPreferences();
         completion?.Invoke(passed);
+    }
+
+    private void ExerciseAutomatedInterfaceControls()
+    {
+        if (automatedSmokeTestInterfaceControlsAttempted) return;
+        automatedSmokeTestInterfaceControlsAttempted = true;
+
+        bool accessAvailable = CreativeCheatSettingsAvailable;
+        bool settingsOpened = accessAvailable
+            && OpenCreativeSettingsModal()
+            && creativeSettingsModalOpen;
+        CloseCreativeSettingsModal();
+
+        float originalYaw = targetYawDegrees;
+        float originalPitch = targetPitchDegrees;
+        config.CameraAngleLocked = true;
+        ApplyRotationDrag(8, 24);
+        bool cameraAngleStayedLocked = Math.Abs(targetPitchDegrees - originalPitch) < 0.001f;
+        bool cameraYawStayedFree = Math.Abs(
+            NormalizeSignedDegrees(targetYawDegrees - originalYaw)
+        ) > 0.001f;
+        targetYawDegrees = originalYaw;
+        targetPitchDegrees = originalPitch;
+        config.CameraAngleLocked = false;
+
+        bool safeSurfaceWasActive = SurfaceSafetyEnabled;
+        config.CaveModeEnabled = true;
+        bool caveModeActivated = !SurfaceSafetyEnabled;
+        PrepareSurfaceSafetyFilter();
+
+        bool hidden = HideInterface() && interfaceHidden;
+        bool restored = HandleEscape() && !interfaceHidden && IsOpened();
+        int renderedEntityCount = exactChunkRenderer?.LastRenderedEntityCount ?? 0;
+        bool heldItemsSuppressed = renderedEntityCount > 0
+            && exactChunkRenderer?.LastSuppressedHeldItemCount == renderedEntityCount;
+        automatedSmokeTestInterfaceControlsPassed = accessAvailable
+            && settingsOpened
+            && MapLayerControlsVisible
+            && SearchModeActive
+            && safeSurfaceWasActive
+            && caveModeActivated
+            && cameraAngleStayedLocked
+            && cameraYawStayedFree
+            && hidden
+            && restored
+            && heldItemsSuppressed;
+        if (automatedSmokeTestInterfaceControlsPassed)
+        {
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated smoke test exercised the compact map-layer switch, Creative/Cheat cave/search/camera controls, Escape-restored hidden UI and held-item suppression for {0} living models.",
+                renderedEntityCount
+            );
+        }
+        else
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated interface-controls test failed: access={0}, modal={1}, layers={2}, search={3}, safeSurface={4}, cave={5}, angleLock={6}, yaw={7}, hidden={8}, restored={9}, heldItems={10}/{11}.",
+                accessAvailable,
+                settingsOpened,
+                MapLayerControlsVisible,
+                SearchModeActive,
+                safeSurfaceWasActive,
+                caveModeActivated,
+                cameraAngleStayedLocked,
+                cameraYawStayedFree,
+                hidden,
+                restored,
+                exactChunkRenderer?.LastSuppressedHeldItemCount ?? 0,
+                renderedEntityCount
+            );
+        }
+    }
+
+    private void RestoreAutomatedSmokeTestPreferences()
+    {
+        if (!automatedSmokeTestPreferencesCaptured) return;
+
+        automatedSmokeTestPreferencesCaptured = false;
+        config.MapLayersEnabled = automatedOriginalMapLayersEnabled;
+        config.CaveModeEnabled = automatedOriginalCaveModeEnabled;
+        config.SearchModeEnabled = automatedOriginalSearchModeEnabled;
+        config.CameraAngleLocked = automatedOriginalCameraAngleLocked;
+        if (!SearchModeActive)
+        {
+            ClearSearch();
+        }
+        if (!config.MapLayersEnabled)
+        {
+            activeMapLayer = AtlasMapLayer.TexturedTerrain;
+            mapLayerTexture.Reset();
+        }
+        SyncSettingsControls();
+        SyncCreativeSettingsControls();
+        saveConfig();
     }
 
     private void ExerciseAutomatedSearchInput()
@@ -665,10 +928,10 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (automatedSmokeTestSearchInputAttempted) return;
 
         automatedSmokeTestSearchInputAttempted = true;
-        GuiElementTextInput? input = overlay?.GetTextInput("search-input");
+        GuiElementTextInput? input = searchPanel?.GetTextInput("search-input");
         bool initiallyUnfocused = input?.HasFocus == false;
         bool focused = input != null
-            && overlay?.FocusElement(input.TabIndex) == true;
+            && searchPanel?.FocusElement(input.TabIndex) == true;
         if (input == null || !focused)
         {
             capi.Logger.Error(
@@ -697,7 +960,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         string enteredQuery = searchController.Query;
         input.SetValue("", true);
         searchController.Clear();
-        overlay?.UnfocusOwnElements();
+        searchPanel?.UnfocusOwnElements();
         bool focusReleased = !input.HasFocus;
         automatedSmokeTestSearchInputPassed = initiallyUnfocused
             && remainedOpen
@@ -729,10 +992,10 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private void UnfocusSearchOutsideInput(MouseEvent args)
     {
-        GuiElementTextInput? input = overlay?.GetTextInput("search-input");
+        GuiElementTextInput? input = searchPanel?.GetTextInput("search-input");
         if (input?.HasFocus == true && !input.IsPositionInside(args.X, args.Y))
         {
-            overlay?.UnfocusOwnElements();
+            searchPanel?.UnfocusOwnElements();
         }
     }
 
@@ -937,11 +1200,14 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     internal void OnWorldLeave()
     {
+        RestoreAutomatedSmokeTestPreferences();
         automatedSmokeTestActive = false;
         automatedSmokeTestElapsedSeconds = 0;
         automatedSmokeTestCompletion = null;
         automatedSmokeTestRequiresUnlockedPitch = false;
         automatedSmokeTestRenderedAtPitchFloor = false;
+        automatedSmokeTestInterfaceControlsAttempted = false;
+        automatedSmokeTestInterfaceControlsPassed = false;
         automatedSmokeTestUnitInspectionAttempted = false;
         automatedSmokeTestUnitInspectionPassed = false;
         automatedSmokeTestSearchInputAttempted = false;
@@ -953,7 +1219,9 @@ public sealed class ModernAtlasDialog : GuiDialog
         AutomatedSmokeTestRenderedExactWorld = false;
         cheatModeEnabled = false;
         settingsModalOpen = false;
+        creativeSettingsModalOpen = false;
         visualLabModalOpen = false;
+        interfaceHidden = false;
         selectedEntityId = null;
         searchController.Clear();
         activeMapLayer = AtlasMapLayer.TexturedTerrain;
@@ -1005,6 +1273,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void Dispose()
     {
+        RestoreAutomatedSmokeTestPreferences();
         automatedSmokeTestActive = false;
         automatedSmokeTestCompletion = null;
         ResumeSingleplayerAfterAtlas();
@@ -1020,8 +1289,16 @@ public sealed class ModernAtlasDialog : GuiDialog
         opacityQuad = null;
         overlay?.Dispose();
         overlay = null;
+        searchPanel?.Dispose();
+        searchPanel = null;
+        mapLayerPanel?.Dispose();
+        mapLayerPanel = null;
+        creativeSettingsShortcut?.Dispose();
+        creativeSettingsShortcut = null;
         settingsModal?.Dispose();
         settingsModal = null;
+        creativeSettingsModal?.Dispose();
+        creativeSettingsModal = null;
         visualLabModal?.Dispose();
         visualLabModal = null;
         unitPanel?.Dispose();
@@ -1033,31 +1310,71 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         ElementBounds root = ElementBounds.Fill;
         double guiWidth = capi.Gui.WindowBounds.InnerWidth / Math.Max(0.5, RuntimeEnv.GUIScale);
+        double actionX = Math.Max(18, guiWidth - 214);
 
         overlay = capi.Gui.CreateCompo("modernatlas-3d", root)
             .AddStaticText(
-                "ModernAtlas 3D",
-                CairoFont.WhiteSmallishText().WithFontSize(26),
-                ElementBounds.Fixed(22, 18, 480, 40)
+                "ModernAtlas",
+                CairoFont.WhiteSmallishText().WithFontSize(22),
+                ElementBounds.Fixed(20, 14, 320, 32)
             )
             .AddStaticText(
                 Lang.Get("modernatlas:controls-help"),
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(24, 58, 900, 34)
+                ElementBounds.Fixed(20, 44, 850, 28)
             )
             .AddDynamicText(
                 "",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(24, 88, 650, 34),
+                ElementBounds.Fixed(20, 70, 720, 28),
                 "status"
             )
+            .AddButton(
+                "Exit",
+                CloseAtlas,
+                ElementBounds.Fixed(actionX, 16, 190, 32),
+                EnumButtonStyle.Normal,
+                "exit-button"
+            )
+            .AddButton(
+                "Settings",
+                OpenSettingsModal,
+                ElementBounds.Fixed(actionX, 54, 190, 32),
+                EnumButtonStyle.Normal,
+                "settings-button"
+            )
+            .AddButton(
+                "Hide UI",
+                HideInterface,
+                ElementBounds.Fixed(actionX, 130, 190, 32),
+                EnumButtonStyle.Normal,
+                "hide-ui-button"
+            )
+            .Compose(false);
+
+        creativeSettingsShortcut = capi.Gui.CreateCompo(
+                "modernatlas-creative-settings-shortcut",
+                ElementBounds.Fill
+            )
+            .AddButton(
+                "Creative/Cheat Settings",
+                OpenCreativeSettingsModal,
+                ElementBounds.Fixed(actionX, 92, 190, 32),
+                EnumButtonStyle.Normal,
+                "creative-settings-button"
+            )
+            .Compose(false);
+
+        ElementBounds searchRoot = ElementBounds.Fixed(18, 104, 540, 76);
+        searchPanel = capi.Gui.CreateCompo("modernatlas-search", searchRoot)
+            .AddShadedDialogBG(ElementBounds.Fixed(0, 0, 540, 76), true)
             .AddStaticText(
                 "Search loaded map",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(24, 128, 140, 30)
+                ElementBounds.Fixed(12, 10, 132, 26)
             )
             .AddTextInput(
-                ElementBounds.Fixed(166, 122, 300, 34),
+                ElementBounds.Fixed(146, 6, 300, 32),
                 OnSearchTextChanged,
                 CairoFont.SmallTextInput().WithColor(ColorUtil.WhiteArgbDouble),
                 "search-input"
@@ -1065,54 +1382,45 @@ public sealed class ModernAtlasDialog : GuiDialog
             .AddButton(
                 "Clear",
                 ClearSearch,
-                ElementBounds.Fixed(478, 122, 76, 34),
+                ElementBounds.Fixed(454, 6, 74, 32),
                 EnumButtonStyle.Normal,
                 "search-clear"
             )
             .AddDynamicText(
                 "",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(24, 162, 760, 30),
+                ElementBounds.Fixed(12, 44, 516, 24),
                 "search-status"
             )
+            .Compose(false);
+        searchPanel.GetTextInput("search-input")?.SetMaxLength(80);
+        searchPanel.GetTextInput("search-input")?.SetPlaceHolderText(
+            "Block, creature, player or dropped item"
+        );
+
+        ElementBounds mapLayerRoot = ElementBounds.Fixed(18, 186, 540, 76);
+        mapLayerPanel = capi.Gui.CreateCompo("modernatlas-map-layer", mapLayerRoot)
+            .AddShadedDialogBG(ElementBounds.Fixed(0, 0, 540, 76), true)
             .AddStaticText(
                 "Map layer",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(24, 202, 140, 30)
+                ElementBounds.Fixed(12, 10, 132, 26)
             )
             .AddDropDown(
                 AtlasMapLayerInfo.Values,
                 AtlasMapLayerInfo.Names,
                 (int)activeMapLayer,
                 OnMapLayerChanged,
-                ElementBounds.Fixed(166, 196, 300, 34),
+                ElementBounds.Fixed(146, 6, 382, 32),
                 "map-layer"
             )
             .AddDynamicText(
                 "",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(24, 236, 760, 30),
+                ElementBounds.Fixed(12, 44, 516, 24),
                 "layer-status"
             )
-            .AddButton(
-                "Exit",
-                CloseAtlas,
-                ElementBounds.Fixed(Math.Max(24, guiWidth - 280), 24, 110, 34),
-                EnumButtonStyle.Normal,
-                "exit-button"
-            )
-            .AddButton(
-                "Settings",
-                OpenSettingsModal,
-                ElementBounds.Fixed(Math.Max(24, guiWidth - 150), 24, 120, 34),
-                EnumButtonStyle.Normal,
-                "settings-button"
-            )
             .Compose(false);
-        overlay.GetTextInput("search-input")?.SetMaxLength(80);
-        overlay.GetTextInput("search-input")?.SetPlaceHolderText(
-            "Block, creature, player or dropped item"
-        );
 
         ElementBounds unitRoot = ElementBounds.Fixed(0, 0, 340, 250)
             .WithAlignment(EnumDialogArea.RightMiddle)
@@ -1140,9 +1448,9 @@ public sealed class ModernAtlasDialog : GuiDialog
             )
             .Compose();
 
-        ElementBounds modalRoot = ElementBounds.Fixed(0, 0, 340, 535)
+        ElementBounds modalRoot = ElementBounds.Fixed(0, 0, 340, 510)
             .WithAlignment(EnumDialogArea.CenterMiddle);
-        ElementBounds modalBackground = ElementBounds.Fixed(0, 0, 340, 535);
+        ElementBounds modalBackground = ElementBounds.Fixed(0, 0, 340, 510);
         settingsModal = capi.Gui.CreateCompo("modernatlas-settings", modalRoot)
             .AddShadedDialogBG(modalBackground, true)
             .AddStaticText(
@@ -1158,13 +1466,25 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "settings-close"
             )
             .AddStaticText(
+                "Map layer",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(20, 59, 180, 26)
+            )
+            .AddSwitch(
+                OnMapLayersToggled,
+                ElementBounds.Fixed(264, 55, 46, 28),
+                "map-layers",
+                24,
+                4
+            )
+            .AddStaticText(
                 capi.IsSinglePlayer ? "Unexplored fog" : "Server fog (locked)",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 65, 180, 28)
+                ElementBounds.Fixed(20, 93, 180, 26)
             )
             .AddSwitch(
                 OnFogToggled,
-                ElementBounds.Fixed(264, 61, 46, 30),
+                ElementBounds.Fixed(264, 89, 46, 28),
                 "fog",
                 24,
                 4
@@ -1172,11 +1492,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             .AddStaticText(
                 "Atlas animations",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 105, 180, 28)
+                ElementBounds.Fixed(20, 127, 180, 26)
             )
             .AddSwitch(
                 OnAnimationsToggled,
-                ElementBounds.Fixed(264, 101, 46, 30),
+                ElementBounds.Fixed(264, 123, 46, 28),
                 "animations",
                 24,
                 4
@@ -1184,11 +1504,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             .AddStaticText(
                 "Live clouds",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 145, 180, 28)
+                ElementBounds.Fixed(20, 161, 180, 26)
             )
             .AddSwitch(
                 OnCloudsToggled,
-                ElementBounds.Fixed(264, 141, 46, 30),
+                ElementBounds.Fixed(264, 157, 46, 28),
                 "clouds",
                 24,
                 4
@@ -1196,11 +1516,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             .AddStaticText(
                 "Living entities",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 185, 180, 28)
+                ElementBounds.Fixed(20, 195, 180, 26)
             )
             .AddSwitch(
                 OnLivingEntitiesToggled,
-                ElementBounds.Fixed(264, 181, 46, 30),
+                ElementBounds.Fixed(264, 191, 46, 28),
                 "entities",
                 24,
                 4
@@ -1208,11 +1528,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             .AddStaticText(
                 "Players",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(40, 225, 160, 28)
+                ElementBounds.Fixed(40, 229, 160, 26)
             )
             .AddSwitch(
                 OnPlayersToggled,
-                ElementBounds.Fixed(264, 221, 46, 30),
+                ElementBounds.Fixed(264, 225, 46, 28),
                 "players",
                 24,
                 4
@@ -1220,11 +1540,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             .AddStaticText(
                 "Animals",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(40, 265, 160, 28)
+                ElementBounds.Fixed(40, 263, 160, 26)
             )
             .AddSwitch(
                 OnAnimalsToggled,
-                ElementBounds.Fixed(264, 261, 46, 30),
+                ElementBounds.Fixed(264, 259, 46, 28),
                 "animals",
                 24,
                 4
@@ -1232,11 +1552,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             .AddStaticText(
                 "Hostile mobs",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(40, 305, 160, 28)
+                ElementBounds.Fixed(40, 297, 160, 26)
             )
             .AddSwitch(
                 OnMobsToggled,
-                ElementBounds.Fixed(264, 301, 46, 30),
+                ElementBounds.Fixed(264, 293, 46, 28),
                 "mobs",
                 24,
                 4
@@ -1244,11 +1564,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             .AddStaticText(
                 "NPCs",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(40, 345, 160, 28)
+                ElementBounds.Fixed(40, 331, 160, 26)
             )
             .AddSwitch(
                 OnNpcsToggled,
-                ElementBounds.Fixed(264, 341, 46, 30),
+                ElementBounds.Fixed(264, 327, 46, 28),
                 "npcs",
                 24,
                 4
@@ -1256,11 +1576,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             .AddStaticText(
                 "Live sun and weather",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 385, 200, 28)
+                ElementBounds.Fixed(20, 365, 200, 26)
             )
             .AddSwitch(
                 OnLiveLightingToggled,
-                ElementBounds.Fixed(264, 381, 46, 30),
+                ElementBounds.Fixed(264, 361, 46, 28),
                 "live-lighting",
                 24,
                 4
@@ -1268,17 +1588,17 @@ public sealed class ModernAtlasDialog : GuiDialog
             .AddStaticText(
                 "Fixed sun hour",
                 CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 425, 140, 28)
+                ElementBounds.Fixed(20, 399, 140, 26)
             )
             .AddSlider(
                 OnFixedSunHourChanged,
-                ElementBounds.Fixed(170, 419, 140, 34),
+                ElementBounds.Fixed(170, 393, 140, 32),
                 "fixed-sun-hour"
             )
             .AddButton(
                 "Atlas visual lab",
                 OpenVisualLab,
-                ElementBounds.Fixed(20, 472, 300, 38),
+                ElementBounds.Fixed(20, 452, 300, 34),
                 EnumButtonStyle.Normal,
                 "visual-lab-open"
             )
@@ -1290,6 +1610,68 @@ public sealed class ModernAtlasDialog : GuiDialog
             1,
             "h"
         );
+
+        ElementBounds creativeRoot = ElementBounds.Fixed(0, 0, 390, 255)
+            .WithAlignment(EnumDialogArea.CenterMiddle);
+        creativeSettingsModal = capi.Gui.CreateCompo(
+                "modernatlas-creative-settings",
+                creativeRoot
+            )
+            .AddShadedDialogBG(ElementBounds.Fixed(0, 0, 390, 255), true)
+            .AddStaticText(
+                "Creative/Cheat Settings",
+                CairoFont.WhiteSmallishText().WithFontSize(20),
+                ElementBounds.Fixed(20, 18, 265, 30)
+            )
+            .AddButton(
+                "Close",
+                CloseCreativeSettingsModal,
+                ElementBounds.Fixed(294, 14, 76, 30),
+                EnumButtonStyle.Normal,
+                "creative-settings-close"
+            )
+            .AddStaticText(
+                "Singleplayer Creative or accepted Cheat Mode only.",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(20, 55, 350, 28)
+            )
+            .AddStaticText(
+                "Cave mode (show underground)",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(20, 101, 270, 28)
+            )
+            .AddSwitch(
+                OnCaveModeToggled,
+                ElementBounds.Fixed(314, 97, 46, 30),
+                "cave-mode",
+                24,
+                4
+            )
+            .AddStaticText(
+                "Search loaded map",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(20, 145, 270, 28)
+            )
+            .AddSwitch(
+                OnSearchModeToggled,
+                ElementBounds.Fixed(314, 141, 46, 30),
+                "search-mode",
+                24,
+                4
+            )
+            .AddStaticText(
+                "Lock camera angle",
+                CairoFont.WhiteDetailText(),
+                ElementBounds.Fixed(20, 189, 270, 28)
+            )
+            .AddSwitch(
+                OnCameraAngleLockToggled,
+                ElementBounds.Fixed(314, 185, 46, 30),
+                "camera-angle-lock",
+                24,
+                4
+            )
+            .Compose(false);
 
         ElementBounds labRoot = ElementBounds.Fixed(0, 0, 430, 440)
             .WithAlignment(EnumDialogArea.CenterMiddle);
@@ -1375,12 +1757,14 @@ public sealed class ModernAtlasDialog : GuiDialog
             .Compose();
         ConfigureVisualLabSliders();
         SyncSettingsControls();
+        SyncCreativeSettingsControls();
     }
 
     private bool OpenSettingsModal()
     {
         ResetPointerDrag();
         visualLabModalOpen = false;
+        creativeSettingsModalOpen = false;
         settingsModalOpen = true;
         SyncSettingsControls();
         return true;
@@ -1389,7 +1773,27 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool CloseSettingsModal()
     {
         settingsModalOpen = false;
+        creativeSettingsModalOpen = false;
         visualLabModalOpen = false;
+        return true;
+    }
+
+    private bool OpenCreativeSettingsModal()
+    {
+        if (!CreativeCheatSettingsAvailable) return true;
+
+        ResetPointerDrag();
+        searchPanel?.UnfocusOwnElements();
+        settingsModalOpen = false;
+        visualLabModalOpen = false;
+        creativeSettingsModalOpen = true;
+        SyncCreativeSettingsControls();
+        return true;
+    }
+
+    private bool CloseCreativeSettingsModal()
+    {
+        creativeSettingsModalOpen = false;
         return true;
     }
 
@@ -1397,6 +1801,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         ResetPointerDrag();
         settingsModalOpen = false;
+        creativeSettingsModalOpen = false;
         visualLabModalOpen = true;
         SyncVisualLabControls();
         return true;
@@ -1670,7 +2075,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool ClearSearch()
     {
         searchController.Clear();
-        GuiElementTextInput? input = overlay?.GetTextInput("search-input");
+        GuiElementTextInput? input = searchPanel?.GetTextInput("search-input");
         if (input != null && input.GetText().Length > 0)
         {
             input.SetValue("", true);
@@ -1679,6 +2084,37 @@ public sealed class ModernAtlasDialog : GuiDialog
     }
 
     private bool CloseAtlas() => TryClose();
+
+    private bool HideInterface()
+    {
+        ResetPointerDrag();
+        searchPanel?.UnfocusOwnElements();
+        selectedEntityId = null;
+        settingsModalOpen = false;
+        creativeSettingsModalOpen = false;
+        visualLabModalOpen = false;
+        interfaceHidden = true;
+        return true;
+    }
+
+    private bool HandleEscape()
+    {
+        if (interfaceHidden)
+        {
+            interfaceHidden = false;
+            lastInterfaceRestoreMilliseconds = capi.ElapsedMilliseconds;
+            ResetPointerDrag();
+            return true;
+        }
+        if (capi.ElapsedMilliseconds - lastInterfaceRestoreMilliseconds < 200)
+        {
+            // Some input paths dispatch both OnKeyDown and OnEscapePressed for
+            // one key stroke. Do not restore the UI and close the atlas from
+            // that same Escape press.
+            return true;
+        }
+        return TryClose();
+    }
 
     private void OnMapLayerChanged(string value, bool selected)
     {
@@ -1700,6 +2136,10 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private void SetMapLayer(AtlasMapLayer layer)
     {
+        if (!config.MapLayersEnabled)
+        {
+            layer = AtlasMapLayer.TexturedTerrain;
+        }
         if (layer.RequiresSpoilerAccess() && !UnitInspectionEnabled)
         {
             layer = AtlasMapLayer.TexturedTerrain;
@@ -1712,7 +2152,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private void SyncMapLayerDropdown()
     {
-        GuiElementDropDown? dropdown = overlay?.GetDropDown("map-layer");
+        GuiElementDropDown? dropdown = mapLayerPanel?.GetDropDown("map-layer");
         if (dropdown == null) return;
 
         synchronizingMapLayerDropdown = true;
@@ -1728,6 +2168,13 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private void PrepareMapLayer()
     {
+        if (!config.MapLayersEnabled)
+        {
+            activeMapLayer = AtlasMapLayer.TexturedTerrain;
+            mapLayerTexture.Reset();
+            SyncMapLayerDropdown();
+            return;
+        }
         mapLayerTexture.Begin(
             activeMapLayer,
             capi.World.Player.Entity.Pos.X,
@@ -1739,6 +2186,8 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private void AdvanceSearch()
     {
+        if (!SearchModeActive) return;
+
         IReadOnlyList<AtlasRenderedEntity> renderedEntities = exactChunkRenderer
             ?.LastRenderedEntities ?? Array.Empty<AtlasRenderedEntity>();
         searchController.Advance(
@@ -1752,7 +2201,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private void RenderSearchMarkers()
     {
-        if (!searchController.HasActiveQuery) return;
+        if (!SearchModeActive || interfaceHidden || !searchController.HasActiveQuery) return;
         EnsureSearchMarkerTexture();
         if (searchMarkerTexture?.TextureId <= 0) return;
 
@@ -1925,7 +2374,10 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         CenterOnPlayer();
         targetYawDegrees = 42;
-        targetPitchDegrees = 72;
+        if (!config.CameraAngleLocked || !CreativeCheatSettingsAvailable)
+        {
+            targetPitchDegrees = 72;
+        }
         FitLoadedTerrain();
     }
 
@@ -1942,6 +2394,19 @@ public sealed class ModernAtlasDialog : GuiDialog
         targetCenterX += x * amount;
         targetCenterZ += z * amount;
         args.Handled = true;
+    }
+
+    private void ApplyRotationDrag(double deltaX, double deltaY)
+    {
+        targetYawDegrees = NormalizeDegrees(targetYawDegrees + (float)deltaX * 0.42f);
+        if (!config.CameraAngleLocked || !CreativeCheatSettingsAvailable)
+        {
+            targetPitchDegrees = Math.Clamp(
+                targetPitchDegrees - (float)deltaY * 0.32f,
+                MinimumPitchDegrees,
+                86
+            );
+        }
     }
 
     private void ResetPointerDrag()
@@ -1999,6 +2464,60 @@ public sealed class ModernAtlasDialog : GuiDialog
         config.FogEnabled = enabled;
         InvalidateFogTexture();
         saveConfig();
+    }
+
+    private void OnMapLayersToggled(bool enabled)
+    {
+        config.MapLayersEnabled = enabled;
+        if (enabled)
+        {
+            if (IsOpened()) PrepareMapLayer();
+        }
+        else
+        {
+            SetMapLayer(AtlasMapLayer.TexturedTerrain);
+        }
+        saveConfig();
+        SyncSettingsControls();
+    }
+
+    private void OnCaveModeToggled(bool enabled)
+    {
+        if (!CreativeCheatSettingsAvailable) return;
+
+        config.CaveModeEnabled = enabled;
+        selectedEntityId = null;
+        PrepareSurfaceSafetyFilter();
+        InvalidateFogTexture();
+        saveConfig();
+        SyncCreativeSettingsControls();
+    }
+
+    private void OnSearchModeToggled(bool enabled)
+    {
+        if (!CreativeCheatSettingsAvailable) return;
+
+        config.SearchModeEnabled = enabled;
+        if (!enabled)
+        {
+            searchPanel?.UnfocusOwnElements();
+            ClearSearch();
+        }
+        saveConfig();
+        SyncCreativeSettingsControls();
+    }
+
+    private void OnCameraAngleLockToggled(bool enabled)
+    {
+        if (!CreativeCheatSettingsAvailable) return;
+
+        config.CameraAngleLocked = enabled;
+        if (enabled)
+        {
+            targetPitchDegrees = pitchDegrees;
+        }
+        saveConfig();
+        SyncCreativeSettingsControls();
     }
 
     private void OnAnimationsToggled(bool enabled)
@@ -2090,6 +2609,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private void SyncSettingsControls()
     {
         if (settingsModal == null) return;
+        settingsModal.GetSwitch("map-layers")?.SetValue(config.MapLayersEnabled);
         settingsModal.GetSwitch("fog")?.SetValue(EffectiveFogEnabled);
         settingsModal.GetSwitch("fog").Enabled = capi.IsSinglePlayer;
         settingsModal.GetSwitch("animations")?.SetValue(config.AnimationsEnabled);
@@ -2103,6 +2623,25 @@ public sealed class ModernAtlasDialog : GuiDialog
         SyncEntityCategorySwitch("animals", config.ShowAnimals, serverPolicy.ShowAnimals);
         SyncEntityCategorySwitch("mobs", config.ShowMobs, serverPolicy.ShowMobs);
         SyncEntityCategorySwitch("npcs", config.ShowNpcs, serverPolicy.ShowNpcs);
+    }
+
+    private void SyncCreativeSettingsControls()
+    {
+        if (creativeSettingsModal == null) return;
+
+        bool available = CreativeCheatSettingsAvailable;
+        creativeSettingsModal.GetSwitch("cave-mode")?.SetValue(
+            available && config.CaveModeEnabled
+        );
+        creativeSettingsModal.GetSwitch("search-mode")?.SetValue(
+            available && config.SearchModeEnabled
+        );
+        creativeSettingsModal.GetSwitch("camera-angle-lock")?.SetValue(
+            available && config.CameraAngleLocked
+        );
+        creativeSettingsModal.GetSwitch("cave-mode").Enabled = available;
+        creativeSettingsModal.GetSwitch("search-mode").Enabled = available;
+        creativeSettingsModal.GetSwitch("camera-angle-lock").Enabled = available;
     }
 
     private void SyncEntityCategorySwitch(string key, bool clientEnabled, bool serverEnabled)

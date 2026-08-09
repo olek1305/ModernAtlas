@@ -23,6 +23,7 @@ internal sealed class AtlasEntityModelRendererAdapter
     private bool disabled;
 
     public IReadOnlyList<AtlasRenderedEntity> LastRenderedEntities => lastRenderedEntities;
+    public int LastSuppressedHeldItemCount { get; private set; }
 
     public AtlasEntityModelRendererAdapter(ICoreClientAPI capi)
     {
@@ -41,6 +42,7 @@ internal sealed class AtlasEntityModelRendererAdapter
         if (disabled || !policy.AnyEntityModels)
         {
             lastRenderedEntities.Clear();
+            LastSuppressedHeldItemCount = 0;
             return 0;
         }
 
@@ -51,16 +53,18 @@ internal sealed class AtlasEntityModelRendererAdapter
             if (entries.Count == 0)
             {
                 lastRenderedEntities.Clear();
+                LastSuppressedHeldItemCount = 0;
                 return 0;
             }
 
+            int suppressedHeldItemCount = 0;
             foreach (RenderEntry entry in entries)
             {
-                entry.HideLocalPlayerHeldItems(capi.World.Player.Entity);
-                entry.Renderer.BeforeRender(deltaTime);
+                if (entry.HideHeldItems()) suppressedHeldItemCount++;
                 entry.ForceThirdPerson(capi.World.Player.Entity);
-                entry.Renderer.DoRender3DOpaque(deltaTime, false);
                 entry.UseThirdPersonAnimator(capi.World.Player.Entity);
+                entry.Renderer.BeforeRender(deltaTime);
+                entry.Renderer.DoRender3DOpaque(deltaTime, false);
             }
 
             IRenderAPI render = capi.Render;
@@ -115,12 +119,14 @@ internal sealed class AtlasEntityModelRendererAdapter
             {
                 lastRenderedEntities.Add(new AtlasRenderedEntity(entry.Entity, entry.Kind));
             }
+            LastSuppressedHeldItemCount = suppressedHeldItemCount;
             return entries.Count;
         }
         catch (Exception exception)
         {
             disabled = true;
             lastRenderedEntities.Clear();
+            LastSuppressedHeldItemCount = 0;
             capi.Logger.Error(
                 "[ModernAtlas] Live 3D entity rendering failed and was disabled for this session: {0}",
                 exception.Message
@@ -247,7 +253,7 @@ internal sealed class AtlasEntityModelRendererAdapter
         private object? savedRenderMode;
         private EntityPlayer? localPlayer;
         private bool savedSelfNowShadowPass;
-        private EntityAgent? localPlayerAgent;
+        private EntityAgent? heldItemAgent;
         private ItemSlot? savedLeftHandItemSlot;
         private ItemSlot? savedRightHandItemSlot;
         private FieldInfo? renderHeldItemField;
@@ -280,25 +286,31 @@ internal sealed class AtlasEntityModelRendererAdapter
             renderModeField.SetValue(Renderer, thirdPerson);
         }
 
-        public void HideLocalPlayerHeldItems(Entity localPlayerEntity)
+        public bool HideHeldItems()
         {
-            if (Entity != localPlayerEntity || Entity is not EntityAgent agent) return;
-
+            bool rendererPathSuppressed = false;
             renderHeldItemField = FindField(Renderer.GetType(), "DoRenderHeldItem");
             if (renderHeldItemField?.FieldType == typeof(bool))
             {
                 savedRenderHeldItem = (bool)(renderHeldItemField.GetValue(Renderer) ?? true);
                 renderHeldItemField.SetValue(Renderer, false);
+                rendererPathSuppressed = true;
             }
-            localPlayerAgent = agent;
+
+            if (Entity is not EntityAgent agent) return rendererPathSuppressed;
+
+            heldItemAgent = agent;
             savedLeftHandItemSlot = agent.LeftHandItemSlot;
             savedRightHandItemSlot = agent.RightHandItemSlot;
-            // The player renderer prepares held-item meshes in BeforeRender.
-            // Atlas camera matrices make the first-person hotbar item appear
-            // detached and camera-relative, so hide both hands only for this
-            // atlas draw and restore the real inventory slot references below.
+            // EntityShapeRenderer prepares held-item meshes in BeforeRender.
+            // Those meshes use camera-sensitive attachment state and can look
+            // detached from their owner in the independent atlas camera. The
+            // atlas intentionally omits every held item, including shields and
+            // modded tools, while retaining the living model itself. Restore
+            // the real inventory slot references after this atlas draw.
             agent.LeftHandItemSlot = new DummySlot();
             agent.RightHandItemSlot = new DummySlot();
+            return true;
         }
 
         public void UseThirdPersonAnimator(Entity localPlayerEntity)
@@ -323,10 +335,10 @@ internal sealed class AtlasEntityModelRendererAdapter
             {
                 localPlayer.selfNowShadowPass = savedSelfNowShadowPass;
             }
-            if (localPlayerAgent != null)
+            if (heldItemAgent != null)
             {
-                localPlayerAgent.LeftHandItemSlot = savedLeftHandItemSlot;
-                localPlayerAgent.RightHandItemSlot = savedRightHandItemSlot;
+                heldItemAgent.LeftHandItemSlot = savedLeftHandItemSlot;
+                heldItemAgent.RightHandItemSlot = savedRightHandItemSlot;
             }
             if (renderHeldItemField != null)
             {
@@ -335,7 +347,7 @@ internal sealed class AtlasEntityModelRendererAdapter
             renderModeField = null;
             savedRenderMode = null;
             localPlayer = null;
-            localPlayerAgent = null;
+            heldItemAgent = null;
             savedLeftHandItemSlot = null;
             savedRightHandItemSlot = null;
             renderHeldItemField = null;

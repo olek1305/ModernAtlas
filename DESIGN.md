@@ -43,10 +43,11 @@ a shader treatment of real geometry, not a generated shell or world block.
 
 ## Search and analysis layers
 
-Search resolves registered block definitions and scans only chunks for which
-the public block accessor already returns client data. It is incremental and
-budgeted; entities are limited to authorized rendered living models, while
-Creative/Cheat dropped-item results use markers instead of the global item
+Loaded-map search is exposed only in singleplayer Creative or a per-world
+accepted Cheat Mode. It resolves registered block definitions and scans only
+chunks for which the public block accessor already returns client data. Work is
+incremental and budgeted; entities are limited to authorized rendered living
+models, while dropped-item results use markers instead of the global item
 renderer.
 
 Climate and land-analysis layers sample only loaded map chunks and regions into

@@ -102,6 +102,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private bool disposed;
 
     public int LastRenderedEntityCount { get; private set; }
+    public int LastSuppressedHeldItemCount =>
+        entityModelRenderer.LastSuppressedHeldItemCount;
     public IReadOnlyList<AtlasRenderedEntity> LastRenderedEntities =>
         entityModelRenderer.LastRenderedEntities;
 

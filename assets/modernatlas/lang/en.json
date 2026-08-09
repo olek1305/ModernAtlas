@@ -1,6 +1,6 @@
 {
   "hotkey-open-map": "Open ModernAtlas 3D atlas",
-  "controls-help": "LMB: pan • RMB: rotate/tilt • wheel: zoom • Space: center on player • M: fog • Home: reset view/fog • G/Esc: close • singleplayer pauses",
+  "controls-help": "Drag: pan / rotate • wheel: zoom • middle: reset • G/Esc: exit • Esc restores hidden UI",
   "status-building": "Building scene: {0}% • {1} blocks",
   "status-ready": "Scene ready • {0} blocks • exact geometry uses only client-available chunks"
 }

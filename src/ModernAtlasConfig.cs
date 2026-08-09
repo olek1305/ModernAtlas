@@ -17,6 +17,10 @@ public sealed class ModernAtlasConfig
     public bool ShowAnimals { get; set; } = true;
     public bool ShowMobs { get; set; } = true;
     public bool ShowNpcs { get; set; } = true;
+    public bool MapLayersEnabled { get; set; } = true;
+    public bool CaveModeEnabled { get; set; } = true;
+    public bool SearchModeEnabled { get; set; } = true;
+    public bool CameraAngleLocked { get; set; }
     public int AtlasExposurePercent { get; set; } = 100;
     public int MapLayerOpacityPercent { get; set; } = 75;
     public int BoundarySoftnessPercent { get; set; } = 100;

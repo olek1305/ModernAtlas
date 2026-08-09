@@ -113,7 +113,9 @@ the product scope when the atlas itself is correct.
   it owns printable hotkeys such as `G`; only `Escape` still closes the atlas.
   Opening the atlas must leave search unfocused, clicking outside the text box
   must release its focus, and an always-visible `Exit` button must close the
-  atlas without depending on keyboard focus.
+  atlas without depending on keyboard focus. A compact `Hide UI` action may
+  conceal all atlas controls for inspection; the first `Escape` restores that
+  UI and a later `Escape` closes the atlas.
 - Draw the full-screen atlas after ordinary mod HUD dialogs so class HUDs,
   clocks and other overlays cannot cover the map.
 
@@ -124,9 +126,10 @@ the product scope when the atlas itself is correct.
   name or player nickname, current and maximum health, category and other
   useful public details. The panel must not advance animation or reveal an
   entity that the atlas was not already allowed to draw.
-- Add an atlas search UI for loaded blocks and, where disclosure permits,
-  loaded players, animals, hostile mobs, NPCs and dropped-item matches. A query
-  such as `chicken` should highlight matching visible results with an outline or
+- In singleplayer Creative or explicitly accepted Cheat Mode, add an optional
+  atlas search UI for loaded blocks and, where disclosure permits, loaded
+  players, animals, hostile mobs, NPCs and dropped-item matches. A query such as
+  `chicken` should highlight matching visible results with an outline or
   restrained emissive marker that remains readable at long atlas distances.
   Search must be incremental, budgeted and limited to client-loaded data; it
   must never request chunks or infer hidden positions.
@@ -240,8 +243,14 @@ the product scope when the atlas itself is correct.
   one-block exterior envelope preserves cliff sides, building walls and floor
   faces near the three-block safety allowance.
 - Singleplayer Creative and accepted Cheat Mode permit a zero-degree pitch
-  floor, unit inspection, dropped-item search and ore-density analysis. The
-  camera never crosses into negative pitch.
+  floor, optional cave and loaded-map search modes, unit inspection,
+  dropped-item search, camera-angle locking and ore-density analysis. The
+  camera never crosses into negative pitch. These controls remain absent in
+  safe Survival and multiplayer modes.
+- Atlas living models never render held items. Temporarily suppress both hand
+  slots and the renderer's held-item path before `BeforeRender`, then restore
+  every entity and renderer field in `finally` so camera-relative shields,
+  tools and modded accessories cannot float over the atlas or alter gameplay.
 - Loaded-data search resolves registered block asset codes incrementally, then
   scans only already loaded chunks under a strict per-frame budget. Entity
   results come only from models already authorized and rendered by the atlas.
@@ -293,10 +302,12 @@ the product scope when the atlas itself is correct.
   are unreliable and may control the wrong window. Reserve real `G`, `Escape`
   and mouse controls for the owner's final visual inspection.
 - The smoke test must exercise exact terrain, stable liquids, the zero-degree
-  Creative pitch, an initially unfocused search box, focused text entry
-  (including typing `G` without closing the atlas), focus release, unit
-  inspection, entity and block search, a climate layer, the Creative/Cheat ore
-  layer, atlas closure and the normal soft-exit path.
+  Creative pitch, the map-layer switch, Creative/Cheat cave, search and
+  camera-angle controls, hidden UI restored by `Escape`, an initially unfocused
+  search box, focused text entry (including typing `G` without closing the
+  atlas), focus release, unit inspection, entity and block search, a climate
+  layer, the Creative/Cheat ore layer, atlas closure and the normal soft-exit
+  path.
   Drive those controls through the dialog's own methods: set the pitch target,
   select a rendered entity, submit search queries, switch map layers and call
   `TryClose`. Schedule the final `ClientPlatform.WindowExit(..., SoftExit)`

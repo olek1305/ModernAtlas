@@ -54,9 +54,10 @@ client-side; an optional server component supplies fog and living-entity policy.
   retaining real cliff sides, building walls and floor faces near the surface;
 - provides Creative/Cheat unit frames for clicked, already rendered living
   models, including name, category, health and loaded public details;
-- searches already loaded blocks and permitted entities incrementally, with
-  visible atlas markers and no distant chunk requests; Creative/Cheat may also
-  search already loaded dropped items without rendering the global item stage;
+- provides loaded-map search only in singleplayer Creative or a per-world
+  accepted Cheat Mode; it searches loaded blocks and permitted entities
+  incrementally with visible markers and no distant chunk requests, while
+  dropped-item matches use markers without invoking the global item stage;
 - offers strongly differentiated fertility, moisture and temperature
   overlays, plus a Creative/Cheat ore-density layer, by colorizing only the
   exact 3D geometry already present in the atlas while retaining its relief;
@@ -64,6 +65,9 @@ client-side; an optional server component supplies fog and living-entity policy.
   registered ore blocks from already loaded chunk columns;
 - includes an atlas-only visual lab under Settings for exposure, layer opacity,
   boundary softness, cave-mask brightness and neutral fog palettes;
+- uses a compact overlay with a normal Settings switch for map-layer controls,
+  a Creative/Cheat-only panel for cave mode, loaded-map search and camera-angle
+  locking, plus a `Hide UI` view that `Escape` restores;
 - forces the unexplored-area mask in multiplayer while using only exact chunk
   data that the server has already sent to the client;
 - can render the game's live animated 3D models for already client-loaded
@@ -78,7 +82,9 @@ Optional living models iterate only `LoadedEntities`, so the atlas
 does not request or receive hidden entity positions. Models use the same world
 depth buffer as terrain and fluids, so walls and fog conceal them. In paused
 singleplayer they hold the pose captured when the atlas opens instead of
-continuing run, walk or gesture animation. The renderer is an
+continuing run, walk or gesture animation. Held items are omitted from every
+atlas living model so camera-sensitive shields, tools and modded accessories
+cannot float separately from their owner. The renderer is an
 isolated 1.22.6 integration. If it is unavailable, ModernAtlas reports the
 failure instead of displaying substitute block models or invented materials.
 There is no persistent ModernAtlas terrain cache; unavailable exact terrain is

@@ -38,8 +38,8 @@ internal sealed class CheatModeConsentDialog : GuiDialog
                 ElementBounds.Fixed(24, 22, 560, 38)
             )
             .AddRichtext(
-                "Cheat Mode allows ModernAtlas to reveal underground caves and ore heatmaps. "
-                    + "This can spoil exploration.\n\n"
+                "Cheat Mode unlocks cave mode, loaded-map search, unit inspection, "
+                    + "dropped-item markers and ore heatmaps. This can spoil exploration.\n\n"
                     + "ModernAtlas still uses only data already available to the client and never "
                     + "requests unexplored chunks. Multiplayer keeps these spoiler layers locked.",
                 CairoFont.WhiteDetailText(),
