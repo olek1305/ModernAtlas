@@ -861,6 +861,15 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         );
         activeLiquidShader.Uniform("maskSize", (float)liquidMaskSize);
         activeLiquidShader.Uniform("chunkSize", (float)GlobalConstants.ChunkSize);
+        activeLiquidShader.Uniform(
+            "disclosureCenterXZ",
+            (float)capi.World.Player.Entity.Pos.X,
+            (float)capi.World.Player.Entity.Pos.Z
+        );
+        activeLiquidShader.Uniform(
+            "disclosureRadius",
+            (float)Math.Max(GlobalConstants.ChunkSize, capi.Settings.Int["viewDistance"])
+        );
         activeLiquidShader.Uniform("atlasSunDirection", atlasSunDirection);
         activeLiquidShader.Uniform("atlasExposure", atlasExposure);
         int blockTexturePixels = capi.Settings.Int["textureSize"];

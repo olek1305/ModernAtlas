@@ -8,6 +8,8 @@ uniform sampler2D loadedChunkMask;
 uniform vec2 maskChunkOrigin;
 uniform float maskSize;
 uniform float chunkSize;
+uniform vec2 disclosureCenterXZ;
+uniform float disclosureRadius;
 uniform vec3 atlasSunDirection;
 uniform float atlasExposure;
 
@@ -25,6 +27,9 @@ layout(location = 0) out vec4 outColor;
 
 void main(void)
 {
+    vec2 disclosureDelta = absoluteWorldXZ - disclosureCenterXZ;
+    if (dot(disclosureDelta, disclosureDelta) > disclosureRadius * disclosureRadius) discard;
+
     vec2 maskCell = floor(absoluteWorldXZ / chunkSize) - maskChunkOrigin;
     if (any(lessThan(maskCell, vec2(0.0)))
         || any(greaterThanEqual(maskCell, vec2(maskSize)))) discard;
