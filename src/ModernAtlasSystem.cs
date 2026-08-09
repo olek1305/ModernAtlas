@@ -24,10 +24,7 @@ public sealed class ModernAtlasSystem : ModSystem
     private IServerNetworkChannel? serverPolicyChannel;
     private IShaderProgram? stableLiquidShader;
     private IShaderProgram? atlasCloudShader;
-    private IShaderProgram? atlasCacheShader;
     private IShaderProgram? atlasOpacityShader;
-    private AtlasSurfaceCache? surfaceCache;
-    private long cacheTickListenerId;
 
     public override bool ShouldLoad(EnumAppSide side) => true;
 
@@ -66,8 +63,6 @@ public sealed class ModernAtlasSystem : ModSystem
             .RegisterMessageType<ModernAtlasServerPolicy>()
             .SetMessageHandler<ModernAtlasServerPolicy>(OnServerPolicyReceived);
         api.Event.LeaveWorld += OnLeaveWorld;
-        api.Event.LevelFinalize += OnLevelFinalize;
-        api.Event.BlockChanged += OnBlockChanged;
 
         if (GetStableLiquidShader() == null)
         {
@@ -77,17 +72,10 @@ public sealed class ModernAtlasSystem : ModSystem
         {
             api.Logger.Error("[ModernAtlas] Failed to compile the atlas cloud shader.");
         }
-        if (GetAtlasCacheShader() == null)
-        {
-            api.Logger.Error("[ModernAtlas] Failed to compile the atlas cache shader.");
-        }
         if (GetAtlasOpacityShader() == null)
         {
             api.Logger.Error("[ModernAtlas] Failed to compile the window opacity shader.");
         }
-
-        surfaceCache = new AtlasSurfaceCache(api, GetAtlasCacheShader);
-        cacheTickListenerId = api.Event.RegisterGameTickListener(OnCacheTick, 250);
 
         dialog = new ModernAtlasDialog(
             api,
@@ -96,9 +84,7 @@ public sealed class ModernAtlasSystem : ModSystem
             SaveConfig,
             GetStableLiquidShader,
             GetAtlasCloudShader,
-            GetAtlasOpacityShader,
-            surfaceCache,
-            ClearCacheOnly
+            GetAtlasOpacityShader
         );
 
         api.Input.RegisterHotKey(
@@ -125,12 +111,6 @@ public sealed class ModernAtlasSystem : ModSystem
         if (clientApi != null)
         {
             clientApi.Event.LeaveWorld -= OnLeaveWorld;
-            clientApi.Event.LevelFinalize -= OnLevelFinalize;
-            clientApi.Event.BlockChanged -= OnBlockChanged;
-            if (cacheTickListenerId != 0)
-            {
-                clientApi.Event.UnregisterGameTickListener(cacheTickListenerId);
-            }
         }
         if (serverApi != null)
         {
@@ -138,11 +118,8 @@ public sealed class ModernAtlasSystem : ModSystem
         }
         dialog?.Dispose();
         dialog = null;
-        surfaceCache?.Dispose();
-        surfaceCache = null;
         stableLiquidShader = null;
         atlasCloudShader = null;
-        atlasCacheShader = null;
         atlasOpacityShader = null;
         clientApi = null;
         serverApi = null;
@@ -174,30 +151,9 @@ public sealed class ModernAtlasSystem : ModSystem
         );
     }
 
-    private bool ClearCacheOnly(int viewDistanceBlocks)
-    {
-        return surfaceCache?.Clear() ?? true;
-    }
-
     private void OnLeaveWorld()
     {
         serverPolicy.ResetToSafeDefaults();
-        surfaceCache?.LeaveWorld();
-    }
-
-    private void OnLevelFinalize()
-    {
-        surfaceCache?.InitializeWorld();
-    }
-
-    private void OnBlockChanged(Vintagestory.API.MathTools.BlockPos position, Block? oldBlock)
-    {
-        surfaceCache?.MarkDirty(position);
-    }
-
-    private void OnCacheTick(float deltaTime)
-    {
-        surfaceCache?.Tick(deltaTime);
     }
 
     private IShaderProgram? GetStableLiquidShader()
@@ -231,23 +187,6 @@ public sealed class ModernAtlasSystem : ModSystem
         if (!program.Compile()) return null;
 
         atlasCloudShader = program;
-        return program;
-    }
-
-    private IShaderProgram? GetAtlasCacheShader()
-    {
-        if (atlasCacheShader != null && !atlasCacheShader.Disposed)
-        {
-            return atlasCacheShader;
-        }
-        if (clientApi == null) return null;
-
-        IShaderProgram program = clientApi.Shader.NewShaderProgram();
-        program.AssetDomain = "modernatlas";
-        clientApi.Shader.RegisterFileShaderProgram("atlascache", program);
-        if (!program.Compile()) return null;
-
-        atlasCacheShader = program;
         return program;
     }
 

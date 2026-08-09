@@ -30,7 +30,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private readonly VolumetricCloudRendererAdapter? cloudRenderer;
     private readonly AtlasEntityModelRendererAdapter entityModelRenderer;
     private readonly Func<IShaderProgram?> stableLiquidShaderProvider;
-    private readonly AtlasSurfaceCache surfaceCache;
     private readonly MethodInfo renderOpaque;
     private readonly MethodInfo renderOit;
     private readonly MethodInfo renderAfterOit;
@@ -75,7 +74,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         object afterOitRenderer,
         VolumetricCloudRendererAdapter? cloudRenderer,
         Func<IShaderProgram?> stableLiquidShaderProvider,
-        AtlasSurfaceCache surfaceCache,
         MethodInfo renderOpaque,
         MethodInfo renderOit,
         MethodInfo renderAfterOit,
@@ -107,7 +105,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         this.cloudRenderer = cloudRenderer;
         entityModelRenderer = new AtlasEntityModelRendererAdapter(capi);
         this.stableLiquidShaderProvider = stableLiquidShaderProvider;
-        this.surfaceCache = surfaceCache;
         this.renderOpaque = renderOpaque;
         this.renderOit = renderOit;
         this.renderAfterOit = renderAfterOit;
@@ -133,8 +130,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     public static ExactChunkRendererAdapter? TryCreate(
         ICoreClientAPI capi,
         Func<IShaderProgram?> stableLiquidShaderProvider,
-        Func<IShaderProgram?> atlasCloudShaderProvider,
-        AtlasSurfaceCache surfaceCache
+        Func<IShaderProgram?> atlasCloudShaderProvider
     )
     {
         if (!GameVersion.ShortGameVersion.StartsWith(SupportedVersion, StringComparison.Ordinal))
@@ -265,7 +261,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 afterOitRenderer,
                 cloudRenderer,
                 stableLiquidShaderProvider,
-                surfaceCache,
                 opaque,
                 oit,
                 afterOit,
@@ -474,13 +469,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
 
             render.PMatrix.Push(projectionDouble);
             projectionPushed = true;
-            surfaceCache.Render(
-                projection,
-                cullingView,
-                centerX,
-                centerZ,
-                viewDistanceBlocks
-            );
             render.CurrentActiveShader?.Stop();
             renderOpaque.Invoke(chunkRenderer, new object[] { deltaTime });
             LastRenderedEntityCount = entityModelRenderer.Render(

@@ -28,8 +28,6 @@ public sealed class ModernAtlasDialog : GuiDialog
     private readonly Func<IShaderProgram?> stableLiquidShaderProvider;
     private readonly Func<IShaderProgram?> atlasCloudShaderProvider;
     private readonly Func<IShaderProgram?> atlasOpacityShaderProvider;
-    private readonly AtlasSurfaceCache surfaceCache;
-    private readonly System.Func<int, bool> clearCache;
 
     private GuiComposer? overlay;
     private GuiComposer? settingsModal;
@@ -93,9 +91,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         Action saveConfig,
         Func<IShaderProgram?> stableLiquidShaderProvider,
         Func<IShaderProgram?> atlasCloudShaderProvider,
-        Func<IShaderProgram?> atlasOpacityShaderProvider,
-        AtlasSurfaceCache surfaceCache,
-        System.Func<int, bool> clearCache
+        Func<IShaderProgram?> atlasOpacityShaderProvider
     ) : base(capi)
     {
         this.config = config;
@@ -104,8 +100,6 @@ public sealed class ModernAtlasDialog : GuiDialog
         this.stableLiquidShaderProvider = stableLiquidShaderProvider;
         this.atlasCloudShaderProvider = atlasCloudShaderProvider;
         this.atlasOpacityShaderProvider = atlasOpacityShaderProvider;
-        this.surfaceCache = surfaceCache;
-        this.clearCache = clearCache;
         RefreshVisibleEntityPolicy();
         ComposeOverlay();
     }
@@ -123,8 +117,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         exactChunkRenderer ??= ExactChunkRendererAdapter.TryCreate(
             capi,
             stableLiquidShaderProvider,
-            atlasCloudShaderProvider,
-            surfaceCache
+            atlasCloudShaderProvider
         );
         centerX = capi.World.Player.Entity.Pos.X;
         centerZ = capi.World.Player.Entity.Pos.Z;
@@ -184,12 +177,11 @@ public sealed class ModernAtlasDialog : GuiDialog
                 : "living models blocked by server";
         string multiplayerStatus = capi.IsSinglePlayer ? "singleplayer controls" : "multiplayer safe limits locked";
         string pauseStatus = capi.IsSinglePlayer ? "game paused" : "live server";
-        string status = $"Game view distance {GameViewDistance} blocks • {surfaceCache.Status} • {fogStatus} • {lightingStatus} • {animationStatus} • {cloudStatus} • {entityStatus} • exterior surface • {pauseStatus} • {multiplayerStatus} • {rendererStatus} • no distant chunk requests";
+        string status = $"Game view distance {GameViewDistance} blocks • {fogStatus} • {lightingStatus} • {animationStatus} • {cloudStatus} • {entityStatus} • exterior surface • {pauseStatus} • {multiplayerStatus} • {rendererStatus} • no distant chunk requests";
         overlay?.GetDynamicText("status").SetNewText(status);
         overlay?.Render(deltaTime);
         if (settingsModalOpen)
         {
-            settingsModal?.GetDynamicText("cache-status")?.SetNewText(surfaceCache.Status);
             settingsModal?.Render(deltaTime);
         }
     }
@@ -456,9 +448,9 @@ public sealed class ModernAtlasDialog : GuiDialog
             )
             .Compose();
 
-        ElementBounds modalRoot = ElementBounds.Fixed(0, 0, 340, 610)
+        ElementBounds modalRoot = ElementBounds.Fixed(0, 0, 340, 490)
             .WithAlignment(EnumDialogArea.CenterMiddle);
-        ElementBounds modalBackground = ElementBounds.Fixed(0, 0, 340, 610);
+        ElementBounds modalBackground = ElementBounds.Fixed(0, 0, 340, 490);
         settingsModal = capi.Gui.CreateCompo("modernatlas-settings", modalRoot)
             .AddShadedDialogBG(modalBackground, true)
             .AddStaticText(
@@ -590,24 +582,6 @@ public sealed class ModernAtlasDialog : GuiDialog
                 OnFixedSunHourChanged,
                 ElementBounds.Fixed(170, 419, 140, 34),
                 "fixed-sun-hour"
-            )
-            .AddStaticText(
-                "Map cache",
-                CairoFont.WhiteSmallishText(),
-                ElementBounds.Fixed(20, 480, 180, 28)
-            )
-            .AddDynamicText(
-                "",
-                CairoFont.WhiteDetailText(),
-                ElementBounds.Fixed(20, 509, 300, 28),
-                "cache-status"
-            )
-            .AddButton(
-                "Clear cache",
-                () => clearCache(GameViewDistance),
-                ElementBounds.Fixed(20, 548, 140, 34),
-                EnumButtonStyle.Normal,
-                "cache-clear"
             )
             .Compose();
         settingsModal.GetSlider("fixed-sun-hour")?.SetValues(
@@ -828,7 +802,6 @@ public sealed class ModernAtlasDialog : GuiDialog
     private void SyncSettingsControls()
     {
         if (settingsModal == null) return;
-        settingsModal.GetDynamicText("cache-status")?.SetNewText(surfaceCache.Status);
         settingsModal.GetSwitch("fog")?.SetValue(EffectiveFogEnabled);
         settingsModal.GetSwitch("fog").Enabled = capi.IsSinglePlayer;
         settingsModal.GetSwitch("animations")?.SetValue(config.AnimationsEnabled);
