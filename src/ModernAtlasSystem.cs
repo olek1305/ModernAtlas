@@ -183,7 +183,6 @@ public sealed class ModernAtlasSystem : ModSystem
     {
         serverPolicy.ResetToSafeDefaults();
         surfaceCache?.LeaveWorld();
-        dialog?.OnServerPolicyChanged();
     }
 
     private void OnLevelFinalize()
