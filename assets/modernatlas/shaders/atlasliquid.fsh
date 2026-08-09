@@ -8,6 +8,8 @@ uniform sampler2D loadedChunkMask;
 uniform vec2 maskChunkOrigin;
 uniform float maskSize;
 uniform float chunkSize;
+uniform vec3 atlasSunDirection;
+uniform float atlasExposure;
 
 in vec2 uv;
 in vec2 uvSize;
@@ -65,6 +67,12 @@ void main(void)
         // while matching the neutral, shaded appearance of its container.
         color.rgb *= 0.58;
         color.a *= 0.78;
+    }
+    if (!isLava)
+    {
+        float topLight = mix(0.55, 1.0, clamp(atlasSunDirection.y, 0.0, 1.0));
+        float exposure = mix(0.14, 1.0, clamp(atlasExposure, 0.0, 1.0));
+        color.rgb *= topLight * exposure;
     }
     // Preserve the source texture's authored water alpha. Lava is natively
     // opaque. Geometry remains stable because no camera-dependent vertex warp

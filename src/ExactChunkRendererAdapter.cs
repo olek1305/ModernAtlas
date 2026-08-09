@@ -61,6 +61,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private int liquidMaskOriginZ;
     private int liquidMaskSize;
     private long lastLiquidMaskUpdateMilliseconds;
+    private Vec3f atlasSunDirection = new(-0.34f, 0.86f, -0.38f);
+    private float atlasExposure = 1f;
 
     public int LastRenderedEntityCount { get; private set; }
 
@@ -367,7 +369,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 fixedSunHour,
                 savedAmbientColor,
                 savedSceneBrightness,
-                savedLightPosition
+                savedLightPosition,
+                savedSkyDaylight
             );
             shaderUniforms.CameraUnderwater = 0;
             shaderUniforms.FogSphereQuantity = 0;
@@ -378,20 +381,15 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             shaderUniforms.GlobalWorldWarp = 0;
             shaderUniforms.PerceptionEffectIntensity = 0;
             shaderUniforms.PointLightsCount = 0;
-            // Shadow maps were rendered for the normal player camera. Reusing
-            // them from the elevated orthographic atlas eye produces a dark
-            // square per chunk, especially around dusk. Keep only the stock
-            // normal-based directional shading with a fixed atlas light.
+            // The world's shadow map belongs to the normal perspective camera.
+            // Sampling it from the atlas camera causes invalid GL operations
+            // and severe frame drops. Keep native directional daylight, but
+            // disable only that camera-dependent shadow texture in the atlas.
             shaderUniforms.DropShadowIntensity = 0;
             // The atlas uses either the live game sun/weather state or a
             // deterministic fixed-hour direction selected in Settings.
-            // RenderOpaque also feeds the current sky daylight and sunset
-            // state into the chunk shader. Around dusk its haxy-fade branch
-            // blends loaded pools with the changing sky color, which exposes
-            // pool/chunk boundaries even with shadow maps disabled. A zero
-            // daylight value makes that branch retain the terrain color.
-            skyDaylightUniformField.SetValue(shaderUniforms, 0f);
-            shaderUniforms.SunsetMod = 0;
+            // Keep the game's sky-daylight and sunset inputs so atlas terrain
+            // follows the native time-of-day color without sampling shadows.
 
             // The dialog supplies either live render-only counters or one
             // captured frame when atlas animations are paused. Restore the
@@ -568,7 +566,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         int fixedSunHour,
         Vec3f liveAmbientColor,
         float liveSceneBrightness,
-        Vec3f liveLightPosition
+        Vec3f liveLightPosition,
+        float liveSkyDaylight
     )
     {
         if (liveLightingEnabled)
@@ -576,6 +575,12 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             ambientColorProperty.SetValue(ambient, liveAmbientColor);
             ambientSceneBrightnessProperty.SetValue(ambient, liveSceneBrightness);
             shaderUniforms.LightPosition3D = liveLightPosition;
+            atlasSunDirection = liveLightPosition;
+            atlasExposure = Math.Clamp(
+                liveSkyDaylight * Math.Max(0.2f, liveSceneBrightness),
+                0.08f,
+                1f
+            );
             return;
         }
 
@@ -589,6 +594,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             lightY,
             MathF.Sin(azimuth) * horizontal
         );
+        atlasSunDirection = shaderUniforms.LightPosition3D;
+        atlasExposure = daylight;
         ambientColorProperty.SetValue(
             ambient,
             new Vec3f(
@@ -788,6 +795,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         );
         activeLiquidShader.Uniform("maskSize", (float)liquidMaskSize);
         activeLiquidShader.Uniform("chunkSize", (float)GlobalConstants.ChunkSize);
+        activeLiquidShader.Uniform("atlasSunDirection", atlasSunDirection);
+        activeLiquidShader.Uniform("atlasExposure", atlasExposure);
         int blockTexturePixels = capi.Settings.Int["textureSize"];
         if (blockTexturePixels <= 0) blockTexturePixels = 32;
         float atlasPixels = capi.BlockTextureAtlas.Size.Width;
