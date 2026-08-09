@@ -14,7 +14,8 @@ namespace ModernAtlas;
 /// </summary>
 public sealed class ModernAtlasDialog : GuiDialog
 {
-    private const float MinimumPitchDegrees = 20;
+    private const float StandardMinimumPitchDegrees = 20;
+    private const float UnlockedMinimumPitchDegrees = 0;
     private const int DefaultViewDistance = 500;
     private const int MaximumGameViewDistance = 1536;
     private const int FogTextureDownsample = 4;
@@ -65,6 +66,13 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool loggedEntityModels;
     private bool cheatModeEnabled;
     private bool preparingSurfaceFilter;
+    private bool automatedSmokeTestActive;
+    private float automatedSmokeTestElapsedSeconds;
+    private Action<bool>? automatedSmokeTestCompletion;
+    private bool automatedSmokeTestRequiresUnlockedPitch;
+    private bool automatedSmokeTestRenderedAtPitchFloor;
+
+    internal bool AutomatedSmokeTestRenderedExactWorld { get; private set; }
 
     private int GameViewDistance
     {
@@ -80,6 +88,11 @@ public sealed class ModernAtlasDialog : GuiDialog
         ? config.FogEnabled
         : serverPolicy.FogEnabled;
     private bool SurfaceSafetyEnabled => !capi.IsSinglePlayer || !cheatModeEnabled;
+    private bool HasUnlockedCameraPitch => cheatModeEnabled
+        || capi.World.Player.WorldData.CurrentGameMode == EnumGameMode.Creative;
+    private float MinimumPitchDegrees => HasUnlockedCameraPitch
+        ? UnlockedMinimumPitchDegrees
+        : StandardMinimumPitchDegrees;
 
     public override string ToggleKeyCombinationCode => "modernatlas-open";
     public override EnumDialogType DialogType => EnumDialogType.HUD;
@@ -131,6 +144,16 @@ public sealed class ModernAtlasDialog : GuiDialog
         targetCenterZ = centerZ;
         targetYawDegrees = yawDegrees;
         targetPitchDegrees = pitchDegrees;
+        ClampPitchToAccessLevel(true);
+        if (automatedSmokeTestActive && HasUnlockedCameraPitch)
+        {
+            automatedSmokeTestRequiresUnlockedPitch = true;
+            targetPitchDegrees = UnlockedMinimumPitchDegrees;
+            pitchDegrees = UnlockedMinimumPitchDegrees;
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated smoke test is exercising the unlocked 0-degree camera pitch."
+            );
+        }
         FocusOnExteriorSurface();
         FitLoadedTerrain();
         zoom = targetZoom;
@@ -153,6 +176,15 @@ public sealed class ModernAtlasDialog : GuiDialog
             capi.Logger.Notification("[ModernAtlas] First 3D atlas GUI frame rendered.");
         }
         bool rendered = RenderLiveWorld(deltaTime);
+        if (rendered && automatedSmokeTestActive)
+        {
+            AutomatedSmokeTestRenderedExactWorld = true;
+            if (automatedSmokeTestRequiresUnlockedPitch
+                && pitchDegrees <= UnlockedMinimumPitchDegrees + 0.01f)
+            {
+                automatedSmokeTestRenderedAtPitchFloor = true;
+            }
+        }
         if (rendered && !loggedEntityModels && visibleEntityPolicy.AnyEntityModels)
         {
             loggedEntityModels = true;
@@ -197,6 +229,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         {
             settingsModal?.Render(deltaTime);
         }
+        AdvanceAutomatedSmokeTest();
     }
 
     public override void OnMouseDown(MouseEvent args)
@@ -419,13 +452,107 @@ public sealed class ModernAtlasDialog : GuiDialog
     public void SetCheatMode(bool enabled)
     {
         cheatModeEnabled = capi.IsSinglePlayer && enabled;
+        ClampPitchToAccessLevel(!IsOpened());
         if (!IsOpened()) return;
 
         PrepareSurfaceSafetyFilter();
     }
 
+    private void ClampPitchToAccessLevel(bool immediate)
+    {
+        float minimumPitch = MinimumPitchDegrees;
+        targetPitchDegrees = Math.Clamp(targetPitchDegrees, minimumPitch, 86);
+        if (immediate)
+        {
+            pitchDegrees = Math.Clamp(pitchDegrees, minimumPitch, 86);
+        }
+    }
+
+    internal void BeginAutomatedSmokeTest(Action<bool> completion)
+    {
+        automatedSmokeTestActive = true;
+        automatedSmokeTestElapsedSeconds = 0;
+        automatedSmokeTestCompletion = completion;
+        automatedSmokeTestRequiresUnlockedPitch = false;
+        automatedSmokeTestRenderedAtPitchFloor = false;
+        AutomatedSmokeTestRenderedExactWorld = false;
+    }
+
+    private void AdvanceAutomatedSmokeTest()
+    {
+        if (!automatedSmokeTestActive) return;
+
+        automatedSmokeTestElapsedSeconds += atlasRealDeltaTime;
+        if (automatedSmokeTestElapsedSeconds < 8f) return;
+
+        automatedSmokeTestActive = false;
+        Action<bool>? completion = automatedSmokeTestCompletion;
+        automatedSmokeTestCompletion = null;
+        bool passed = AutomatedSmokeTestRenderedExactWorld
+            && (!automatedSmokeTestRequiresUnlockedPitch
+                || automatedSmokeTestRenderedAtPitchFloor);
+        completion?.Invoke(passed);
+    }
+
+    internal void OnWorldLeave()
+    {
+        automatedSmokeTestActive = false;
+        automatedSmokeTestElapsedSeconds = 0;
+        automatedSmokeTestCompletion = null;
+        automatedSmokeTestRequiresUnlockedPitch = false;
+        automatedSmokeTestRenderedAtPitchFloor = false;
+        AutomatedSmokeTestRenderedExactWorld = false;
+        cheatModeEnabled = false;
+        settingsModalOpen = false;
+        preparingSurfaceFilter = false;
+        ResetPointerDrag();
+
+        if (IsOpened())
+        {
+            try
+            {
+                TryClose();
+            }
+            catch (Exception exception)
+            {
+                capi.Logger.Warning(
+                    "[ModernAtlas] Could not close the atlas normally while leaving the world: {0}",
+                    exception.Message
+                );
+                ResumeSingleplayerAfterAtlas();
+            }
+        }
+        else
+        {
+            ResumeSingleplayerAfterAtlas();
+        }
+
+        try
+        {
+            exactChunkRenderer?.Dispose();
+        }
+        catch (Exception exception)
+        {
+            capi.Logger.Warning(
+                "[ModernAtlas] World-specific renderer cleanup completed with a recoverable error: {0}",
+                exception.Message
+            );
+        }
+        finally
+        {
+            exactChunkRenderer = null;
+        }
+        surfaceHeightTexture.Reset();
+        InvalidateFogTexture();
+        capi.Logger.Notification(
+            "[ModernAtlas] Released world-specific atlas rendering resources."
+        );
+    }
+
     public override void Dispose()
     {
+        automatedSmokeTestActive = false;
+        automatedSmokeTestCompletion = null;
         ResumeSingleplayerAfterAtlas();
         exactChunkRenderer?.Dispose();
         exactChunkRenderer = null;

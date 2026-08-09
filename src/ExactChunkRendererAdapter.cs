@@ -25,6 +25,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private const string AtlasFilterMarker = "// MODERNATLAS_SURFACE_AND_BOUNDARY_FILTER";
     private const int CaveFilterTextureUnit = 12;
     private const float VisibleSubsurfaceDepth = 3f;
+    private static readonly Vec3f CaveConcealmentColor = new(0.24f, 0.25f, 0.25f);
 
     private static readonly EnumShaderProgram[] AtlasFilterPrograms =
     {
@@ -818,6 +819,13 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 capi.Render.CurrentActiveShader?.Stop();
                 shader.Use();
                 shader.Uniform("atlasHideCaves", hideUndergroundCaves ? 1 : 0);
+                if (shader.HasUniform("atlasCaveConcealmentColor"))
+                {
+                    shader.Uniform(
+                        "atlasCaveConcealmentColor",
+                        CaveConcealmentColor
+                    );
+                }
                 if (hideUndergroundCaves && surfaceHeightTexture != null)
                 {
                     shader.BindTexture2D(
@@ -1040,6 +1048,26 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     }
 """
             : "";
+        string caveFilterCode = supportsBoundaryColor
+            ? """
+    if (atlasHideCaves > 0
+        && modernAtlasBelowSurface(modernAtlasAbsoluteWorldPosition))
+    {
+        // Keep the nearest real opaque face in the depth buffer, but replace
+        // its underground material with a quiet neutral mask. This closes
+        // distracting cave-mouth voids without generating a wall or cache.
+        modernAtlasOriginalMain();
+        outColor = vec4(atlasCaveConcealmentColor, 1.0);
+        return;
+    }
+"""
+            : """
+    if (atlasHideCaves > 0
+        && modernAtlasBelowSurface(modernAtlasAbsoluteWorldPosition))
+    {
+        discard;
+    }
+""";
 
         return renamed + """
 
@@ -1050,6 +1078,7 @@ uniform vec2 atlasSurfaceOriginXZ;
 uniform float atlasSurfaceSampleSize;
 uniform float atlasVisibleSubsurfaceDepth;
 uniform vec3 atlasWorldOffset;
+uniform vec3 atlasCaveConcealmentColor;
 uniform int atlasBoundaryEnabled;
 uniform vec2 atlasDisclosureCenterXZ;
 uniform float atlasDisclosureRadius;
@@ -1104,11 +1133,7 @@ void main()
     {
         discard;
     }
-    if (atlasHideCaves > 0
-        && modernAtlasBelowSurface(modernAtlasAbsoluteWorldPosition))
-    {
-        discard;
-    }
+""" + caveFilterCode + """
     modernAtlasOriginalMain();
 """ + boundaryColorCode + """
 }

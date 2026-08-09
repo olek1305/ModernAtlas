@@ -1,3 +1,5 @@
+using System;
+using System.Reflection;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Config;
@@ -14,6 +16,7 @@ public sealed class ModernAtlasSystem : ModSystem
     private const string ConfigFileName = "ModernAtlas.json";
     private const string ServerConfigFileName = "ModernAtlasServer.json";
     private const string PolicyChannelName = "modernatlas-policy";
+    private const string SmokeTestEnvironmentVariable = "MODERNATLAS_SMOKE_TEST";
 
     private ModernAtlasDialog? dialog;
     private ICoreClientAPI? clientApi;
@@ -27,6 +30,7 @@ public sealed class ModernAtlasSystem : ModSystem
     private IShaderProgram? atlasOpacityShader;
     private CheatModeConsentDialog? cheatModeDialog;
     private string? activeWorldIdentifier;
+    private int worldSessionGeneration;
 
     public override bool ShouldLoad(EnumAppSide side) => true;
 
@@ -167,11 +171,12 @@ public sealed class ModernAtlasSystem : ModSystem
 
     private void OnLeaveWorld()
     {
+        worldSessionGeneration++;
         cheatModeDialog?.CancelWithoutDecision();
         cheatModeDialog?.Dispose();
         cheatModeDialog = null;
         activeWorldIdentifier = null;
-        dialog?.SetCheatMode(false);
+        dialog?.OnWorldLeave();
         serverPolicy.ResetToSafeDefaults();
     }
 
@@ -182,6 +187,7 @@ public sealed class ModernAtlasSystem : ModSystem
         string worldIdentifier = clientApi.World.SavegameIdentifier;
         if (string.IsNullOrWhiteSpace(worldIdentifier)) return;
 
+        int sessionGeneration = ++worldSessionGeneration;
         activeWorldIdentifier = worldIdentifier;
         cheatModeDialog?.CancelWithoutDecision();
         cheatModeDialog?.Dispose();
@@ -193,6 +199,12 @@ public sealed class ModernAtlasSystem : ModSystem
         if (!clientApi.IsSinglePlayer)
         {
             dialog?.SetCheatMode(false);
+            if (AutomatedSmokeTestEnabled)
+            {
+                clientApi.Logger.Warning(
+                    "[ModernAtlas] Automated smoke test skipped because it is restricted to singleplayer."
+                );
+            }
             return;
         }
 
@@ -203,14 +215,163 @@ public sealed class ModernAtlasSystem : ModSystem
                 "[ModernAtlas] Restored the saved spoiler mode for this world: {0}.",
                 enabled ? "Cheat Mode enabled" : "caves hidden"
             );
+        }
+        else
+        {
+            dialog?.SetCheatMode(false);
+            if (!AutomatedSmokeTestEnabled)
+            {
+                clientApi.Event.RegisterCallback(
+                    _ => OpenCheatModeConsent(worldIdentifier),
+                    350
+                );
+            }
+        }
+
+        if (AutomatedSmokeTestEnabled)
+        {
+            ScheduleAutomatedSmokeTest(worldIdentifier, sessionGeneration);
+        }
+    }
+
+    private bool AutomatedSmokeTestEnabled => string.Equals(
+        Environment.GetEnvironmentVariable(SmokeTestEnvironmentVariable),
+        "1",
+        StringComparison.Ordinal
+    );
+
+    private void ScheduleAutomatedSmokeTest(string worldIdentifier, int sessionGeneration)
+    {
+        clientApi?.Logger.Notification(
+            "[ModernAtlas] Automated smoke test scheduled for the loaded singleplayer world."
+        );
+        clientApi?.Event.RegisterCallback(
+            _ => OpenAtlasForAutomatedSmokeTest(worldIdentifier, sessionGeneration),
+            2500
+        );
+    }
+
+    private void OpenAtlasForAutomatedSmokeTest(
+        string worldIdentifier,
+        int sessionGeneration
+    )
+    {
+        if (clientApi == null
+            || dialog == null
+            || !clientApi.IsSinglePlayer
+            || activeWorldIdentifier != worldIdentifier
+            || worldSessionGeneration != sessionGeneration)
+        {
             return;
         }
 
-        dialog?.SetCheatMode(false);
-        clientApi.Event.RegisterCallback(
-            _ => OpenCheatModeConsent(worldIdentifier),
-            350
+        dialog.BeginAutomatedSmokeTest(
+            passed => FinishAutomatedSmokeTest(
+                worldIdentifier,
+                sessionGeneration,
+                passed
+            )
         );
+        if (!dialog.TryOpen())
+        {
+            clientApi.Logger.Error(
+                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: the atlas dialog could not be opened."
+            );
+            return;
+        }
+
+        clientApi.Logger.Notification(
+            "[ModernAtlas] Automated smoke test opened the atlas without keyboard input."
+        );
+    }
+
+    private void FinishAutomatedSmokeTest(
+        string worldIdentifier,
+        int sessionGeneration,
+        bool passed
+    )
+    {
+        if (clientApi == null
+            || dialog == null
+            || activeWorldIdentifier != worldIdentifier
+            || worldSessionGeneration != sessionGeneration)
+        {
+            return;
+        }
+
+        if (passed)
+        {
+            clientApi.Logger.Notification(
+                "[ModernAtlas] AUTOMATED SMOKE TEST PASSED: exact terrain rendered and the atlas is closing cleanly."
+            );
+        }
+        else
+        {
+            clientApi.Logger.Error(
+                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: exact terrain did not render before timeout."
+            );
+        }
+
+        if (dialog.IsOpened())
+        {
+            dialog.TryClose();
+        }
+
+        clientApi.Event.RegisterCallback(
+            _ => ExitWorldForAutomatedSmokeTest(worldIdentifier, sessionGeneration),
+            1000
+        );
+    }
+
+    private void ExitWorldForAutomatedSmokeTest(
+        string worldIdentifier,
+        int sessionGeneration
+    )
+    {
+        if (clientApi == null
+            || activeWorldIdentifier != worldIdentifier
+            || worldSessionGeneration != sessionGeneration)
+        {
+            return;
+        }
+
+        try
+        {
+            const BindingFlags instanceFlags = BindingFlags.Instance
+                | BindingFlags.Public
+                | BindingFlags.NonPublic;
+            object game = clientApi.GetType().GetField("game", instanceFlags)?.GetValue(clientApi)
+                ?? throw new InvalidOperationException("Client game instance is unavailable.");
+            object runningGame = game.GetType().GetField(
+                "ScreenRunningGame",
+                instanceFlags
+            )?.GetValue(game)
+                ?? throw new InvalidOperationException("Running-game screen is unavailable.");
+            MethodInfo exitOrRedirect = runningGame.GetType().GetMethod(
+                "ExitOrRedirect",
+                instanceFlags
+            ) ?? throw new MissingMethodException(
+                runningGame.GetType().FullName,
+                "ExitOrRedirect"
+            );
+            Type exitModeType = exitOrRedirect.GetParameters()[2].ParameterType;
+            object softExit = Enum.Parse(exitModeType, "SoftExit");
+
+            clientApi.Logger.Notification(
+                "[ModernAtlas] Automated smoke test is leaving the world through the game's normal soft-exit path."
+            );
+            exitOrRedirect.Invoke(runningGame, new[] { true, "", softExit });
+        }
+        catch (Exception exception)
+        {
+            Exception cause = exception is TargetInvocationException { InnerException: not null }
+                ? exception.InnerException
+                : exception;
+            clientApi.Logger.Error(
+                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: the test could not leave the world: {0}",
+                cause.Message
+            );
+        }
     }
 
     private void OpenCheatModeConsent(string worldIdentifier)
