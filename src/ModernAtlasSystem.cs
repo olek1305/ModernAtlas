@@ -28,6 +28,7 @@ public sealed class ModernAtlasSystem : ModSystem
     private IShaderProgram? stableLiquidShader;
     private IShaderProgram? atlasCloudShader;
     private IShaderProgram? atlasOpacityShader;
+    private IShaderProgram? atlasScrollShader;
     private CheatModeConsentDialog? cheatModeDialog;
     private AtlasOpeningTransitionDialog? openingTransition;
     private string? activeWorldIdentifier;
@@ -85,6 +86,10 @@ public sealed class ModernAtlasSystem : ModSystem
         {
             api.Logger.Error("[ModernAtlas] Failed to compile the window opacity shader.");
         }
+        if (GetAtlasScrollShader() == null)
+        {
+            api.Logger.Error("[ModernAtlas] Failed to compile the physical scroll shader.");
+        }
 
         dialog = new ModernAtlasDialog(
             api,
@@ -97,7 +102,13 @@ public sealed class ModernAtlasSystem : ModSystem
         );
         openingTransition = new AtlasOpeningTransitionDialog(
             api,
-            dialog.PrepareOpeningTransitionFrame
+            dialog.PrepareOpeningTransitionFrame,
+            GetAtlasScrollShader
+        );
+        api.Event.RegisterRenderer(
+            openingTransition,
+            EnumRenderStage.Opaque,
+            "modernatlas-opening-scroll"
         );
 
         api.Input.RegisterHotKey(
@@ -149,6 +160,17 @@ public sealed class ModernAtlasSystem : ModSystem
     {
         if (dialog == null || openingTransition == null) return;
 
+        if (config?.SkipOpeningAnimation == true)
+        {
+            if (!dialog.TryOpen())
+            {
+                clientApi?.Logger.Error(
+                    "[ModernAtlas] The atlas could not be opened while its opening animation was skipped."
+                );
+            }
+            return;
+        }
+
         bool started = openingTransition.Begin(
             false,
             _ =>
@@ -179,6 +201,13 @@ public sealed class ModernAtlasSystem : ModSystem
         {
             serverApi.Event.PlayerNowPlaying -= OnPlayerNowPlaying;
         }
+        if (clientApi != null && openingTransition != null)
+        {
+            clientApi.Event.UnregisterRenderer(
+                openingTransition,
+                EnumRenderStage.Opaque
+            );
+        }
         openingTransition?.CancelWithoutOpening();
         openingTransition?.Dispose();
         openingTransition = null;
@@ -190,6 +219,7 @@ public sealed class ModernAtlasSystem : ModSystem
         stableLiquidShader = null;
         atlasCloudShader = null;
         atlasOpacityShader = null;
+        atlasScrollShader = null;
         clientApi = null;
         serverApi = null;
         config = null;
@@ -574,6 +604,23 @@ public sealed class ModernAtlasSystem : ModSystem
         if (!program.Compile()) return null;
 
         atlasOpacityShader = program;
+        return program;
+    }
+
+    private IShaderProgram? GetAtlasScrollShader()
+    {
+        if (atlasScrollShader != null && !atlasScrollShader.Disposed)
+        {
+            return atlasScrollShader;
+        }
+        if (clientApi == null) return null;
+
+        IShaderProgram program = clientApi.Shader.NewShaderProgram();
+        program.AssetDomain = "modernatlas";
+        clientApi.Shader.RegisterFileShaderProgram("atlasscroll", program);
+        if (!program.Compile()) return null;
+
+        atlasScrollShader = program;
         return program;
     }
 

@@ -935,9 +935,30 @@ public sealed class ModernAtlasDialog : GuiDialog
         bool settingsSwitchRestored = settingsSwitchClicked
             && ClickAtlasControlForAutomatedTest(settingsModal, "map-layers")
             && config.MapLayersEnabled == mapLayersBeforeClick;
+        bool skipOpeningBeforeClick = config.SkipOpeningAnimation;
+        bool skipOpeningClicked = settingsOpenedByClick
+            && ClickAtlasControlForAutomatedTest(
+                settingsModal,
+                "skip-opening-animation"
+            )
+            && config.SkipOpeningAnimation != skipOpeningBeforeClick;
+        bool skipOpeningRestored = skipOpeningClicked
+            && ClickAtlasControlForAutomatedTest(
+                settingsModal,
+                "skip-opening-animation"
+            )
+            && config.SkipOpeningAnimation == skipOpeningBeforeClick;
+        bool liveLightingBeforeSliderTest = config.LiveLightingEnabled;
+        bool fixedLightingPrepared = !liveLightingBeforeSliderTest
+            || (settingsOpenedByClick
+                && ClickAtlasControlForAutomatedTest(
+                    settingsModal,
+                    "live-lighting"
+                )
+                && !config.LiveLightingEnabled);
         int fixedSunHourBeforeDrag = config.FixedSunHour;
         bool dragSliderToMaximum = fixedSunHourBeforeDrag != 23;
-        bool sliderBoundaryDragHandled = settingsOpenedByClick
+        bool sliderBoundaryDragHandled = fixedLightingPrepared
             && DragAtlasSliderBeyondBoundsForAutomatedTest(
                 settingsModal,
                 "fixed-sun-hour",
@@ -945,8 +966,14 @@ public sealed class ModernAtlasDialog : GuiDialog
             );
         bool sliderBoundaryDragClamped = config.FixedSunHour
             == (dragSliderToMaximum ? 23 : 0);
-        config.FixedSunHour = fixedSunHourBeforeDrag;
+        OnFixedSunHourChanged(fixedSunHourBeforeDrag);
         settingsModal?.GetAtlasSlider("fixed-sun-hour")?.SetValue(fixedSunHourBeforeDrag);
+        bool liveLightingRestored = !liveLightingBeforeSliderTest
+            || (ClickAtlasControlForAutomatedTest(
+                    settingsModal,
+                    "live-lighting"
+                )
+                && config.LiveLightingEnabled);
         bool settingsClosedByClick = settingsOpenedByClick
             && ClickAtlasControlForAutomatedTest(settingsModal, "settings-close")
             && !settingsModalOpen;
@@ -986,6 +1013,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         bool neumorphicControls = overlay?.GetElement("settings-button")
                 is GuiElementAtlasButton
             && settingsModal?.GetElement("map-layers") is GuiElementAtlasSwitch
+            && settingsModal?.GetElement("skip-opening-animation")
+                is GuiElementAtlasSwitch
             && creativeSettingsModal?.GetElement("camera-angle-lock")
                 is GuiElementAtlasSwitch
             && mapLayerPanel?.GetElement("map-layer") is GuiElementDropDown;
@@ -996,8 +1025,12 @@ public sealed class ModernAtlasDialog : GuiDialog
             && settingsOpenedByClick
             && settingsSwitchClicked
             && settingsSwitchRestored
+            && skipOpeningClicked
+            && skipOpeningRestored
+            && fixedLightingPrepared
             && sliderBoundaryDragHandled
             && sliderBoundaryDragClamped
+            && liveLightingRestored
             && settingsClosedByClick
             && creativeOpenedByClick
             && creativeClosedByClick
@@ -1014,18 +1047,22 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (automatedSmokeTestInterfaceControlsPassed)
         {
             capi.Logger.Notification(
-                "[ModernAtlas] Automated smoke test exercised the compact neumorphic controls, map-layer switch, Creative/Cheat cave/search/camera controls, Escape-restored hidden UI and held-item suppression for {0} living models.",
+                "[ModernAtlas] Automated smoke test exercised the compact neumorphic controls, map-layer and skip-opening switches, Creative/Cheat cave/search/camera controls, Escape-restored hidden UI and held-item suppression for {0} living models.",
                 renderedEntityCount
             );
         }
         else
         {
             capi.Logger.Error(
-                "[ModernAtlas] Automated interface-controls test failed: access={0}, settingsOpen={1}, settingsSwitch={2}/{3}, sliderBoundary={4}/{5}, settingsClose={6}, creativeOpen={7}, creativeClose={8}, layers={9}, search={10}, safeSurface={11}, cave={12}, angleLock={13}, yaw={14}, hidden={15}, restored={16}, neumorphic={17}, heldItems={18}/{19}.",
+                "[ModernAtlas] Automated interface-controls test failed: access={0}, settingsOpen={1}, mapLayerSwitch={2}/{3}, skipOpening={4}/{5}, fixedLighting={6}/{7}, sliderBoundary={8}/{9}, settingsClose={10}, creativeOpen={11}, creativeClose={12}, layers={13}, search={14}, safeSurface={15}, cave={16}, angleLock={17}, yaw={18}, hidden={19}, restored={20}, neumorphic={21}, heldItems={22}/{23}.",
                 accessAvailable,
                 settingsOpenedByClick,
                 settingsSwitchClicked,
                 settingsSwitchRestored,
+                skipOpeningClicked,
+                skipOpeningRestored,
+                fixedLightingPrepared,
+                liveLightingRestored,
                 sliderBoundaryDragHandled,
                 sliderBoundaryDragClamped,
                 settingsClosedByClick,
@@ -1761,10 +1798,10 @@ public sealed class ModernAtlasDialog : GuiDialog
             )
             .Compose();
 
-        ElementBounds modalRoot = ElementBounds.Fixed(0, 0, 430, 590)
+        ElementBounds modalRoot = ElementBounds.Fixed(0, 0, 430, 626)
             .WithAlignment(EnumDialogArea.CenterMiddle);
         settingsModal = capi.Gui.CreateCompo("modernatlas-settings", modalRoot)
-            .AddStaticCustomDraw(ElementBounds.Fixed(0, 0, 430, 590), AtlasUiStyle.DrawCard)
+            .AddStaticCustomDraw(ElementBounds.Fixed(0, 0, 430, 626), AtlasUiStyle.DrawCard)
             .AddStaticText(
                 "SETTINGS",
                 AtlasUiStyle.TitleFont(20),
@@ -1813,102 +1850,112 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "animations"
             )
             .AddStaticText(
+                "Skip opening animation",
+                AtlasUiStyle.DetailFont(13),
+                ElementBounds.Fixed(28, 202, 260, 26)
+            )
+            .AddAtlasSwitch(
+                OnSkipOpeningAnimationToggled,
+                ElementBounds.Fixed(350, 196, 62, 38),
+                "skip-opening-animation"
+            )
+            .AddStaticText(
                 "Live clouds",
                 AtlasUiStyle.DetailFont(13),
-                ElementBounds.Fixed(28, 202, 240, 26)
+                ElementBounds.Fixed(28, 238, 240, 26)
             )
             .AddAtlasSwitch(
                 OnCloudsToggled,
-                ElementBounds.Fixed(350, 196, 62, 38),
+                ElementBounds.Fixed(350, 232, 62, 38),
                 "clouds"
             )
             .AddStaticCustomDraw(
-                ElementBounds.Fixed(26, 239, 378, 2),
+                ElementBounds.Fixed(26, 275, 378, 2),
                 AtlasUiStyle.DrawSeparator
             )
             .AddStaticText(
                 "LIVING MODELS",
                 AtlasUiStyle.LabelFont(11),
-                ElementBounds.Fixed(26, 252, 200, 22)
+                ElementBounds.Fixed(26, 288, 200, 22)
             )
             .AddStaticText(
                 "Living entities",
                 AtlasUiStyle.DetailFont(13),
-                ElementBounds.Fixed(28, 280, 240, 26)
+                ElementBounds.Fixed(28, 316, 240, 26)
             )
             .AddAtlasSwitch(
                 OnLivingEntitiesToggled,
-                ElementBounds.Fixed(350, 274, 62, 38),
+                ElementBounds.Fixed(350, 310, 62, 38),
                 "entities"
             )
             .AddStaticText(
                 "Players",
                 AtlasUiStyle.DetailFont(12),
-                ElementBounds.Fixed(48, 316, 200, 24)
+                ElementBounds.Fixed(48, 352, 200, 24)
             )
             .AddAtlasSwitch(
                 OnPlayersToggled,
-                ElementBounds.Fixed(350, 310, 62, 38),
+                ElementBounds.Fixed(350, 346, 62, 38),
                 "players"
             )
             .AddStaticText(
                 "Animals",
                 AtlasUiStyle.DetailFont(12),
-                ElementBounds.Fixed(48, 350, 200, 24)
+                ElementBounds.Fixed(48, 386, 200, 24)
             )
             .AddAtlasSwitch(
                 OnAnimalsToggled,
-                ElementBounds.Fixed(350, 344, 62, 38),
+                ElementBounds.Fixed(350, 380, 62, 38),
                 "animals"
             )
             .AddStaticText(
                 "Hostile mobs",
                 AtlasUiStyle.DetailFont(12),
-                ElementBounds.Fixed(48, 384, 200, 24)
+                ElementBounds.Fixed(48, 420, 200, 24)
             )
             .AddAtlasSwitch(
                 OnMobsToggled,
-                ElementBounds.Fixed(350, 378, 62, 38),
+                ElementBounds.Fixed(350, 414, 62, 38),
                 "mobs"
             )
             .AddStaticText(
                 "NPCs",
                 AtlasUiStyle.DetailFont(12),
-                ElementBounds.Fixed(48, 418, 200, 24)
+                ElementBounds.Fixed(48, 454, 200, 24)
             )
             .AddAtlasSwitch(
                 OnNpcsToggled,
-                ElementBounds.Fixed(350, 412, 62, 38),
+                ElementBounds.Fixed(350, 448, 62, 38),
                 "npcs"
             )
             .AddStaticCustomDraw(
-                ElementBounds.Fixed(26, 454, 378, 2),
+                ElementBounds.Fixed(26, 490, 378, 2),
                 AtlasUiStyle.DrawSeparator
             )
             .AddStaticText(
                 "Live sun and weather",
                 AtlasUiStyle.DetailFont(12),
-                ElementBounds.Fixed(28, 468, 200, 24)
+                ElementBounds.Fixed(28, 504, 200, 24)
             )
             .AddAtlasSwitch(
                 OnLiveLightingToggled,
-                ElementBounds.Fixed(350, 460, 62, 38),
+                ElementBounds.Fixed(350, 496, 62, 38),
                 "live-lighting"
             )
             .AddStaticText(
                 "Fixed sun hour",
                 AtlasUiStyle.DetailFont(12),
-                ElementBounds.Fixed(28, 505, 130, 24)
+                ElementBounds.Fixed(28, 541, 130, 24)
             )
             .AddAtlasSlider(
                 OnFixedSunHourChanged,
-                ElementBounds.Fixed(166, 496, 246, 42),
+                ElementBounds.Fixed(166, 532, 246, 42),
                 "fixed-sun-hour"
             )
             .AddAtlasButton(
                 "ATLAS VISUAL LAB",
                 OpenVisualLab,
-                ElementBounds.Fixed(24, 540, 382, 44),
+                ElementBounds.Fixed(24, 576, 382, 44),
                 "visual-lab-open",
                 AtlasButtonStyle.Dark
             )
@@ -2855,6 +2902,13 @@ public sealed class ModernAtlasDialog : GuiDialog
         SyncSettingsControls();
     }
 
+    private void OnSkipOpeningAnimationToggled(bool enabled)
+    {
+        config.SkipOpeningAnimation = enabled;
+        saveConfig();
+        SyncSettingsControls();
+    }
+
     private void OnCloudsToggled(bool enabled)
     {
         config.CloudsEnabled = enabled;
@@ -2937,6 +2991,9 @@ public sealed class ModernAtlasDialog : GuiDialog
         settingsModal.GetAtlasSwitch("fog")?.SetValue(EffectiveFogEnabled);
         settingsModal.GetAtlasSwitch("fog")!.Enabled = capi.IsSinglePlayer;
         settingsModal.GetAtlasSwitch("animations")?.SetValue(config.AnimationsEnabled);
+        settingsModal.GetAtlasSwitch("skip-opening-animation")?.SetValue(
+            config.SkipOpeningAnimation
+        );
         settingsModal.GetAtlasSwitch("clouds")?.SetValue(config.CloudsEnabled);
         settingsModal.GetAtlasSwitch("live-lighting")?.SetValue(config.LiveLightingEnabled);
         settingsModal.GetAtlasSlider("fixed-sun-hour")!.Enabled = !config.LiveLightingEnabled;
