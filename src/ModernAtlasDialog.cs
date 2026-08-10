@@ -85,6 +85,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool loggedEntityModels;
     private bool cheatModeEnabled;
     private bool preparingSurfaceFilter;
+    private bool preparingOreConcealment;
     private bool automatedSmokeTestActive;
     private float automatedSmokeTestElapsedSeconds;
     private Action<bool>? automatedSmokeTestCompletion;
@@ -97,6 +98,9 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool automatedSmokeTestSearchInputAttempted;
     private bool automatedSmokeTestSearchInputPassed;
     private bool automatedSmokeTestBilingualSearchPassed;
+    private bool automatedSmokeTestOreConcealmentPassed;
+    private bool automatedSmokeTestCreativeOreRevealFrameRendered;
+    private bool automatedSmokeTestForceSurvivalOreConcealment;
     private bool automatedSmokeTestSafeSurfaceFrameRendered;
     private bool automatedSmokeTestSafeSurfaceScreenshotHandled;
     private int automatedSmokeTestSearchPhase;
@@ -147,6 +151,9 @@ public sealed class ModernAtlasDialog : GuiDialog
     }
     private bool SurfaceSafetyEnabled => !CreativeCheatSettingsAvailable
         || !config.CaveModeEnabled;
+    private bool SurvivalOreConcealmentEnabled =>
+        !CreativeCheatSettingsAvailable
+        || automatedSmokeTestForceSurvivalOreConcealment;
     private bool HasUnlockedCameraPitch => CreativeCheatSettingsAvailable;
     private bool UnitInspectionEnabled => CreativeCheatSettingsAvailable;
     private bool SearchModeActive => CreativeCheatSettingsAvailable
@@ -239,11 +246,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         loggedEntityModels = false;
         CaptureAnimationFrame();
         lastAtlasFrameMilliseconds = capi.ElapsedMilliseconds;
-        exactChunkRenderer ??= ExactChunkRendererAdapter.TryCreate(
-            capi,
-            stableLiquidShaderProvider,
-            atlasCloudShaderProvider
-        );
+        EnsureExactChunkRenderer();
         centerX = capi.World.Player.Entity.Pos.X;
         centerZ = capi.World.Player.Entity.Pos.Z;
         centerY = capi.World.Player.Entity.Pos.Y;
@@ -301,6 +304,29 @@ public sealed class ModernAtlasDialog : GuiDialog
                 automatedSmokeTestRenderedAtPitchFloor = true;
             }
             automatedSmokeTestSafeSurfaceFrameRendered |= SurfaceSafetyEnabled;
+            if (SurvivalOreConcealmentEnabled
+                && !automatedSmokeTestOreConcealmentPassed
+                && exactChunkRenderer?.ValidateSurvivalOreConcealment(
+                    out string oreDiagnostic
+                ) == true)
+            {
+                automatedSmokeTestOreConcealmentPassed = true;
+                automatedSmokeTestForceSurvivalOreConcealment = false;
+                capi.Logger.Notification(
+                    "[ModernAtlas] Automated Survival ore-concealment check passed: {0}.",
+                    oreDiagnostic
+                );
+            }
+            if (automatedSmokeTestOreConcealmentPassed
+                && CreativeCheatSettingsAvailable
+                && !SurvivalOreConcealmentEnabled
+                && !automatedSmokeTestCreativeOreRevealFrameRendered)
+            {
+                automatedSmokeTestCreativeOreRevealFrameRendered = true;
+                capi.Logger.Notification(
+                    "[ModernAtlas] Automated Creative/Cheat ore-visibility frame rendered with Survival concealment disabled."
+                );
+            }
             if (safeSurfaceFrameWasAlreadyRendered)
             {
                 ExerciseAutomatedInterfaceControls();
@@ -339,6 +365,10 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (preparingSurfaceFilter)
         {
             rendererStatus = $"preparing safe surface {surfaceHeightTexture.ProgressPercent}%";
+        }
+        else if (preparingOreConcealment)
+        {
+            rendererStatus = "preparing Survival ore concealment";
         }
         string status = $"{GameViewDistance} blocks • {fogStatus} • {caveStatus} • {rendererStatus} • loaded data only";
         overlay?.GetDynamicText("status").SetNewText(status);
@@ -779,6 +809,23 @@ public sealed class ModernAtlasDialog : GuiDialog
         PrepareSurfaceSafetyFilter();
     }
 
+    internal bool PrepareOpeningTransitionFrame()
+    {
+        EnsureExactChunkRenderer();
+        if (exactChunkRenderer == null) return false;
+        return !SurvivalOreConcealmentEnabled
+            || exactChunkRenderer.AdvanceSurvivalOreConcealment();
+    }
+
+    private void EnsureExactChunkRenderer()
+    {
+        exactChunkRenderer ??= ExactChunkRendererAdapter.TryCreate(
+            capi,
+            stableLiquidShaderProvider,
+            atlasCloudShaderProvider
+        );
+    }
+
     private void ClampPitchToAccessLevel(bool immediate)
     {
         float minimumPitch = MinimumPitchDegrees;
@@ -815,6 +862,9 @@ public sealed class ModernAtlasDialog : GuiDialog
             searchController.ValidateBilingualSearchForAutomatedTest(
                 out string languageDiagnostic
             );
+        automatedSmokeTestOreConcealmentPassed = false;
+        automatedSmokeTestCreativeOreRevealFrameRendered = false;
+        automatedSmokeTestForceSurvivalOreConcealment = true;
         if (automatedSmokeTestBilingualSearchPassed)
         {
             capi.Logger.Notification(
@@ -853,6 +903,8 @@ public sealed class ModernAtlasDialog : GuiDialog
                 || automatedSmokeTestUnitInspectionPassed)
             && automatedSmokeTestSearchInputPassed
             && automatedSmokeTestBilingualSearchPassed
+            && automatedSmokeTestOreConcealmentPassed
+            && automatedSmokeTestCreativeOreRevealFrameRendered
             && automatedSmokeTestSearchPassed
             && automatedSmokeTestMapLayerPassed;
         if (passed && automatedSmokeTestElapsedSeconds < 3f) return;
@@ -1462,6 +1514,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestSearchInputAttempted = false;
         automatedSmokeTestSearchInputPassed = false;
         automatedSmokeTestBilingualSearchPassed = false;
+        automatedSmokeTestOreConcealmentPassed = false;
+        automatedSmokeTestForceSurvivalOreConcealment = false;
         automatedSmokeTestSafeSurfaceFrameRendered = false;
         automatedSmokeTestSafeSurfaceScreenshotHandled = false;
         automatedSmokeTestSearchPhase = 0;
@@ -1479,6 +1533,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         activeMapLayer = AtlasMapLayer.TexturedTerrain;
         mapLayerTexture.Reset();
         preparingSurfaceFilter = false;
+        preparingOreConcealment = false;
         ResetPointerDrag();
 
         if (IsOpened())
@@ -2573,7 +2628,10 @@ public sealed class ModernAtlasDialog : GuiDialog
         render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
 
         preparingSurfaceFilter = SurfaceSafetyEnabled && !surfaceHeightTexture.Advance();
-        if (preparingSurfaceFilter)
+        preparingOreConcealment = SurvivalOreConcealmentEnabled
+            && exactChunkRenderer != null
+            && !exactChunkRenderer.AdvanceSurvivalOreConcealment();
+        if (preparingSurfaceFilter || preparingOreConcealment)
         {
             ClearSurfacePreparationFrame();
             return false;
@@ -2612,6 +2670,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             GameViewDistance,
             EffectiveFogEnabled,
             SurfaceSafetyEnabled,
+            SurvivalOreConcealmentEnabled,
             SurfaceSafetyEnabled ? surfaceHeightTexture : null,
             mapLayerTexture,
             EffectiveMapLayerOpacity,

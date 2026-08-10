@@ -264,6 +264,15 @@ the product scope when the atlas itself is correct.
   or unit inspection: the survival handbook can concurrently mutate Vintage
   Story's non-thread-safe translation diagnostics. Use the isolated search
   services, stable asset codes, explicit custom names and player nicknames.
+- Opening the atlas with `G` now plays a short real-time first-person scene:
+  the view bows, a procedural pocket scroll rises and unfolds, and a light zoom
+  enters the atlas. `G` skips it, `Escape` cancels it, and every captured camera
+  or animation field is restored on cancellation, completion and world leave.
+- Survival-safe atlas rendering replaces all registered
+  `EnumBlockMaterial.Ore` composite textures with their baked host-rock base
+  textures through cycle-safe, incrementally built transient GPU lookups.
+  Creative/Cheat keeps the authored ore textures, and neither mode mutates the
+  world block atlas, save data or a persistent cache.
 - The 0.6.1 test-cycle feature checkpoints include `7fe0f01` (surface safety,
   lifecycle smoke test and Creative camera), `6640a5d` (unit inspection) and
   `5bba376` (loaded-data search). Commit `669c4bb` adds loaded-data analysis

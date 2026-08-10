@@ -11,20 +11,24 @@ geometry is concealed by the player-anchored fog boundary.
 
 ## Render flow
 
-1. Open a dedicated full-screen atlas framebuffer and orthographic camera.
-2. Reuse completed opaque chunk meshes with the engine's registered block
+1. Play the short input-capturing first-person opening scene while preparing
+   atlas-only transient resources within a frame budget; cancellation restores
+   the captured camera and animation state without opening the atlas.
+2. Open a dedicated full-screen atlas framebuffer and orthographic camera.
+3. Reuse completed opaque chunk meshes with the engine's registered block
    texture atlases, color maps and current animation uniforms.
-3. Draw only server-authorized, already loaded living models into the same
+4. Draw only server-authorized, already loaded living models into the same
    terrain depth buffer.
-4. Run the engine's required before/after OIT setup around non-fluid
+5. Run the engine's required before/after OIT setup around non-fluid
    transparent chunk materials, without invoking the global entity or particle
    render stage.
-5. Draw completed liquid mesh pools with the stable ModernAtlas liquid shader.
-6. Apply the transient cave-safety, loaded-data layer and disclosure-boundary
+6. Draw completed liquid mesh pools with the stable ModernAtlas liquid shader.
+7. Apply the transient cave-safety, Survival ore-concealment, loaded-data layer
+   and disclosure-boundary
    filters, compose OIT into the native Primary framebuffer, and blit once to
    the window.
-7. Draw optional live cloud cover, fog and lightweight GUI markers afterward.
-8. Restore every modified engine uniform and framebuffer state before normal
+8. Draw optional live cloud cover, fog and lightweight GUI markers afterward.
+9. Restore every modified engine uniform and framebuffer state before normal
    world rendering resumes.
 
 ## Visibility and disclosure
@@ -40,6 +44,14 @@ An exterior envelope preserves complete cliff steps, building walls and floors
 near the surface. Faces farther below the envelope use a subdued neutral-gray
 atlas material so a cave opening cannot expose the empty framebuffer. This is
 a shader treatment of real geometry, not a generated shell or world block.
+
+Survival ore concealment enumerates every registered block whose public
+material is `EnumBlockMaterial.Ore`, follows its baked composite texture
+variants with cycle-safe incremental work, and builds transient GPU lookups
+from ore-atlas texels to their baked base host-rock textures. The lookup affects
+only the atlas terrain shaders and preserves the original mesh, UVs, alpha and
+biome lighting. It is disabled in Creative/Cheat, never changes a block or
+runtime atlas, and is discarded with the world-specific renderer.
 
 ## Search and analysis layers
 

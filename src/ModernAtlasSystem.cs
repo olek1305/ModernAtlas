@@ -29,6 +29,7 @@ public sealed class ModernAtlasSystem : ModSystem
     private IShaderProgram? atlasCloudShader;
     private IShaderProgram? atlasOpacityShader;
     private CheatModeConsentDialog? cheatModeDialog;
+    private AtlasOpeningTransitionDialog? openingTransition;
     private string? activeWorldIdentifier;
     private int worldSessionGeneration;
     private bool automatedWorldExitRequested;
@@ -94,6 +95,10 @@ public sealed class ModernAtlasSystem : ModSystem
             GetAtlasCloudShader,
             GetAtlasOpacityShader
         );
+        openingTransition = new AtlasOpeningTransitionDialog(
+            api,
+            dialog.PrepareOpeningTransitionFrame
+        );
 
         api.Input.RegisterHotKey(
             "modernatlas-open",
@@ -116,6 +121,12 @@ public sealed class ModernAtlasSystem : ModSystem
             return true;
         }
 
+        if (openingTransition?.IsOpened() == true)
+        {
+            openingTransition.SkipToAtlas();
+            return true;
+        }
+
         // HelpAndOverlays hotkeys can be evaluated independently from dialog
         // key events. A focused atlas search box owns G as text, not as the
         // open/close command.
@@ -124,8 +135,37 @@ public sealed class ModernAtlasSystem : ModSystem
             return true;
         }
 
-        dialog?.Toggle();
+        if (dialog?.IsOpened() == true)
+        {
+            dialog.TryClose();
+            return true;
+        }
+
+        StartOpeningTransition();
         return true;
+    }
+
+    private void StartOpeningTransition()
+    {
+        if (dialog == null || openingTransition == null) return;
+
+        bool started = openingTransition.Begin(
+            false,
+            _ =>
+            {
+                if (dialog.TryOpen()) return;
+                clientApi?.Logger.Error(
+                    "[ModernAtlas] The atlas could not be opened after its transition."
+                );
+            }
+        );
+        if (!started)
+        {
+            clientApi?.Logger.Warning(
+                "[ModernAtlas] The opening transition was unavailable; opening the atlas directly."
+            );
+            dialog.TryOpen();
+        }
     }
 
     public override void Dispose()
@@ -139,6 +179,9 @@ public sealed class ModernAtlasSystem : ModSystem
         {
             serverApi.Event.PlayerNowPlaying -= OnPlayerNowPlaying;
         }
+        openingTransition?.CancelWithoutOpening();
+        openingTransition?.Dispose();
+        openingTransition = null;
         dialog?.Dispose();
         dialog = null;
         cheatModeDialog?.CancelWithoutDecision();
@@ -189,6 +232,7 @@ public sealed class ModernAtlasSystem : ModSystem
         cheatModeDialog?.CancelWithoutDecision();
         cheatModeDialog?.Dispose();
         cheatModeDialog = null;
+        openingTransition?.CancelWithoutOpening();
         activeWorldIdentifier = null;
         dialog?.OnWorldLeave();
         serverPolicy.ResetToSafeDefaults();
@@ -278,6 +322,7 @@ public sealed class ModernAtlasSystem : ModSystem
     {
         if (clientApi == null
             || dialog == null
+            || openingTransition == null
             || !clientApi.IsSinglePlayer
             || activeWorldIdentifier != worldIdentifier
             || worldSessionGeneration != sessionGeneration)
@@ -292,16 +337,51 @@ public sealed class ModernAtlasSystem : ModSystem
                 passed
             )
         );
-        if (!dialog.TryOpen())
+        if (!openingTransition.Begin(
+            true,
+            passed => CompleteAutomatedOpeningTransition(
+                worldIdentifier,
+                sessionGeneration,
+                passed
+            )
+        ))
         {
             clientApi.Logger.Error(
-                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: the atlas dialog could not be opened."
+                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: the atlas opening transition could not be started."
             );
+            FinishAutomatedSmokeTest(worldIdentifier, sessionGeneration, false);
             return;
         }
 
         clientApi.Logger.Notification(
-            "[ModernAtlas] Automated smoke test opened the atlas without keyboard input."
+            "[ModernAtlas] Automated smoke test started the atlas transition without keyboard input."
+        );
+    }
+
+    private void CompleteAutomatedOpeningTransition(
+        string worldIdentifier,
+        int sessionGeneration,
+        bool passed
+    )
+    {
+        if (clientApi == null
+            || dialog == null
+            || activeWorldIdentifier != worldIdentifier
+            || worldSessionGeneration != sessionGeneration)
+        {
+            return;
+        }
+        if (!passed || !dialog.TryOpen())
+        {
+            clientApi.Logger.Error(
+                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: the opening transition or atlas open check failed."
+            );
+            FinishAutomatedSmokeTest(worldIdentifier, sessionGeneration, false);
+            return;
+        }
+
+        clientApi.Logger.Notification(
+            "[ModernAtlas] Automated opening transition entered the atlas normally."
         );
     }
 

@@ -7,7 +7,10 @@ client-side; an optional server component supplies fog and living-entity policy.
 ## Current 0.6.1 prototype
 
 - keeps the vanilla map, discovered areas and waypoints intact;
-- opens a separate full-screen 3D atlas with `G` (rebindable in Controls);
+- opens a separate full-screen 3D atlas with `G` (rebindable in Controls) after
+  a short first-person transition in which the view bows, a pocket scroll rises
+  and unfolds, and its light zooms into the atlas; `G` skips the transition and
+  `Escape` cancels it;
 - pauses the game while the atlas is open in singleplayer and never attempts
   to pause a multiplayer server;
 - provides an `Atlas animations` switch: enabled keeps atlas liquids and
@@ -29,6 +32,10 @@ client-side; an optional server component supplies fog and living-entity policy.
 - uses the same runtime texture atlases, connected chunk geometry, biome color
   maps, lighting uniforms and sun state as the live world renderer, including
   terrain supplied by other mods;
+- replaces every registered `EnumBlockMaterial.Ore` texture with its baked
+  host-rock material only in the Survival-safe atlas view, using transient GPU
+  lookups built incrementally from the live block atlas; Creative/Cheat views
+  retain the original ore textures;
 - contains no generated per-block material fallback; the dedicated liquid
   shader samples the game's registered runtime block atlas;
 - does not generate unexplored chunks and does not write to a save file;
