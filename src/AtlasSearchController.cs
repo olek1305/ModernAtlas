@@ -236,7 +236,8 @@ internal sealed class AtlasSearchController
         // GetHeldItemName here would concurrently mutate the engine's global
         // translation service and can corrupt its non-concurrent hash sets.
         if (Matches(block.Code.ToString())
-            || languageIndex.MatchesPreparedBlock(block.Code))
+            || languageIndex.MatchesPreparedBlock(block.Code)
+            || languageIndex.MatchesBlock(block, query, compactQuery))
         {
             matchingBlockIds.Add(block.Id);
         }
@@ -582,12 +583,7 @@ internal sealed class AtlasSearchController
                 );
                 if (!Matches(code)
                     && !Matches(name)
-                    && !languageIndex.Matches(
-                        stack?.Collectible?.Code,
-                        AtlasSearchAliasKind.Item,
-                        query,
-                        compactQuery
-                    ))
+                    && !MatchesItemAliases(stack))
                 {
                     continue;
                 }
@@ -605,6 +601,76 @@ internal sealed class AtlasSearchController
             // The loaded-entity dictionary can change between client events.
             // A later throttled refresh will obtain a stable snapshot.
         }
+    }
+
+    private bool MatchesItemAliases(ItemStack? stack)
+    {
+        return MatchesItemAliases(stack, query, compactQuery);
+    }
+
+    private bool MatchesItemAliases(
+        ItemStack? stack,
+        string normalizedQuery,
+        string normalizedCompactQuery
+    )
+    {
+        CollectibleObject? collectible = stack?.Collectible;
+        AssetLocation? code = collectible?.Code;
+        if (code == null) return false;
+
+        string material = stack?.Block == null
+            ? ""
+            : stack.Attributes.GetString("material", "");
+
+        return languageIndex.Matches(
+                code,
+                AtlasSearchAliasKind.Item,
+                normalizedQuery,
+                normalizedCompactQuery
+            )
+            || languageIndex.Matches(
+                code,
+                AtlasSearchAliasKind.Block,
+                normalizedQuery,
+                normalizedCompactQuery
+            )
+            || languageIndex.MatchesBlockVariantSuffix(
+                code,
+                material,
+                normalizedQuery,
+                normalizedCompactQuery
+            )
+            || languageIndex.MatchesPreparedBlock(code);
+    }
+
+    internal bool TryGetActiveLanguageQueryForLanternBlock(
+        Block? block,
+        out string activeQuery
+    )
+    {
+        activeQuery = "";
+        AssetLocation? code = block?.Code;
+        if (code == null
+            || !code.Path.Contains("lantern", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (!languageIndex.TryGetActiveBlockVariantQuery(
+                code,
+                null,
+                out activeQuery
+            ))
+        {
+            return false;
+        }
+
+        string normalized = AtlasSearchLanguageIndex.Normalize(activeQuery);
+        return languageIndex.MatchesBlock(
+            block,
+            normalized,
+            AtlasSearchLanguageIndex.Compact(normalized)
+        );
     }
 
     private bool MatchesEntity(Entity entity)

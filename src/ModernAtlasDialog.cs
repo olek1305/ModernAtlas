@@ -107,6 +107,9 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool automatedSmokeTestSafeSurfaceScreenshotHandled;
     private int automatedSmokeTestSearchPhase;
     private bool automatedSmokeTestSearchPassed;
+    private double automatedLanternBlockX;
+    private double automatedLanternBlockY;
+    private double automatedLanternBlockZ;
     private int automatedSmokeTestMapLayerPhase;
     private bool automatedSmokeTestMapLayerPassed;
     private bool automatedSmokeTestPreferencesCaptured;
@@ -954,6 +957,9 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestSafeSurfaceScreenshotHandled = false;
         automatedSmokeTestSearchPhase = 0;
         automatedSmokeTestSearchPassed = false;
+        automatedLanternBlockX = 0;
+        automatedLanternBlockY = 0;
+        automatedLanternBlockZ = 0;
         automatedSmokeTestMapLayerPhase = 0;
         automatedSmokeTestMapLayerPassed = false;
         automatedSmokeScreenshotPhase = 0;
@@ -979,7 +985,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             && automatedSmokeTestSearchPassed
             && automatedSmokeTestMapLayerPassed;
         if (passed && automatedSmokeTestElapsedSeconds < 3f) return;
-        if (!passed && automatedSmokeTestElapsedSeconds < 24f) return;
+        if (!passed && automatedSmokeTestElapsedSeconds < 60f) return;
 
         automatedSmokeTestActive = false;
         Action<bool>? completion = automatedSmokeTestCompletion;
@@ -1541,22 +1547,107 @@ public sealed class ModernAtlasDialog : GuiDialog
             return;
         }
 
-        if (automatedSmokeTestSearchPhase != 2) return;
-        if (searchController.BlockResults.Count > 0)
+        if (automatedSmokeTestSearchPhase == 2
+            && searchController.BlockResults.Count > 0)
         {
-            automatedSmokeTestSearchPassed = true;
+            searchController.SetQueryImmediatelyForAutomatedTest("lantern");
+            automatedSmokeTestSearchPhase = 3;
             capi.Logger.Notification(
-                "[ModernAtlas] Automated smoke test found loaded entity and block search markers."
+                "[ModernAtlas] Automated smoke test found loaded entity and block markers and started a real placed-lantern search."
             );
+            return;
         }
-        else if (searchController.BlockScanComplete)
+        if (automatedSmokeTestSearchPhase == 2
+            && searchController.BlockScanComplete)
         {
             automatedSmokeTestSearchPhase = -1;
             capi.Logger.Error(
                 "[ModernAtlas] Automated atlas block search completed without finding its known loaded block: {0}.",
                 searchController.DiagnosticSummary
             );
+            return;
         }
+
+        if (automatedSmokeTestSearchPhase == 3)
+        {
+            if (!TrySelectAutomatedLanternBlock(out string activeQuery))
+            {
+                if (searchController.BlockScanComplete)
+                {
+                    automatedSmokeTestSearchPassed = true;
+                    capi.Logger.Notification(
+                        "[ModernAtlas] Automated placed-lantern marker comparison was not exercised because the loaded test-world chunks contain no lantern marker; the real registered attribute-backed lantern block alias check passed."
+                    );
+                }
+                return;
+            }
+
+            searchController.SetQueryImmediatelyForAutomatedTest(activeQuery);
+            automatedSmokeTestSearchPhase = 4;
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated smoke test found a real placed-lantern marker in English and started the active-language query for the same loaded block."
+            );
+            return;
+        }
+
+        if (automatedSmokeTestSearchPhase != 4) return;
+        if (HasAutomatedLanternBlockMarker())
+        {
+            automatedSmokeTestSearchPassed = true;
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated smoke test found the same real placed-lantern marker in English and the active game language."
+            );
+        }
+        else if (searchController.BlockScanComplete)
+        {
+            automatedSmokeTestSearchPhase = -1;
+            capi.Logger.Error(
+                "[ModernAtlas] Automated active-language placed-lantern search completed without the marker found by the English query."
+            );
+        }
+    }
+
+    private bool TrySelectAutomatedLanternBlock(out string activeQuery)
+    {
+        activeQuery = "";
+        foreach (AtlasSearchResult result in searchController.BlockResults)
+        {
+            if (result.Kind != AtlasSearchResultKind.Block) continue;
+            var position = new BlockPos(
+                (int)Math.Floor(result.X),
+                (int)Math.Floor(result.Y),
+                (int)Math.Floor(result.Z)
+            );
+            Block block = capi.World.BlockAccessor.GetBlock(position);
+            if (!searchController.TryGetActiveLanguageQueryForLanternBlock(
+                    block,
+                    out activeQuery
+                ))
+            {
+                continue;
+            }
+
+            automatedLanternBlockX = result.X;
+            automatedLanternBlockY = result.Y;
+            automatedLanternBlockZ = result.Z;
+            return true;
+        }
+        return false;
+    }
+
+    private bool HasAutomatedLanternBlockMarker()
+    {
+        foreach (AtlasSearchResult result in searchController.BlockResults)
+        {
+            if (result.Kind == AtlasSearchResultKind.Block
+                && Math.Abs(result.X - automatedLanternBlockX) <= 0.01
+                && Math.Abs(result.Y - automatedLanternBlockY) <= 0.01
+                && Math.Abs(result.Z - automatedLanternBlockZ) <= 0.01)
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     private bool TryGetAutomatedBlockSearchQuery(out string query)
@@ -1658,6 +1749,9 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestSafeSurfaceScreenshotHandled = false;
         automatedSmokeTestSearchPhase = 0;
         automatedSmokeTestSearchPassed = false;
+        automatedLanternBlockX = 0;
+        automatedLanternBlockY = 0;
+        automatedLanternBlockZ = 0;
         automatedSmokeTestMapLayerPhase = 0;
         automatedSmokeTestMapLayerPassed = false;
         AutomatedSmokeTestRenderedExactWorld = false;

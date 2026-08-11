@@ -23,13 +23,18 @@ internal enum AtlasSearchAliasKind
 /// </summary>
 internal sealed class AtlasSearchLanguageIndex
 {
+    private const int MinimumAutomatedQueryLength = 2;
     private static readonly object[] WildcardFormatArguments = CreateWildcardFormatArguments();
 
     private readonly ICoreClientAPI capi;
     private readonly ITranslationService? englishTranslations;
     private readonly ITranslationService? activeTranslations;
     private readonly Dictionary<AliasCacheKey, SearchAlias[]> aliasCache = new();
+    private readonly Dictionary<string, SearchAlias[]> attributeBackedBlockAliasCache = new(
+        StringComparer.Ordinal
+    );
     private readonly SearchTranslationEntry[] blockTranslationEntries;
+    private readonly SearchTranslationEntry[] wildcardBlockTranslationEntries;
     private readonly HashSet<string> matchingBlockCodes = new(StringComparer.Ordinal);
     private readonly HashSet<string> matchingBlockPatterns = new(StringComparer.Ordinal);
     private int blockTranslationEntryIndex;
@@ -40,8 +45,8 @@ internal sealed class AtlasSearchLanguageIndex
         "en",
         StringComparison.OrdinalIgnoreCase
     )
-        ? "English"
-        : $"English + {ActiveLanguageCode.ToUpperInvariant()}";
+        ? "ENG"
+        : $"ENG + {ActiveLanguageCode.ToUpperInvariant()}";
 
     public bool Ready => englishTranslations != null
         && (string.Equals(ActiveLanguageCode, "en", StringComparison.OrdinalIgnoreCase)
@@ -64,6 +69,9 @@ internal sealed class AtlasSearchLanguageIndex
             ? englishTranslations
             : LoadPrivateTranslations(ActiveLanguageCode);
         blockTranslationEntries = BuildBlockTranslationEntries();
+        wildcardBlockTranslationEntries = BuildWildcardBlockTranslationEntries(
+            blockTranslationEntries
+        );
 
         capi.Logger.Notification(
             "[ModernAtlas] Prepared isolated atlas search languages {0} with {1} block-name aliases in {2:0} ms.",
@@ -115,7 +123,7 @@ internal sealed class AtlasSearchLanguageIndex
 
         foreach (string pattern in matchingBlockPatterns)
         {
-            if (MatchesGlob(candidate, pattern)) return true;
+            if (MatchesGlobOrAttributeBacked(candidate, pattern)) return true;
         }
         return false;
     }
@@ -135,6 +143,100 @@ internal sealed class AtlasSearchLanguageIndex
                 || compactQuery.Length > 0
                     && alias.Compact.Contains(compactQuery, StringComparison.Ordinal))
             {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public bool MatchesBlock(
+        Block? block,
+        string normalizedQuery,
+        string compactQuery
+    )
+    {
+        if (block?.Code == null || normalizedQuery.Length == 0) return false;
+        foreach (SearchAlias alias in GetAttributeBackedBlockAliases(block))
+        {
+            if (alias.Normalized.Contains(normalizedQuery, StringComparison.Ordinal)
+                || compactQuery.Length > 0
+                    && alias.Compact.Contains(compactQuery, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public bool MatchesBlockVariantSuffix(
+        AssetLocation? code,
+        string? variantSuffix,
+        string normalizedQuery,
+        string compactQuery
+    )
+    {
+        if (code == null) return false;
+
+        var attributedCode = string.IsNullOrWhiteSpace(variantSuffix)
+            ? code
+            : new AssetLocation(code.Domain, $"{code.Path}-{variantSuffix.Trim()}");
+        return Matches(
+            attributedCode,
+            AtlasSearchAliasKind.Block,
+            normalizedQuery,
+            compactQuery
+        );
+    }
+
+    internal bool TryGetActiveBlockVariantQuery(
+        AssetLocation? code,
+        string? variantSuffix,
+        out string query
+    )
+    {
+        query = "";
+        if (code == null) return false;
+
+        var attributedCode = string.IsNullOrWhiteSpace(variantSuffix)
+            ? code
+            : new AssetLocation(code.Domain, $"{code.Path}-{variantSuffix.Trim()}");
+        string candidate = attributedCode.ToString();
+        var englishTokens = new HashSet<string>(StringComparer.Ordinal);
+        CollectMatchingTranslationTokens(
+            englishTranslations,
+            candidate,
+            englishTokens
+        );
+
+        if (activeTranslations == null) return false;
+        foreach ((string translationKey, string translated) in activeTranslations.GetAllEntries())
+        {
+            if (!TryGetBlockCodePattern(translationKey, out string codePattern)
+                || !codePattern.Contains('*', StringComparison.Ordinal)
+                || !MatchesGlobOrAttributeBacked(candidate, codePattern))
+            {
+                continue;
+            }
+
+            string normalized = Normalize(translated);
+            foreach (string token in normalized.Split(
+                ' ',
+                StringSplitOptions.RemoveEmptyEntries
+            ))
+            {
+                if (token.Length < MinimumAutomatedQueryLength
+                    || englishTokens.Contains(token))
+                {
+                    continue;
+                }
+
+                query = token;
+                return true;
+            }
+
+            if (normalized.Length >= MinimumAutomatedQueryLength)
+            {
+                query = normalized;
                 return true;
             }
         }
@@ -183,10 +285,61 @@ internal sealed class AtlasSearchLanguageIndex
             "en",
             StringComparison.OrdinalIgnoreCase
         ) || MatchesPreparedBlockQuery(knownBlock, activeProbe);
+
+        AssetLocation wildcardBlock = new("game:lantern-small-up");
+        const string wildcardMaterial = "copper";
+        string wildcardKey = "game:block-lantern-small-*-copper";
+        string wildcardEnglishProbe = Normalize(GetTranslation(
+            englishTranslations,
+            wildcardKey
+        ));
+        string wildcardActiveProbe = Normalize(GetTranslation(
+            activeTranslations,
+            wildcardKey
+        ));
+        Block? registeredWildcardBlock = capi.World.GetBlock(wildcardBlock);
+        bool wildcardEnglishFound = wildcardEnglishProbe.Length > 0
+            && MatchesBlock(
+                registeredWildcardBlock,
+                wildcardEnglishProbe,
+                Compact(wildcardEnglishProbe)
+            );
+        bool wildcardActiveFound = string.Equals(
+            ActiveLanguageCode,
+            "en",
+            StringComparison.OrdinalIgnoreCase
+        ) || wildcardActiveProbe.Length > 0
+            && MatchesBlock(
+                registeredWildcardBlock,
+                wildcardActiveProbe,
+                Compact(wildcardActiveProbe)
+            );
         BeginBlockQuery();
 
-        diagnostic = $"{LanguageSummary}; aliases={aliases.Length}; indexed={blockTranslationEntries.Length}";
-        return englishFound && activeFound && englishIndexed && activeIndexed;
+        int lanternPatternCount = 0;
+        string sampleLanternPattern = "none";
+        bool sampleLanternPatternMatches = false;
+        foreach (SearchTranslationEntry entry in wildcardBlockTranslationEntries)
+        {
+            if (!entry.CodePattern.Contains("lantern", StringComparison.Ordinal)) continue;
+            lanternPatternCount++;
+            if (!string.Equals(sampleLanternPattern, "none", StringComparison.Ordinal))
+            {
+                continue;
+            }
+            sampleLanternPattern = entry.CodePattern;
+            sampleLanternPatternMatches = MatchesGlobOrAttributeBacked(
+                wildcardBlock.ToString(),
+                entry.CodePattern
+            );
+        }
+        diagnostic = $"{LanguageSummary}; aliases={aliases.Length}; attributeBackedAliases={(registeredWildcardBlock == null ? 0 : GetAttributeBackedBlockAliases(registeredWildcardBlock).Length)}; candidate={wildcardBlock}; lanternPatterns={lanternPatternCount}; samplePattern={sampleLanternPattern}; sampleMatches={sampleLanternPatternMatches}; materialFixture={wildcardMaterial}; indexed={blockTranslationEntries.Length}";
+        return englishFound
+            && activeFound
+            && englishIndexed
+            && activeIndexed
+            && wildcardEnglishFound
+            && wildcardActiveFound;
     }
 
     internal static string Normalize(string? value)
@@ -251,9 +404,73 @@ internal sealed class AtlasSearchLanguageIndex
                 AddAlias(aliases, unique, GetTranslation(activeTranslations, translationKey));
             }
         }
+        if (kind == AtlasSearchAliasKind.Block)
+        {
+            string candidate = code.ToString();
+            foreach (SearchTranslationEntry entry in wildcardBlockTranslationEntries)
+            {
+                if (MatchesGlobOrAttributeBacked(candidate, entry.CodePattern))
+                {
+                    AddAlias(aliases, unique, entry.Normalized);
+                }
+            }
+        }
 
         SearchAlias[] resolved = aliases.ToArray();
         aliasCache[cacheKey] = resolved;
+        return resolved;
+    }
+
+    private SearchAlias[] GetAttributeBackedBlockAliases(Block block)
+    {
+        string blockCode = block.Code.ToString();
+        if (attributeBackedBlockAliasCache.TryGetValue(
+            blockCode,
+            out SearchAlias[]? cached
+        ))
+        {
+            return cached;
+        }
+
+        var aliases = new List<SearchAlias>();
+        var unique = new HashSet<string>(StringComparer.Ordinal);
+        foreach (CreativeTabAndStackList tabAndStacks in
+            block.CreativeInventoryStacks ?? Array.Empty<CreativeTabAndStackList>())
+        {
+            foreach (JsonItemStack jsonStack in
+                tabAndStacks.Stacks ?? Array.Empty<JsonItemStack>())
+            {
+                if (jsonStack.Code == null
+                    || !string.Equals(
+                        jsonStack.Code.ToString(),
+                        blockCode,
+                        StringComparison.Ordinal
+                    ))
+                {
+                    continue;
+                }
+
+                string material = jsonStack.Attributes?["material"].AsString("") ?? "";
+                if (material.Length == 0) continue;
+                string translationKey = $"{block.Code.Domain}:block-{block.Code.Path}-{material}";
+                AddAlias(
+                    aliases,
+                    unique,
+                    GetTranslation(englishTranslations, translationKey)
+                );
+                if (!ReferenceEquals(activeTranslations, englishTranslations))
+                {
+                    AddAlias(
+                        aliases,
+                        unique,
+                        GetTranslation(activeTranslations, translationKey)
+                    );
+                }
+            }
+        }
+
+        SearchAlias[] resolved = aliases.ToArray();
+        attributeBackedBlockAliasCache[blockCode] = resolved;
         return resolved;
     }
 
@@ -267,6 +484,21 @@ internal sealed class AtlasSearchLanguageIndex
             AddBlockTranslationEntries(activeTranslations, entries, unique);
         }
         return entries.ToArray();
+    }
+
+    private static SearchTranslationEntry[] BuildWildcardBlockTranslationEntries(
+        SearchTranslationEntry[] entries
+    )
+    {
+        var wildcardEntries = new List<SearchTranslationEntry>();
+        foreach (SearchTranslationEntry entry in entries)
+        {
+            if (entry.CodePattern.Contains('*', StringComparison.Ordinal))
+            {
+                wildcardEntries.Add(entry);
+            }
+        }
+        return wildcardEntries.ToArray();
     }
 
     private bool MatchesPreparedBlockQuery(
@@ -305,6 +537,33 @@ internal sealed class AtlasSearchLanguageIndex
                 Compact(normalized)
             );
             if (unique.Add(entry)) entries.Add(entry);
+        }
+    }
+
+    private static void CollectMatchingTranslationTokens(
+        ITranslationService? service,
+        string candidate,
+        HashSet<string> tokens
+    )
+    {
+        if (service == null) return;
+
+        foreach ((string translationKey, string translated) in service.GetAllEntries())
+        {
+            if (!TryGetBlockCodePattern(translationKey, out string codePattern)
+                || !codePattern.Contains('*', StringComparison.Ordinal)
+                || !MatchesGlobOrAttributeBacked(candidate, codePattern))
+            {
+                continue;
+            }
+
+            foreach (string token in Normalize(translated).Split(
+                ' ',
+                StringSplitOptions.RemoveEmptyEntries
+            ))
+            {
+                tokens.Add(token);
+            }
         }
     }
 
@@ -456,6 +715,34 @@ internal sealed class AtlasSearchLanguageIndex
             patternIndex++;
         }
         return patternIndex == pattern.Length;
+    }
+
+    private static bool MatchesGlobOrAttributeBacked(
+        string candidate,
+        string pattern
+    )
+    {
+        if (MatchesGlob(candidate, pattern)) return true;
+
+        // Some blocks, including lanterns, keep their material variant in a
+        // block-entity or item-stack attribute. Their registered block code
+        // therefore has fewer dash-delimited variant segments than its name
+        // translation pattern.
+        string[] candidateSegments = candidate.Split('-');
+        string[] patternSegments = pattern.Split('-');
+        if (patternSegments.Length <= candidateSegments.Length) return false;
+
+        bool matchedWildcardSegment = false;
+        for (int index = 0; index < candidateSegments.Length; index++)
+        {
+            string patternSegment = patternSegments[index];
+            matchedWildcardSegment |= patternSegment.Contains(
+                '*',
+                StringComparison.Ordinal
+            );
+            if (!MatchesGlob(candidateSegments[index], patternSegment)) return false;
+        }
+        return matchedWildcardSegment;
     }
 
     private ITranslationService? LoadPrivateTranslations(string languageCode)
