@@ -181,9 +181,19 @@ internal sealed class AtlasSurfaceHeightTexture : IDisposable
         if (pixels == null || texture == null) return;
 
         IMapChunk? mapChunk = capi.World.BlockAccessor.GetMapChunk(chunkX, chunkZ);
-        ushort[]? heightMap = mapChunk?.WorldGenTerrainHeightMap;
+        ushort[]? heightMap = mapChunk?.WorldGenTerrainHeightMap
+            ?? mapChunk?.RainHeightMap;
         int chunkSize = GlobalConstants.ChunkSize;
-        if (heightMap == null || heightMap.Length < chunkSize * chunkSize) return;
+        if (heightMap == null || heightMap.Length < chunkSize * chunkSize)
+        {
+            TryFillChunkFromLoadedBlocks(
+                chunkX,
+                chunkZ,
+                relativeChunkX,
+                relativeChunkZ
+            );
+            return;
+        }
 
         int samplesPerChunk = chunkSize / HorizontalSampleSize;
         int outputBaseX = relativeChunkX * samplesPerChunk;
@@ -212,6 +222,85 @@ internal sealed class AtlasSurfaceHeightTexture : IDisposable
                 pixels[outputIndex] = EncodeHeight(maximumHeight);
             }
         }
+    }
+
+    private bool TryFillChunkFromLoadedBlocks(
+        int chunkX,
+        int chunkZ,
+        int relativeChunkX,
+        int relativeChunkZ
+    )
+    {
+        if (pixels == null || texture == null) return false;
+
+        int chunkSize = GlobalConstants.ChunkSize;
+        int verticalChunkCount = Math.Max(
+            1,
+            (capi.World.BlockAccessor.MapSizeY + chunkSize - 1) / chunkSize
+        );
+        int dimensionOffset = capi.World.Player.Entity.Pos.Dimension
+            * GlobalConstants.DimensionSizeInChunks;
+        IChunkBlocks?[] loadedBlocks = new IChunkBlocks?[verticalChunkCount];
+        bool anyLoaded = false;
+        for (int chunkY = 0; chunkY < verticalChunkCount; chunkY++)
+        {
+            IWorldChunk? chunk = capi.World.BlockAccessor.GetChunk(
+                chunkX,
+                chunkY + dimensionOffset,
+                chunkZ
+            );
+            if (chunk == null
+                || chunk.Disposed
+                || chunk is IClientChunk clientChunk && !clientChunk.LoadedFromServer)
+            {
+                continue;
+            }
+
+            loadedBlocks[chunkY] = chunk.Data;
+            anyLoaded |= chunk.Data != null;
+        }
+        if (!anyLoaded) return false;
+
+        int samplesPerChunk = chunkSize / HorizontalSampleSize;
+        int outputBaseX = relativeChunkX * samplesPerChunk;
+        int outputBaseZ = relativeChunkZ * samplesPerChunk;
+        for (int sampleZ = 0; sampleZ < samplesPerChunk; sampleZ++)
+        {
+            int sourceZ = sampleZ * HorizontalSampleSize;
+            for (int sampleX = 0; sampleX < samplesPerChunk; sampleX++)
+            {
+                int sourceX = sampleX * HorizontalSampleSize;
+                int maximumHeight = 0;
+                for (int chunkY = verticalChunkCount - 1;
+                    chunkY >= 0 && maximumHeight == 0;
+                    chunkY--)
+                {
+                    IChunkBlocks? data = loadedBlocks[chunkY];
+                    if (data == null) continue;
+                    int remainingHeight = capi.World.BlockAccessor.MapSizeY
+                        - chunkY * chunkSize;
+                    int localHeight = Math.Min(chunkSize, Math.Max(0, remainingHeight));
+                    for (int localY = localHeight - 1; localY >= 0; localY--)
+                    {
+                        int index = sourceX
+                            + sourceZ * chunkSize
+                            + localY * chunkSize * chunkSize;
+                        if (index < 0 || index >= data.Length) continue;
+                        if (data.GetBlockId(index, BlockLayersAccess.Solid) == 0) continue;
+
+                        maximumHeight = chunkY * chunkSize + localY;
+                        break;
+                    }
+                }
+
+                if (maximumHeight <= 0) continue;
+                int outputIndex = (outputBaseZ + sampleZ) * texture.Width
+                    + outputBaseX + sampleX;
+                pixels[outputIndex] = EncodeHeight(maximumHeight);
+            }
+        }
+
+        return true;
     }
 
     private void FillExteriorEnvelopeRow(int row)

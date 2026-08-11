@@ -51,6 +51,9 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private static HashSet<(int X, int Z)>? atlasVisibleTerrainColumns;
 
     [ThreadStatic]
+    private static HashSet<(int X, int Z)>? atlasConsideredTerrainColumns;
+
+    [ThreadStatic]
     private static ExactChunkRendererAdapter? atlasLiquidAdapter;
 
     [ThreadStatic]
@@ -99,6 +102,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private bool loggedTransparentSuccess;
     private bool loggedStableLiquidDiagnostics;
     private readonly HashSet<(int X, int Z)> visibleTerrainColumns = new();
+    private readonly HashSet<(int X, int Z)> consideredTerrainColumns = new();
     private readonly Dictionary<(int X, int Y, int Z), bool> liquidChunkCompletion = new();
     private int allowedLiquidLocationCount;
     private int rejectedLiquidLocationCount;
@@ -114,6 +118,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private bool loggedOreTextureBindingFailure;
     private bool loggedPreparationClearFailure;
     private bool loggedNormalWorldShaderRestore;
+    private bool loggedTerrainCoverage;
     private bool disposed;
 
     public int LastRenderedEntityCount { get; private set; }
@@ -615,7 +620,9 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             projectionPushed = true;
             render.CurrentActiveShader?.Stop();
             visibleTerrainColumns.Clear();
+            consideredTerrainColumns.Clear();
             atlasVisibleTerrainColumns = visibleTerrainColumns;
+            atlasConsideredTerrainColumns = consideredTerrainColumns;
             atlasTerrainCollectionOverride = true;
             try
             {
@@ -657,6 +664,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 atlasTerrainCollectionOverride = false;
             }
             opaqueCompletedMilliseconds = capi.ElapsedMilliseconds;
+            LogTerrainCoverage(viewDistanceBlocks);
             LastRenderedEntityCount = entityModelRenderer.Render(
                 deltaTime,
                 view,
@@ -729,6 +737,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             atlasTerrainCollectionOverride = false;
             atlasLiquidVisibilityOverride = false;
             atlasVisibleTerrainColumns = null;
+            atlasConsideredTerrainColumns = null;
             atlasLiquidAdapter = null;
             EndOreTextureBinding();
             atlasVisibilityOverride = false;
@@ -1447,6 +1456,16 @@ void main()
     {
         if (!atlasVisibilityOverride) return true;
 
+        if (atlasTerrainCollectionOverride
+            && __instance.IndicesEnd > __instance.IndicesStart)
+        {
+            (int X, int Y, int Z) consideredChunk = GetMeshChunk(
+                __instance,
+                GlobalConstants.ChunkSize
+            );
+            atlasConsideredTerrainColumns?.Add((consideredChunk.X, consideredChunk.Z));
+        }
+
         if (__instance.Hide)
         {
             __result = false;
@@ -1496,6 +1515,82 @@ void main()
         }
 
         return false;
+    }
+
+    private void LogTerrainCoverage(int viewDistanceBlocks)
+    {
+        if (loggedTerrainCoverage) return;
+        loggedTerrainCoverage = true;
+
+        int chunkSize = GlobalConstants.ChunkSize;
+        int playerChunkX = (int)Math.Floor(
+            capi.World.Player.Entity.Pos.X / chunkSize
+        );
+        int playerChunkZ = (int)Math.Floor(
+            capi.World.Player.Entity.Pos.Z / chunkSize
+        );
+        int chunkRadius = Math.Max(1, (viewDistanceBlocks + chunkSize - 1) / chunkSize);
+        int verticalChunkCount = Math.Max(
+            1,
+            (capi.World.BlockAccessor.MapSizeY + chunkSize - 1) / chunkSize
+        );
+        int dimensionOffset = capi.World.Player.Entity.Pos.Dimension
+            * GlobalConstants.DimensionSizeInChunks;
+        HashSet<(int X, int Z)> loadedColumns = new();
+        for (int chunkZ = playerChunkZ - chunkRadius;
+            chunkZ <= playerChunkZ + chunkRadius;
+            chunkZ++)
+        {
+            for (int chunkX = playerChunkX - chunkRadius;
+                chunkX <= playerChunkX + chunkRadius;
+                chunkX++)
+            {
+                for (int chunkY = 0; chunkY < verticalChunkCount; chunkY++)
+                {
+                    if (capi.World.BlockAccessor.GetChunk(
+                        chunkX,
+                        chunkY + dimensionOffset,
+                        chunkZ
+                    ) is not IClientChunk { LoadedFromServer: true })
+                    {
+                        continue;
+                    }
+
+                    loadedColumns.Add((chunkX, chunkZ));
+                    break;
+                }
+            }
+        }
+
+        List<string> missingMeshSamples = new();
+        int loadedWithoutMesh = 0;
+        foreach ((int X, int Z) column in loadedColumns)
+        {
+            if (consideredTerrainColumns.Contains(column)) continue;
+            loadedWithoutMesh++;
+            if (missingMeshSamples.Count < 12)
+            {
+                missingMeshSamples.Add(
+                    $"{column.X - playerChunkX:+0;-0;0},{column.Z - playerChunkZ:+0;-0;0}"
+                );
+            }
+        }
+
+        int meshOutsideAtlasFrustum = 0;
+        foreach ((int X, int Z) column in consideredTerrainColumns)
+        {
+            if (!visibleTerrainColumns.Contains(column)) meshOutsideAtlasFrustum++;
+        }
+
+        capi.Logger.Notification(
+            "[ModernAtlas] Exact terrain coverage: client-loaded columns={0}, completed mesh columns={1}, atlas-visible mesh columns={2}, loaded without completed mesh={3}, mesh columns outside atlas frustum={4}; missing mesh offsets={5}.",
+            loadedColumns.Count,
+            consideredTerrainColumns.Count,
+            visibleTerrainColumns.Count,
+            loadedWithoutMesh,
+            meshOutsideAtlasFrustum,
+            missingMeshSamples.Count == 0 ? "none" : string.Join(" ", missingMeshSamples)
+        );
     }
 
     private void BeginOreTextureBinding(bool enabled)

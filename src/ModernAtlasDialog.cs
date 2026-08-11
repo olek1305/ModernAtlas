@@ -81,7 +81,6 @@ public sealed class ModernAtlasDialog : GuiDialog
     private float fogTextureZoom = -1;
     private float fogTexturePitch = -1;
     private long lastFogTextureBuildMilliseconds;
-    private bool pausedGameForAtlas;
     private float atlasAnimationSeconds;
     private float frozenWindWaveCounter;
     private float frozenWindWaveCounterHighFrequency;
@@ -145,9 +144,20 @@ public sealed class ModernAtlasDialog : GuiDialog
         get
         {
             int viewDistance = capi.Settings.Int["viewDistance"];
-            return viewDistance > 0
-                ? Math.Clamp(viewDistance, GlobalConstants.ChunkSize, MaximumGameViewDistance)
+            // Vintage Story exposes the configured width of the rendered
+            // chunk area. Exact completed mesh pools extend approximately
+            // half of that value from the player in each direction. Keep one
+            // chunk as a streaming guard because the received outer columns
+            // can exist before their GPU meshes are complete. The atlas must
+            // conceal that unavailable edge instead of exposing framebuffer
+            // gaps or inventing replacement terrain.
+            int configuredDiameter = viewDistance > 0
+                ? Math.Clamp(viewDistance, GlobalConstants.ChunkSize * 2, MaximumGameViewDistance)
                 : DefaultViewDistance;
+            return Math.Max(
+                GlobalConstants.ChunkSize,
+                configuredDiameter / 2 - GlobalConstants.ChunkSize
+            );
         }
     }
     private bool EffectiveFogEnabled => capi.IsSinglePlayer
@@ -301,7 +311,6 @@ public sealed class ModernAtlasDialog : GuiDialog
         selectedEntityId = null;
         ClearSearch();
         ResetPointerDrag();
-        PauseSingleplayerForAtlas();
         atlasAnimationSeconds = 0;
         loggedEntityModels = false;
         CaptureAnimationFrame();
@@ -893,7 +902,6 @@ public sealed class ModernAtlasDialog : GuiDialog
         preparingSurfaceFilter = false;
         surfaceHeightTexture.Reset();
         ResetPointerDrag();
-        ResumeSingleplayerAfterAtlas();
         ReleaseNormalWorldSnapshot();
         ScheduleNormalWorldShaderRestore();
         base.OnGuiClosed();
@@ -1486,6 +1494,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             InvalidateFogTexture();
             ApplyZoomWheel(1, false);
             ApplyZoomWheel(1, false);
+            // The automated check validates a settled zoom level. Snap only
+            // its synthetic wheel input to the target so live world frames
+            // and newly completed chunk meshes cannot make the two-second
+            // capture race camera interpolation.
+            zoom = targetZoom;
             automatedSmokeTestPartialZoomStartedSeconds =
                 automatedSmokeTestElapsedSeconds;
             automatedSmokeTestPartialZoomPending = true;
@@ -2129,12 +2142,7 @@ public sealed class ModernAtlasDialog : GuiDialog
                     "[ModernAtlas] Could not close the atlas normally while leaving the world: {0}",
                     exception.Message
                 );
-                ResumeSingleplayerAfterAtlas();
             }
-        }
-        else
-        {
-            ResumeSingleplayerAfterAtlas();
         }
 
         try
@@ -2165,7 +2173,6 @@ public sealed class ModernAtlasDialog : GuiDialog
         RestoreAutomatedSmokeTestPreferences();
         automatedSmokeTestActive = false;
         automatedSmokeTestCompletion = null;
-        ResumeSingleplayerAfterAtlas();
         exactChunkRenderer?.Dispose();
         exactChunkRenderer = null;
         surfaceHeightTexture.Dispose();
@@ -3440,15 +3447,106 @@ public sealed class ModernAtlasDialog : GuiDialog
         float radius = GameViewDistance;
         AtlasViewportBounds viewport = AtlasViewport;
         float aspect = viewport.Width / (float)Math.Max(1, viewport.Height);
+        float yaw = targetYawDegrees * GameMath.DEG2RAD;
         float pitch = targetPitchDegrees * GameMath.DEG2RAD;
 
-        // A circular radius projects to an ellipse when the camera tilts. Add
-        // vertical headroom for trees, buildings and hills so neither the top
-        // nor bottom edge is clipped at low camera angles.
-        float horizontalFit = radius / Math.Max(0.5f, aspect);
-        float verticalFit = radius * Math.Abs(MathF.Sin(pitch))
+        // The engine's completed chunks rarely form a perfect circle while it
+        // is streaming. Measure only client-loaded columns and project every
+        // chunk corner through the selected yaw, so an asymmetric or diagonal
+        // edge is still completely visible after reset or opening.
+        bool measuredLoadedTerrain = TryMeasureLoadedTerrainFootprint(
+            yaw,
+            out float horizontalExtent,
+            out float forwardExtent
+        );
+        if (!measuredLoadedTerrain)
+        {
+            horizontalExtent = radius;
+            forwardExtent = radius;
+        }
+
+        // Add vertical headroom for trees, buildings and hills so neither the
+        // top nor bottom edge is clipped at low camera angles.
+        float horizontalFit = horizontalExtent / Math.Max(0.5f, aspect);
+        float verticalFit = forwardExtent * Math.Abs(MathF.Sin(pitch))
             + Math.Min(192, radius * 0.3f) * Math.Abs(MathF.Cos(pitch));
         targetZoom = Math.Clamp(Math.Max(horizontalFit, verticalFit) * 1.08f, 80, 30000);
+    }
+
+    private bool TryMeasureLoadedTerrainFootprint(
+        float yaw,
+        out float horizontalExtent,
+        out float forwardExtent
+    )
+    {
+        horizontalExtent = 0;
+        forwardExtent = 0;
+
+        int chunkSize = GlobalConstants.ChunkSize;
+        int radius = GameViewDistance;
+        int minimumChunkX = (int)Math.Floor(
+            (capi.World.Player.Entity.Pos.X - radius) / chunkSize
+        );
+        int maximumChunkX = (int)Math.Floor(
+            (capi.World.Player.Entity.Pos.X + radius) / chunkSize
+        );
+        int minimumChunkZ = (int)Math.Floor(
+            (capi.World.Player.Entity.Pos.Z - radius) / chunkSize
+        );
+        int maximumChunkZ = (int)Math.Floor(
+            (capi.World.Player.Entity.Pos.Z + radius) / chunkSize
+        );
+        int verticalChunkCount = Math.Max(
+            1,
+            (capi.World.BlockAccessor.MapSizeY + chunkSize - 1) / chunkSize
+        );
+        double originX = targetCenterX;
+        double originZ = targetCenterZ;
+        float sinYaw = MathF.Sin(yaw);
+        float cosYaw = MathF.Cos(yaw);
+        float measuredHorizontalExtent = 0;
+        float measuredForwardExtent = 0;
+        bool found = false;
+
+        for (int chunkZ = minimumChunkZ; chunkZ <= maximumChunkZ; chunkZ++)
+        {
+            for (int chunkX = minimumChunkX; chunkX <= maximumChunkX; chunkX++)
+            {
+                bool loaded = false;
+                for (int chunkY = 0; chunkY < verticalChunkCount; chunkY++)
+                {
+                    if (capi.World.BlockAccessor.GetChunk(chunkX, chunkY, chunkZ)
+                        is IClientChunk { LoadedFromServer: true })
+                    {
+                        loaded = true;
+                        break;
+                    }
+                }
+                if (!loaded) continue;
+
+                found = true;
+                double minimumX = chunkX * (double)chunkSize - originX;
+                double maximumX = minimumX + chunkSize;
+                double minimumZ = chunkZ * (double)chunkSize - originZ;
+                double maximumZ = minimumZ + chunkSize;
+                MeasureProjectedCorner(minimumX, minimumZ);
+                MeasureProjectedCorner(minimumX, maximumZ);
+                MeasureProjectedCorner(maximumX, minimumZ);
+                MeasureProjectedCorner(maximumX, maximumZ);
+            }
+        }
+
+        horizontalExtent = measuredHorizontalExtent;
+        forwardExtent = measuredForwardExtent;
+        return found;
+
+        void MeasureProjectedCorner(double x, double z)
+        {
+            float right = (float)(x * cosYaw - z * sinYaw);
+            float forward = (float)(x * sinYaw + z * cosYaw);
+            measuredHorizontalExtent = Math.Max(measuredHorizontalExtent, Math.Abs(right));
+            measuredForwardExtent = Math.Max(measuredForwardExtent, Math.Abs(forward));
+        }
     }
 
     private void OnFogToggled(bool enabled)
@@ -3686,26 +3784,6 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (surfaceY > 0)
         {
             centerY = surfaceY + 0.5;
-        }
-    }
-
-    private void PauseSingleplayerForAtlas()
-    {
-        pausedGameForAtlas = capi.IsSinglePlayer && !capi.IsGamePaused;
-        if (pausedGameForAtlas)
-        {
-            capi.PauseGame(true);
-        }
-    }
-
-    private void ResumeSingleplayerAfterAtlas()
-    {
-        if (!pausedGameForAtlas) return;
-
-        pausedGameForAtlas = false;
-        if (capi.IsSinglePlayer)
-        {
-            capi.PauseGame(false);
         }
     }
 
