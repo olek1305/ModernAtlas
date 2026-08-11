@@ -15,12 +15,15 @@ geometry is concealed by the player-anchored fog boundary.
    atlas-only transient resources within a frame budget. The camera stays fixed
    while thick rectangular forearms tesselated from the base Seraph arm shape
    and shaded with the player's composed entity skin texture and renderer tint
-   retrieve and unroll the view-space scroll. Matching third-person arm clips
-   use the same phase timings, and the world-space scroll is anchored
-   to the animated `LeftHand` and `RightHand` attachment points instead of the
-   player origin. Cancellation restores the captured camera, held-item and
-   animation state.
-2. Open a dedicated full-screen atlas framebuffer and orthographic camera.
+   retrieve and unroll the view-space scroll. The local native player gesture
+   remains disabled so it cannot add a third first-person hand. Remote
+   third-person phase clips use the same timings, and the world-space scroll is
+   anchored to the animated `LeftHand` and `RightHand` attachment points
+   instead of the player origin. Cancellation restores the captured camera,
+   held-item and animation state.
+2. Open a dedicated atlas framebuffer and orthographic camera. By default the
+   completed framebuffer is sampled onto a curved 3D parchment mesh between
+   modeled scroll rollers; Settings can instead blit it full-screen.
 3. Reuse completed opaque chunk meshes with the engine's registered block
    texture atlases, color maps and current animation uniforms.
 4. Draw only server-authorized, already loaded living models into the same
@@ -31,15 +34,17 @@ geometry is concealed by the player-anchored fog boundary.
 6. Draw completed liquid mesh pools with the stable ModernAtlas liquid shader.
 7. Apply the transient cave-safety, Survival ore-concealment, loaded-data layer
    and disclosure-boundary
-   filters, compose OIT into the native Primary framebuffer, and blit once to
-   the window.
-8. Draw optional live cloud cover, fog and lightweight GUI markers afterward.
+   filters and compose OIT into the native Primary framebuffer.
+8. Draw optional live cloud cover into the completed atlas image, then either
+   map that image onto the scroll or blit it to the window. Draw the matching
+   fog and interactive GUI controls inside the selected presentation bounds.
 9. Restore every modified engine uniform and framebuffer state before normal
    world rendering resumes.
-10. After any normal atlas close path, show the live world again while both
-    hands roll the scroll, the right hand releases it and the left hand carries
-    it below-left. End the transition as it leaves the camera view so neither
-    the scroll nor a custom first-person arm sweeps back into view afterward.
+10. Outside Creative mode and when scroll transitions are enabled, a normal
+    atlas close shows the live world again while both hands roll the scroll,
+    the right hand releases it and the left hand carries it below-left. End the
+    transition as it leaves the camera view so neither the scroll nor a custom
+    first-person arm sweeps back into view afterward.
 
 ## Visibility and disclosure
 

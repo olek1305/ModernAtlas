@@ -7,7 +7,11 @@ client-side; an optional server component supplies fog and living-entity policy.
 ## Current 0.6.2 prototype
 
 - keeps the vanilla map, discovered areas and waypoints intact;
-- opens a separate full-screen 3D atlas with `G` (rebindable in Controls) after
+- opens a separate interactive 3D atlas with `G` (rebindable in Controls),
+  presented by default inside a curved three-dimensional parchment scroll
+  whose map, buttons, search and layer controls remain fully interactive;
+  Settings can switch the same exact atlas renderer to full-screen mode;
+  opening begins
   a short first-person transition in which the stationary view shows only the
   thick rectangular Seraph forearms using the player's composed skin texture
   and tint retrieving a pocket scroll from below-left and unrolling it with
@@ -15,7 +19,8 @@ client-side; an optional server component supplies fog and living-entity policy.
   scroll in reverse and ends as soon as the scroll leaves view, without a
   returning hand sweep, while matching multiplayer gestures keep the scroll on
   the animated hand attachment points; `G` skips and `Escape` cancels only the
-  opening;
+  opening; Creative mode skips both scroll transitions, and the matching
+  Settings switch can skip both opening and closing in other modes;
 - pauses the game while the atlas is open in singleplayer and never attempts
   to pause a multiplayer server;
 - provides an `Atlas animations` switch: enabled keeps atlas liquids and
@@ -80,7 +85,8 @@ client-side; an optional server component supplies fog and living-entity policy.
 - includes an atlas-only visual lab under Settings for exposure, layer opacity,
   boundary softness, cave-mask brightness and neutral fog palettes;
 - uses compact translucent controls with white typography, a normal Settings
-  switch for map-layer controls, a Creative/Cheat-only panel for cave mode,
+  switch for the default 3D-scroll presentation and map-layer controls, a
+  Creative/Cheat-only panel for cave mode,
   loaded-map search and camera-angle locking, plus a `Hide UI` view that
   `Escape` restores;
 - forces the unexplored-area mask in multiplayer while using only exact chunk

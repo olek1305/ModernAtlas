@@ -92,7 +92,12 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
         }
     }
 
-    public bool Render(float[] projection, double[] view, float pausedAnimationDeltaTime)
+    public bool Render(
+        float[] projection,
+        double[] view,
+        float pausedAnimationDeltaTime,
+        bool renderIntoPrimary = false
+    )
     {
         if (disabled) return false;
         if (capi.Settings.Int["cloudRenderMode"] != 1)
@@ -138,7 +143,7 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
             );
 
             render.CurrentActiveShader?.Stop();
-            render.CurrentFrameBuffer = null;
+            render.CurrentFrameBuffer = renderIntoPrimary ? primary : null;
             render.GLDisableDepthTest();
             render.GLDepthMask(false);
             render.GlToggleBlend(true, EnumBlendMode.Standard);
@@ -151,8 +156,12 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
             shader.Uniform("cloudMapWidth", (float)cloudMapWidth);
             shader.Uniform(
                 "depthScale",
-                primary.Width / (float)Math.Max(1, render.FrameWidth),
-                primary.Height / (float)Math.Max(1, render.FrameHeight)
+                renderIntoPrimary
+                    ? 1f
+                    : primary.Width / (float)Math.Max(1, render.FrameWidth),
+                renderIntoPrimary
+                    ? 1f
+                    : primary.Height / (float)Math.Max(1, render.FrameHeight)
             );
             shader.BindTexture2D("depthTex", primary.DepthTextureId, 0);
             shader.BindTexture2D("cloudMap", textureMap, 8);

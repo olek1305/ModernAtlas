@@ -437,7 +437,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         bool liveLightingEnabled,
         int fixedSunHour,
         float pausedCloudAnimationDeltaTime,
-        ModernAtlasServerPolicy entityPolicy
+        ModernAtlasServerPolicy entityPolicy,
+        bool blitToDefault
     )
     {
         if (disabled) return false;
@@ -679,10 +680,14 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 mapLayerTexture,
                 mapLayerOpacity,
                 fogEnabled,
-                viewDistanceBlocks
+                viewDistanceBlocks,
+                blitToDefault
             ))
             {
-                blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
+                if (blitToDefault)
+                {
+                    blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
+                }
             }
             transparentCompletedMilliseconds = capi.ElapsedMilliseconds;
 
@@ -871,7 +876,11 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         cloudRenderer?.Dispose();
     }
 
-    public void RenderSurfacePreparationFrame(bool fogEnabled, Vec3f fogColor)
+    public void RenderSurfacePreparationFrame(
+        bool fogEnabled,
+        Vec3f fogColor,
+        bool blitToDefault
+    )
     {
         if (disabled) return;
 
@@ -884,7 +893,10 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 ? new[] { fogColor.X, fogColor.Y, fogColor.Z, 1f }
                 : new[] { 0.035f, 0.075f, 0.11f, 1f };
             render.ClearFrameBuffer(primaryFramebuffer, atlasBackground, true, true);
-            blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
+            if (blitToDefault)
+            {
+                blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
+            }
             render.CurrentFrameBuffer = null;
         }
         catch (Exception exception)
@@ -905,6 +917,17 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
 
     public bool ValidateSurvivalOreConcealment(out string diagnostic) =>
         oreTextureReplacement.Validate(out diagnostic);
+
+    public int PrimaryColorTextureId
+    {
+        get
+        {
+            FrameBufferRef primary = capi.Render.FrameBuffers[(int)EnumFrameBuffer.Primary];
+            return primary.ColorTextureIds is { Length: > 0 }
+                ? primary.ColorTextureIds[0]
+                : 0;
+        }
+    }
 
     private bool ConfigureAtlasFilters(
         AtlasSurfaceHeightTexture? surfaceHeightTexture,
@@ -1561,7 +1584,8 @@ void main()
         AtlasMapLayerTexture? mapLayerTexture,
         float mapLayerOpacity,
         bool fogEnabled,
-        int disclosureRadius
+        int disclosureRadius,
+        bool blitToDefault
     )
     {
         if (transparentPassDisabled) return false;
@@ -1644,10 +1668,26 @@ void main()
             {
                 EndOreTextureBinding();
             }
-            blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
-            if (cloudsEnabled)
+            if (cloudsEnabled && !blitToDefault)
             {
-                cloudRenderer?.Render(projection, view, pausedCloudAnimationDeltaTime);
+                cloudRenderer?.Render(
+                    projection,
+                    view,
+                    pausedCloudAnimationDeltaTime,
+                    true
+                );
+            }
+            if (blitToDefault)
+            {
+                blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
+                if (cloudsEnabled)
+                {
+                    cloudRenderer?.Render(
+                        projection,
+                        view,
+                        pausedCloudAnimationDeltaTime
+                    );
+                }
             }
 
             if (!loggedTransparentSuccess)

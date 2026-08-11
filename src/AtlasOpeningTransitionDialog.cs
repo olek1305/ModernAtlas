@@ -11,8 +11,9 @@ namespace ModernAtlas;
 /// <summary>
 /// A first-person atlas transition over the live world. The camera remains
 /// fixed while first-person forearms built from the loaded Seraph model
-/// retrieve, hold and unroll a physical scroll. Matching clips run on the
-/// third-person model.
+/// retrieve, hold and unroll a physical scroll. The local player's native
+/// first- and third-person gesture layers stay untouched so no extra hand is
+/// drawn alongside the two transition-owned arms.
 /// </summary>
 internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
 {
@@ -1504,63 +1505,15 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         float easeOutSpeed = 8f
     )
     {
-        try
-        {
-            EntityPlayer player = capi.World.Player.Entity;
-            bool thirdPersonStarted = StartClientAnimation(
-                player,
-                player.TpAnimManager,
-                sourceCode,
-                transitionCode,
-                speed,
-                easeOutSpeed
-            );
-            bool firstPersonStarted = StartClientAnimation(
-                player,
-                player.SelfFpAnimManager,
-                $"{sourceCode}-fp",
-                transitionCode,
-                speed,
-                easeOutSpeed
-            );
-            return thirdPersonStarted && firstPersonStarted;
-        }
-        catch (Exception exception)
-        {
-            capi.Logger.Warning(
-                "[ModernAtlas] Could not start opening animation {0}: {1}",
-                sourceCode,
-                exception.Message
-            );
-            return false;
-        }
-    }
-
-    private static bool StartClientAnimation(
-        EntityPlayer player,
-        IAnimationManager manager,
-        string sourceCode,
-        string transitionCode,
-        float speed,
-        float easeOutSpeed
-    )
-    {
-        if (!player.Properties.Client.AnimationsByMetaCode.TryGetValue(
-            sourceCode,
-            out AnimationMetaData? source
-        ))
-        {
-            return false;
-        }
-
-        AnimationMetaData animation = source.Clone();
-        animation.Code = transitionCode;
-        animation.AnimationSpeed = speed;
-        animation.ClientSide = true;
-        animation.EaseInSpeed = Math.Max(animation.EaseInSpeed, 8f);
-        animation.EaseOutSpeed = Math.Max(animation.EaseOutSpeed, easeOutSpeed);
-        animation.Init();
-        return manager.StartAnimation(animation);
+        // The transition already renders both skinned Seraph forearms. A
+        // simultaneous native SelfFp/Tp clip creates a third visible hand on
+        // first-person and full-body renderers, so local gesture animation is
+        // deliberately suppressed for every scroll phase.
+        _ = sourceCode;
+        _ = transitionCode;
+        _ = speed;
+        _ = easeOutSpeed;
+        return true;
     }
 
     private void StopClientAnimation(string code)
@@ -1685,7 +1638,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             if (passed)
             {
                 capi.Logger.Notification(
-                    "[ModernAtlas] AUTOMATED {0} TRANSITION CHECK PASSED: stationary camera, first-person arms, synchronized third-person gesture, attached physical scroll and restored player state.",
+                    "[ModernAtlas] AUTOMATED {0} TRANSITION CHECK PASSED: stationary camera, two transition-owned first-person arms, no native local-player gesture, attached physical scroll and restored player state.",
                     closing ? "CLOSING" : "OPENING"
                 );
             }

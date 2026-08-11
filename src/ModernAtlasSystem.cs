@@ -108,7 +108,8 @@ public sealed class ModernAtlasSystem : ModSystem
             RequestCloseAtlas,
             GetStableLiquidShader,
             GetAtlasCloudShader,
-            GetAtlasOpacityShader
+            GetAtlasOpacityShader,
+            GetAtlasScrollShader
         );
         openingTransition = new AtlasOpeningTransitionDialog(
             api,
@@ -177,6 +178,11 @@ public sealed class ModernAtlasSystem : ModSystem
         if (dialog?.IsOpened() != true) return false;
 
         if (!dialog.TryClose()) return false;
+        if (ShouldSkipScrollTransitions())
+        {
+            onCompleted?.Invoke(true);
+            return true;
+        }
         if (openingTransition == null
             || !openingTransition.BeginClosing(
                 false,
@@ -195,7 +201,7 @@ public sealed class ModernAtlasSystem : ModSystem
     {
         if (dialog == null || openingTransition == null) return;
 
-        if (config?.SkipOpeningAnimation == true)
+        if (ShouldSkipScrollTransitions())
         {
             if (!dialog.TryOpen())
             {
@@ -222,6 +228,21 @@ public sealed class ModernAtlasSystem : ModSystem
                 "[ModernAtlas] The opening transition was unavailable; opening the atlas directly."
             );
             dialog.TryOpen();
+        }
+    }
+
+    private bool ShouldSkipScrollTransitions()
+    {
+        if (config?.SkipOpeningAnimation == true) return true;
+        try
+        {
+            return clientApi?.IsSinglePlayer == true
+                && clientApi.World.Player?.WorldData.CurrentGameMode
+                    == EnumGameMode.Creative;
+        }
+        catch
+        {
+            return false;
         }
     }
 

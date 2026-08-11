@@ -12,8 +12,10 @@ structures, ruins and trees. It should resemble the approved ModernAtlas
 mock-up: a tilted, textured, softly lit map with optional live-looking cloud
 cover.
 
-The atlas is a dedicated full-screen 3D GUI opened with `G`; it is not a skin
-for the vanilla blue 2D map. `G` and `Escape` must both close it.
+The atlas is a dedicated interactive 3D GUI opened with `G`; it is not a skin
+for the vanilla blue 2D map. Its default presentation is an open 3D parchment
+scroll containing the live atlas and controls, while Settings offers an
+optional full-screen presentation. `G` and `Escape` must both close it.
 
 ModernAtlas work is judged by the atlas view. Do not expand a map task into
 changes to ordinary world rendering unless ModernAtlas failed to restore state
@@ -238,7 +240,8 @@ the product scope when the atlas itself is correct.
   game's perspective-camera shadow map caused square shadows and roughly one
   frame per second. The engine value is restored after atlas draw.
 - The atlas uses smooth target-camera interpolation and draws at GUI order
-  `0.98` so ordinary third-party HUDs remain behind the full-screen map.
+  `0.98` so ordinary third-party HUDs remain behind the scroll or full-screen
+  map presentation.
 - Persistent ModernAtlas terrain cache code, shaders and Settings controls are
   removed. The atlas renders only current exact chunk meshes.
 - Cave openings use a thin neutral-gray atlas-only band of real geometry,
@@ -268,10 +271,13 @@ the product scope when the atlas itself is correct.
   the camera remains fixed while the left hand retrieves a procedural pocket
   scroll from below-left, the right hand takes the other end and both hands
   unroll it before the existing light enters the atlas. Closing the atlas rolls
-  and stows the scroll in reverse. The third-person scroll uses the same phase
-  timings and follows the animated `LeftHand` and `RightHand` attachment points.
-  Every captured camera, held-item and animation field is restored on
-  cancellation, completion and world leave.
+  and stows the scroll in reverse. Creative skips both transitions. The local
+  player's native first- and third-person gesture layers remain untouched so
+  only the two scroll-owned arms can appear in first person. Remote players'
+  third-person scroll uses the same phase timings and follows the animated
+  `LeftHand` and `RightHand` attachment points. Every captured camera,
+  held-item and animation field is restored on cancellation, completion and
+  world leave.
 - Survival-safe atlas rendering replaces all registered
   `EnumBlockMaterial.Ore` composite textures with their baked host-rock base
   textures through cycle-safe, incrementally built transient GPU lookups.

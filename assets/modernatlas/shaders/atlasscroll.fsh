@@ -5,6 +5,7 @@ uniform float alpha;
 uniform float lightSweep;
 uniform sampler2D entityTex;
 uniform vec4 entityColor;
+uniform sampler2D atlasTex;
 
 in vec2 uv;
 in vec3 viewNormal;
@@ -75,9 +76,13 @@ void main(void)
         float weave = sin((uv.x + uv.y) * 110.0) * 0.025;
         baseColor = vec3(0.16, 0.20, 0.18) + weave;
     }
-    else
+    else if (materialKind == 6)
     {
         baseColor = texture(entityTex, uv).rgb * entityColor.rgb;
+    }
+    else
+    {
+        baseColor = texture(atlasTex, uv).rgb;
     }
 
     vec3 normal = normalize(viewNormal);
@@ -89,7 +94,9 @@ void main(void)
     float sweep = materialKind == 0
         ? exp(-pow((uv.x - sweepCenter) * 6.0, 2.0)) * smoothstep(0.0, 0.28, lightSweep)
         : 0.0;
-    vec3 finalColor = baseColor * (diffuse + rim);
+    vec3 finalColor = materialKind == 7
+        ? baseColor * (0.90 + diffuse * 0.10)
+        : baseColor * (diffuse + rim);
     finalColor += vec3(0.30, 0.42, 0.38) * sweep * 0.50;
     outColor = vec4(finalColor, alpha);
 }
