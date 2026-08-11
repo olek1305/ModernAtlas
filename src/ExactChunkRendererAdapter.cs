@@ -888,50 +888,26 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             return;
         }
 
-        foreach (EnumShaderProgram program in AtlasFilterPrograms)
-        {
-            if (!atlasFilterShaders.TryGetValue(
-                program,
-                out AtlasFilterShaderState? state
-            ))
-            {
-                continue;
-            }
-
-            IShaderProgram shader = state.Shader;
-            if (shader.Disposed || shader.FragmentShader == null)
-            {
-                atlasFilterShaders.Remove(program);
-                continue;
-            }
-
-            shader.FragmentShader.Code = state.OriginalFragmentCode;
-            atlasFilterShaders.Remove(program);
-        }
-
         try
         {
-            capi.Render.CurrentActiveShader?.Stop();
-            if (!capi.Shader.ReloadShaders())
-            {
-                capi.Logger.Warning(
-                    "[ModernAtlas] The engine reported a failure while reloading normal-world shaders."
-                );
-                return;
-            }
+            // Keep the three already compiled chunk programs for this world
+            // and disable only ModernAtlas' conditional paths. Restoring the
+            // source and calling ReloadShaders() recompiles every game and mod
+            // shader, which caused a visible freeze whenever G was closed.
+            DisableAtlasFilterUniforms();
 
             if (!loggedNormalWorldShaderRestore)
             {
                 loggedNormalWorldShaderRestore = true;
                 capi.Logger.Notification(
-                    "[ModernAtlas] Restored the complete normal-world shader state after closing the atlas."
+                    "[ModernAtlas] Disabled atlas-only chunk shader paths without reloading world shaders."
                 );
             }
         }
         catch (Exception exception)
         {
             capi.Logger.Warning(
-                "[ModernAtlas] Could not reload the normal-world shaders: {0}",
+                "[ModernAtlas] Could not disable the atlas-only chunk shader paths: {0}",
                 exception.Message
             );
         }
@@ -1017,20 +993,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             return false;
         }
 
-        float radius = Math.Max(GlobalConstants.ChunkSize, disclosureRadius);
-        float baseFeather = fogEnabled
-            ? Math.Min(
-                radius * 0.25f,
-                Math.Max(GlobalConstants.ChunkSize * 2f, radius * 0.10f)
-            )
-            : Math.Min(
-                radius * 0.25f,
-                Math.Max(GlobalConstants.ChunkSize * 0.5f, radius * 0.03f)
-            );
-        float feather = Math.Min(radius * 0.40f, baseFeather * atlasBoundarySoftness);
-        Vec3f boundaryColor = fogEnabled
-            ? atlasFogColor
-            : new Vec3f(0.035f, 0.075f, 0.11f);
         bool applyMapLayer = mapLayerTexture?.Ready == true
             && mapLayerTexture.TextureId > 0
             && mapLayerTexture.Layer != AtlasMapLayer.TexturedTerrain;
@@ -1110,19 +1072,10 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                     (float)cameraPosition.Y,
                     (float)cameraPosition.Z
                 );
-                shader.Uniform("atlasBoundaryEnabled", 1);
                 if (shader.HasUniform("atlasDisableHorizonFade"))
                 {
                     shader.Uniform("atlasDisableHorizonFade", 1);
                 }
-                shader.Uniform(
-                    "atlasDisclosureCenterXZ",
-                    (float)capi.World.Player.Entity.Pos.X,
-                    (float)capi.World.Player.Entity.Pos.Z
-                );
-                shader.Uniform("atlasDisclosureRadius", radius);
-                shader.Uniform("atlasDisclosureFeather", feather);
-                shader.Uniform("atlasBoundaryFogColor", boundaryColor);
                 shader.Stop();
             }
             return true;
@@ -1174,8 +1127,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             && source.Contains(AtlasFilterMarker, StringComparison.Ordinal))
         {
             return shader.HasUniform("atlasHideCaves")
-                && shader.HasUniform("atlasConcealOres")
-                && shader.HasUniform("atlasBoundaryEnabled");
+                && shader.HasUniform("atlasConcealOres");
         }
 
         if (state != null && !ReferenceEquals(shader, state.Shader))
@@ -1210,8 +1162,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
 
         atlasFilterShaders[program] = new AtlasFilterShaderState(shader, source);
         return shader.HasUniform("atlasHideCaves")
-            && shader.HasUniform("atlasConcealOres")
-            && shader.HasUniform("atlasBoundaryEnabled");
+            && shader.HasUniform("atlasConcealOres");
     }
 
     private void DisableAtlasFilterUniforms()
@@ -1239,17 +1190,18 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 {
                     shader.Uniform("atlasConcealOres", 0);
                 }
-                if (shader.HasUniform("atlasBoundaryEnabled"))
-                {
-                    shader.Uniform("atlasBoundaryEnabled", 0);
-                }
                 if (shader.HasUniform("atlasLayerEnabled"))
                 {
                     shader.Uniform("atlasLayerEnabled", 0);
                 }
                 if (shader.HasUniform("atlasDisableHorizonFade"))
                 {
-                    shader.Uniform("atlasDisableHorizonFade", 0);
+                    // Compiling the atlas variant makes Vintage Story's
+                    // camera-dependent haxyFade path produce a bright red
+                    // chunk silhouette after the atlas closes. Keep only this
+                    // faulty path disabled for the lifetime of the compiled
+                    // variant; every other atlas branch is reset above.
+                    shader.Uniform("atlasDisableHorizonFade", 1);
                 }
                 shader.Stop();
             }
@@ -1325,20 +1277,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 "uniform int atlasDisableHorizonFade;\n\n"
             );
         }
-        string boundaryColorCode = supportsBoundaryColor
-            ? """
-    if (atlasBoundaryEnabled > 0)
-    {
-        float fogStart = max(0.0, atlasDisclosureRadius - atlasDisclosureFeather);
-        float fogAmount = smoothstep(
-            fogStart,
-            atlasDisclosureRadius,
-            modernAtlasDisclosureDistance
-        );
-        outColor.rgb = mix(outColor.rgb, atlasBoundaryFogColor, fogAmount);
-    }
-"""
-            : "";
         string mapLayerCode = supportsBoundaryColor
             ? """
     if (atlasLayerEnabled > 0)
@@ -1402,11 +1340,6 @@ uniform float atlasVisibleSubsurfaceDepth;
 uniform float atlasCaveConcealmentDepth;
 uniform vec3 atlasWorldOffset;
 uniform vec3 atlasCaveConcealmentColor;
-uniform int atlasBoundaryEnabled;
-uniform vec2 atlasDisclosureCenterXZ;
-uniform float atlasDisclosureRadius;
-uniform float atlasDisclosureFeather;
-uniform vec3 atlasBoundaryFogColor;
 uniform int atlasLayerEnabled;
 uniform sampler2D atlasLayerTex;
 uniform vec2 atlasLayerOriginXZ;
@@ -1498,18 +1431,9 @@ bool modernAtlasInCaveEntranceBand(vec3 absoluteWorldPosition)
 void main()
 {
     vec3 modernAtlasAbsoluteWorldPosition = worldPos.xyz + atlasWorldOffset;
-    float modernAtlasDisclosureDistance = distance(
-        modernAtlasAbsoluteWorldPosition.xz,
-        atlasDisclosureCenterXZ
-    );
-    if (atlasBoundaryEnabled > 0
-        && modernAtlasDisclosureDistance >= atlasDisclosureRadius)
-    {
-        discard;
-    }
 """ + caveFilterCode + """
     modernAtlasOriginalMain();
-""" + mapLayerCode + boundaryColorCode + """
+""" + mapLayerCode + """
 }
 """;
     }

@@ -895,6 +895,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         ResetPointerDrag();
         ResumeSingleplayerAfterAtlas();
         ReleaseNormalWorldSnapshot();
+        ScheduleNormalWorldShaderRestore();
         base.OnGuiClosed();
     }
 
@@ -1049,10 +1050,9 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public void ScheduleNormalWorldShaderRestore()
     {
-        // Reload the unmodified engine shaders between frames. Compiling only
-        // the three atlas-modified chunk programs leaves engine-owned uniform
-        // state uninitialized and can produce a colored chunk ring in the
-        // normal world view.
+        // Switch off the atlas-only branches between frames. The compiled
+        // chunk programs remain valid for the world session, avoiding the
+        // full-engine shader reload that previously froze closing.
         capi.Event.RegisterCallback(
             _ => exactChunkRenderer?.RestoreNormalWorldShaders(),
             1

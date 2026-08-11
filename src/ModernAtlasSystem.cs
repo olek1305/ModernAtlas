@@ -205,7 +205,6 @@ public sealed class ModernAtlasSystem : ModSystem
         if (!dialog.TryClose()) return false;
         if (ShouldSkipScrollTransitions())
         {
-            dialog.ScheduleNormalWorldShaderRestore();
             onCompleted?.Invoke(true);
             return true;
         }
@@ -214,7 +213,6 @@ public sealed class ModernAtlasSystem : ModSystem
                 false,
                 passed =>
                 {
-                    dialog?.ScheduleNormalWorldShaderRestore();
                     onCompleted?.Invoke(passed);
                 }
             ))
@@ -222,7 +220,6 @@ public sealed class ModernAtlasSystem : ModSystem
             clientApi?.Logger.Warning(
                 "[ModernAtlas] The scroll stowing transition was unavailable."
             );
-            dialog.ScheduleNormalWorldShaderRestore();
             onCompleted?.Invoke(false);
         }
         return true;
@@ -759,7 +756,6 @@ public sealed class ModernAtlasSystem : ModSystem
                     true,
                     closePassed =>
                     {
-                        dialog?.ScheduleNormalWorldShaderRestore();
                         if (!closePassed)
                         {
                             clientApi?.Logger.Error(
