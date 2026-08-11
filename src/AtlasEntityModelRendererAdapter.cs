@@ -61,10 +61,13 @@ internal sealed class AtlasEntityModelRendererAdapter
             foreach (RenderEntry entry in entries)
             {
                 if (entry.HideHeldItems()) suppressedHeldItemCount++;
-                entry.ForceThirdPerson(capi.World.Player.Entity);
-                entry.UseThirdPersonAnimator(capi.World.Player.Entity);
                 entry.Renderer.BeforeRender(deltaTime);
+                // EntityPlayerShapeRenderer.BeforeRender determines the render
+                // mode again from the normal first-person camera. Override it
+                // afterwards so the atlas batch receives the full player mesh.
+                entry.ForceThirdPerson(capi.World.Player.Entity);
                 entry.Renderer.DoRender3DOpaque(deltaTime, false);
+                entry.UseThirdPersonAnimator(capi.World.Player.Entity);
             }
 
             IRenderAPI render = capi.Render;

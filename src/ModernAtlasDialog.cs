@@ -368,7 +368,8 @@ public sealed class ModernAtlasDialog : GuiDialog
                     "[ModernAtlas] Automated Creative/Cheat ore-visibility frame rendered with Survival concealment disabled."
                 );
             }
-            if (safeSurfaceFrameWasAlreadyRendered)
+            if (safeSurfaceFrameWasAlreadyRendered
+                && automatedSmokeTestSafeSurfaceScreenshotHandled)
             {
                 ExerciseAutomatedInterfaceControls();
                 ExerciseAutomatedSearchInput();
@@ -1215,6 +1216,14 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         if (!automatedSmokeTestActive
             || !AutomatedSmokeTestRenderedExactWorld)
+        {
+            return;
+        }
+
+        // Leave the live atlas undisturbed long enough to validate a stable
+        // post-opening frame instead of capturing the first transient draw.
+        if (!automatedSmokeTestSafeSurfaceScreenshotHandled
+            && automatedSmokeTestElapsedSeconds < 2f)
         {
             return;
         }
