@@ -39,6 +39,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     private readonly Func<bool> prepareAtlasResources;
     private readonly Func<IShaderProgram?> getScrollShader;
     private readonly Action<AtlasScrollPhase> publishAnimationPhase;
+    private readonly AtlasSoundController soundController;
     private LoadedTexture solidTexture;
     private MeshRef? scrollSheetMesh;
     private MeshRef? scrollCylinderMesh;
@@ -131,12 +132,14 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         ICoreClientAPI capi,
         Func<bool> prepareAtlasResources,
         Func<IShaderProgram?> getScrollShader,
-        Action<AtlasScrollPhase> publishAnimationPhase
+        Action<AtlasScrollPhase> publishAnimationPhase,
+        AtlasSoundController soundController
     ) : base(capi)
     {
         this.prepareAtlasResources = prepareAtlasResources;
         this.getScrollShader = getScrollShader;
         this.publishAnimationPhase = publishAnimationPhase;
+        this.soundController = soundController;
         solidTexture = new LoadedTexture(capi);
     }
 
@@ -215,6 +218,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         heldItemSlotsSuppressed = false;
         heldItemsRestored = false;
         cameraRestored = false;
+        soundController.StopLightCue();
         return TryOpen();
     }
 
@@ -457,7 +461,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         if (!pocketSoundAttempted && elapsed >= ScrollAppearsSeconds)
         {
             pocketSoundAttempted = true;
-            pocketSoundPlayed = PlayLocalSound("sounds/block/cloth", 0.48f);
+            pocketSoundPlayed = soundController.PlayPageTouch();
         }
 
         if (!handoffPhaseStarted && elapsed >= HandoffStartSeconds)
@@ -475,7 +479,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         if (!unrollSoundAttempted && elapsed >= UnrollStartSeconds)
         {
             unrollSoundAttempted = true;
-            unrollSoundPlayed = PlayLocalSound("sounds/block/cloth", 0.62f);
+            unrollSoundPlayed = soundController.PlayOpeningUnroll();
         }
 
         if (!holdPhaseStarted && elapsed >= UnrollEndSeconds)
@@ -493,7 +497,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         if (!swooshSoundAttempted && elapsed >= LightPhaseStartSeconds)
         {
             swooshSoundAttempted = true;
-            swooshSoundPlayed = PlayLocalSound("sounds/effect/swoosh", 0.78f);
+            swooshSoundPlayed = soundController.PlayLightSweep();
         }
     }
 
@@ -502,7 +506,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         if (!unrollSoundAttempted && elapsed >= 0.18f)
         {
             unrollSoundAttempted = true;
-            unrollSoundPlayed = PlayLocalSound("sounds/block/cloth", 0.62f);
+            unrollSoundPlayed = soundController.PlayClosingRoll();
         }
 
         if (!handoffPhaseStarted && elapsed >= ClosingReleaseRightSeconds)
@@ -533,7 +537,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         if (!pocketSoundAttempted && elapsed >= 1.78f)
         {
             pocketSoundAttempted = true;
-            pocketSoundPlayed = PlayLocalSound("sounds/block/cloth", 0.48f);
+            pocketSoundPlayed = soundController.PlayPageTouch();
         }
     }
 
@@ -1589,39 +1593,6 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             savedRightHandItemSlot = null;
             hiddenLeftHandItemSlot = null;
             hiddenRightHandItemSlot = null;
-        }
-    }
-
-    private bool PlayLocalSound(string path, float volume)
-    {
-        try
-        {
-            var soundLocation = new AssetLocation("game", path);
-            if (capi.Assets.TryGet(new AssetLocation("game", $"{path}.ogg")) == null)
-            {
-                capi.Logger.Warning(
-                    "[ModernAtlas] Opening-transition sound asset is unavailable: {0}",
-                    soundLocation
-                );
-                return false;
-            }
-            capi.World.PlaySoundFor(
-                soundLocation,
-                capi.World.Player,
-                false,
-                16,
-                volume
-            );
-            return true;
-        }
-        catch (Exception exception)
-        {
-            capi.Logger.Debug(
-                "[ModernAtlas] Opening-transition sound {0} was unavailable: {1}",
-                path,
-                exception.Message
-            );
-            return false;
         }
     }
 

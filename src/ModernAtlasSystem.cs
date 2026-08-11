@@ -32,6 +32,7 @@ public sealed class ModernAtlasSystem : ModSystem
     private IShaderProgram? atlasScrollShader;
     private CheatModeConsentDialog? cheatModeDialog;
     private AtlasOpeningTransitionDialog? openingTransition;
+    private AtlasSoundController? soundController;
     private string? activeWorldIdentifier;
     private int worldSessionGeneration;
     private bool automatedWorldExitRequested;
@@ -100,6 +101,7 @@ public sealed class ModernAtlasSystem : ModSystem
             api.Logger.Error("[ModernAtlas] Failed to compile the physical scroll shader.");
         }
 
+        soundController = new AtlasSoundController(api);
         dialog = new ModernAtlasDialog(
             api,
             config,
@@ -109,13 +111,15 @@ public sealed class ModernAtlasSystem : ModSystem
             GetStableLiquidShader,
             GetAtlasCloudShader,
             GetAtlasOpacityShader,
-            GetAtlasScrollShader
+            GetAtlasScrollShader,
+            soundController
         );
         openingTransition = new AtlasOpeningTransitionDialog(
             api,
             dialog.PrepareOpeningTransitionFrame,
             GetAtlasScrollShader,
-            PublishScrollAnimationPhase
+            PublishScrollAnimationPhase,
+            soundController
         );
         api.Event.RegisterRenderer(
             openingTransition,
@@ -269,6 +273,8 @@ public sealed class ModernAtlasSystem : ModSystem
         openingTransition = null;
         dialog?.Dispose();
         dialog = null;
+        soundController?.Dispose();
+        soundController = null;
         cheatModeDialog?.CancelWithoutDecision();
         cheatModeDialog?.Dispose();
         cheatModeDialog = null;
@@ -404,6 +410,7 @@ public sealed class ModernAtlasSystem : ModSystem
         cheatModeDialog = null;
         openingTransition?.CancelWithoutOpening();
         openingTransition?.ClearRemoteAnimations();
+        soundController?.StopAll();
         activeWorldIdentifier = null;
         dialog?.OnWorldLeave();
         serverPolicy.ResetToSafeDefaults();

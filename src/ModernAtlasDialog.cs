@@ -38,6 +38,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private readonly AtlasSurfaceHeightTexture surfaceHeightTexture;
     private readonly AtlasMapLayerTexture mapLayerTexture;
     private readonly AtlasSearchController searchController;
+    private readonly AtlasSoundController soundController;
 
     private GuiComposer? overlay;
     private GuiComposer? searchPanel;
@@ -240,7 +241,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         Func<IShaderProgram?> stableLiquidShaderProvider,
         Func<IShaderProgram?> atlasCloudShaderProvider,
         Func<IShaderProgram?> atlasOpacityShaderProvider,
-        Func<IShaderProgram?> atlasScrollShaderProvider
+        Func<IShaderProgram?> atlasScrollShaderProvider,
+        AtlasSoundController soundController
     ) : base(capi)
     {
         this.config = config;
@@ -250,6 +252,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         this.stableLiquidShaderProvider = stableLiquidShaderProvider;
         this.atlasCloudShaderProvider = atlasCloudShaderProvider;
         this.atlasOpacityShaderProvider = atlasOpacityShaderProvider;
+        this.soundController = soundController;
         scrollViewportRenderer = new AtlasScrollViewportRenderer(
             capi,
             atlasScrollShaderProvider
@@ -519,6 +522,8 @@ public sealed class ModernAtlasDialog : GuiDialog
             return;
         }
 
+        soundController.PlayPageTouch();
+
         if (args.Button == EnumMouseButton.Left)
         {
             leftDragging = true;
@@ -710,6 +715,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
 
         float wheel = args.deltaPrecise != 0 ? args.deltaPrecise : args.delta;
+        soundController.PlayPageTouch();
         targetZoom = Math.Clamp(targetZoom * MathF.Pow(0.84f, wheel), 8, 30000);
         args.SetHandled();
     }
