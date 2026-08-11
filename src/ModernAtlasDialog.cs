@@ -125,6 +125,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool synchronizingMapLayerDropdown;
 
     internal bool AutomatedSmokeTestRenderedExactWorld { get; private set; }
+    internal bool CheatModeEnabledForAutomation => cheatModeEnabled;
 
     private int GameViewDistance
     {
@@ -143,8 +144,12 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         get
         {
+            if (cheatModeEnabled
+                && (capi.IsSinglePlayer || serverPolicy.CheatModeAllowed))
+            {
+                return true;
+            }
             if (!capi.IsSinglePlayer) return false;
-            if (cheatModeEnabled) return true;
             try
             {
                 return capi.World.Player?.WorldData.CurrentGameMode == EnumGameMode.Creative;
@@ -871,6 +876,10 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public void OnServerPolicyChanged()
     {
+        if (!capi.IsSinglePlayer && !serverPolicy.CheatModeAllowed)
+        {
+            SetCheatMode(false);
+        }
         RefreshVisibleEntityPolicy();
         InvalidateFogTexture();
         SyncSettingsControls();
@@ -879,7 +888,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     public void SetCheatMode(bool enabled)
     {
         bool accessWasAvailable = CreativeCheatSettingsAvailable;
-        cheatModeEnabled = capi.IsSinglePlayer && enabled;
+        cheatModeEnabled = enabled
+            && (capi.IsSinglePlayer || serverPolicy.CheatModeAllowed);
         if (activeMapLayer.RequiresSpoilerAccess() && !CreativeCheatSettingsAvailable)
         {
             SetMapLayer(AtlasMapLayer.TexturedTerrain);
@@ -2262,7 +2272,7 @@ public sealed class ModernAtlasDialog : GuiDialog
                 AtlasButtonStyle.Icon
             )
             .AddStaticText(
-                "Singleplayer Creative or accepted Cheat Mode only.",
+                "Creative or server-authorized Cheat Mode only.",
                 AtlasUiStyle.DetailFont(12),
                 ElementBounds.Fixed(26, 59, 382, 24)
             )
@@ -2770,7 +2780,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             capi.TriggerIngameError(
                 this,
                 "modernatlas-layer-access",
-                "Ore density is available only in singleplayer Cheat Mode or Creative mode."
+                "Ore density is available only in Creative or server-authorized Cheat Mode."
             );
             SyncMapLayerDropdown();
             return;

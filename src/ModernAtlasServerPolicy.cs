@@ -24,6 +24,9 @@ public sealed class ModernAtlasServerPolicy
     [ProtoMember(5)]
     public bool ShowNpcs { get; set; }
 
+    [ProtoMember(6)]
+    public bool CheatModeAllowed { get; set; }
+
     public bool AnyEntityModels => ShowPlayers || ShowAnimals || ShowMobs || ShowNpcs;
 
     public void CopyFrom(ModernAtlasServerPolicy policy)
@@ -33,6 +36,7 @@ public sealed class ModernAtlasServerPolicy
         ShowAnimals = policy.ShowAnimals;
         ShowMobs = policy.ShowMobs;
         ShowNpcs = policy.ShowNpcs;
+        CheatModeAllowed = policy.CheatModeAllowed;
     }
 
     public void ResetToSafeDefaults()
@@ -42,5 +46,6 @@ public sealed class ModernAtlasServerPolicy
         ShowAnimals = false;
         ShowMobs = false;
         ShowNpcs = false;
+        CheatModeAllowed = false;
     }
 }

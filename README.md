@@ -72,8 +72,8 @@ client-side; an optional server component supplies fog and living-entity policy.
   cliff sides, building walls and floor faces near the surface;
 - provides Creative/Cheat unit frames for clicked, already rendered living
   models, including name, category, health and loaded public details;
-- provides loaded-map search only in singleplayer Creative or a per-world
-  accepted Cheat Mode; it accepts both English names and names from the active
+- provides loaded-map search only in Creative or explicitly authorized Cheat
+  Mode; it accepts both English names and names from the active
   game language, searches loaded blocks and permitted entities incrementally
   with visible markers and no distant chunk requests, and represents
   dropped-item matches without invoking the global item stage;
@@ -131,6 +131,7 @@ safe: fog is enabled and all living models are disabled by the master switch.
 ```json
 {
   "FogEnabled": true,
+  "CheatModeAllowed": false,
   "LivingEntitiesEnabled": false,
   "ShowPlayers": true,
   "ShowAnimals": true,
@@ -138,6 +139,12 @@ safe: fog is enabled and all living models are disabled by the master switch.
   "ShowNpcs": true
 }
 ```
+
+Multiplayer Cheat Mode always starts off when a player joins and ModernAtlas
+never opens the singleplayer consent prompt on a server. Set
+`CheatModeAllowed` to `true` to let players use `/ma cheat mode on` and
+`/ma cheat mode off`. The command controls only that player's atlas session;
+it cannot override any other server disclosure flag.
 
 Set `LivingEntitiesEnabled` to `true` to opt in. Category flags are then applied
 independently; for example, `ShowNpcs: false` hides only NPCs while the other
