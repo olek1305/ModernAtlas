@@ -12,6 +12,7 @@ namespace ModernAtlas;
 /// </summary>
 internal sealed class AtlasScrollViewportRenderer : IDisposable
 {
+    private const int AtlasContentClipInsetPixels = 2;
     private readonly ICoreClientAPI capi;
     private readonly Func<IShaderProgram?> shaderProvider;
     private MeshRef? sheetMesh;
@@ -69,12 +70,38 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
                 CreateModel(centerX, centerY, 0f, paperWidth, paperHeight, 1f),
                 0
             );
-            RenderComponent(
-                shader,
-                sheetMesh,
-                CreateModel(centerX, centerY, -0.012f, mapWidth, mapHeight, 0.82f),
-                7
+
+            // Treat the inner parchment as a real display viewport. The map
+            // texture must never paint over the paper border or the dimmed
+            // world behind the scroll, regardless of atlas zoom or GUI scale.
+            AtlasViewportBounds contentClip = viewport.Inset(
+                AtlasContentClipInsetPixels
             );
+            render.GlScissor(
+                contentClip.X,
+                Math.Max(0, render.FrameHeight - contentClip.Bottom),
+                contentClip.Width,
+                contentClip.Height
+            );
+            render.GlScissorFlag(true);
+            try
+            {
+                // The atlas framebuffer has already composed terrain, fluids,
+                // OIT and fog. Copy covered pixels at full opacity instead of
+                // blending the completed map with the normal player view.
+                render.GlToggleBlend(false, EnumBlendMode.Standard);
+                RenderComponent(
+                    shader,
+                    sheetMesh,
+                    CreateModel(centerX, centerY, -0.012f, mapWidth, mapHeight, 0.82f),
+                    7
+                );
+            }
+            finally
+            {
+                render.GlToggleBlend(true, EnumBlendMode.Standard);
+                render.GlScissorFlag(false);
+            }
 
             float rollerX = paperWidth * 0.5f + 0.018f;
             float rollerHeight = paperHeight + 0.18f;
@@ -89,6 +116,58 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
             // cards, labels and controls are not discarded.
             render.GLDepthMask(true);
             render.GLEnableDepthTest();
+            render.GlToggleBlend(false, EnumBlendMode.Standard);
+        }
+    }
+
+    public AtlasViewportBounds GetPaperBounds(AtlasViewportBounds viewport)
+    {
+        int frameHeight = Math.Max(1, capi.Render.FrameHeight);
+        int horizontalMargin = (int)MathF.Ceiling(frameHeight * 0.0425f);
+        int verticalMargin = (int)MathF.Ceiling(frameHeight * 0.05f);
+        return viewport.Expand(horizontalMargin, verticalMargin);
+    }
+
+    public void RenderRollersOverlay(AtlasViewportBounds viewport)
+    {
+        if (!EnsureMeshes() || cylinderMesh == null) return;
+        IShaderProgram? shader = shaderProvider();
+        if (shader == null || shader.Disposed) return;
+
+        IRenderAPI render = capi.Render;
+        float frameHeight = Math.Max(1, render.FrameHeight);
+        float aspect = render.FrameWidth / frameHeight;
+        float centerX = ((viewport.X + viewport.Width * 0.5f) / render.FrameWidth * 2f - 1f)
+            * aspect;
+        float centerY = 1f
+            - (viewport.Y + viewport.Height * 0.5f) / frameHeight * 2f;
+        float mapWidth = viewport.Width / frameHeight * 2f;
+        float mapHeight = viewport.Height / frameHeight * 2f;
+        float paperWidth = mapWidth + 0.17f;
+        float paperHeight = mapHeight + 0.20f;
+        float rollerX = paperWidth * 0.5f + 0.018f;
+        float rollerHeight = paperHeight + 0.18f;
+
+        float[] projection = Mat4f.Create();
+        Mat4f.Ortho(projection, -aspect, aspect, -1f, 1f, -4f, 4f);
+        render.CurrentActiveShader?.Stop();
+        render.CurrentFrameBuffer = null;
+        render.GLDisableDepthTest();
+        render.GLDepthMask(false);
+        render.GlDisableCullFace();
+        render.GlToggleBlend(true, EnumBlendMode.Standard);
+        shader.Use();
+        shader.UniformMatrix("projectionMatrix", projection);
+        shader.Uniform("entityColor", new Vec4f(1f, 1f, 1f, 1f));
+        try
+        {
+            RenderRoller(shader, centerX - rollerX, centerY, rollerHeight);
+            RenderRoller(shader, centerX + rollerX, centerY, rollerHeight);
+        }
+        finally
+        {
+            shader.Stop();
+            render.GLDepthMask(true);
             render.GlToggleBlend(false, EnumBlendMode.Standard);
         }
     }

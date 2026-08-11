@@ -50,6 +50,8 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     private readonly Dictionary<string, RemoteScrollState> remoteScrolls = new();
 
     private Action<bool>? completion;
+    private readonly Func<bool> captureNormalWorldBackground;
+    private bool normalWorldBackgroundCaptured;
     private bool closing;
     private long startedTimestamp;
     private bool automatedTest;
@@ -130,12 +132,14 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
 
     public AtlasOpeningTransitionDialog(
         ICoreClientAPI capi,
+        Func<bool> captureNormalWorldBackground,
         Func<bool> prepareAtlasResources,
         Func<IShaderProgram?> getScrollShader,
         Action<AtlasScrollPhase> publishAnimationPhase,
         AtlasSoundController soundController
     ) : base(capi)
     {
+        this.captureNormalWorldBackground = captureNormalWorldBackground;
         this.prepareAtlasResources = prepareAtlasResources;
         this.getScrollShader = getScrollShader;
         this.publishAnimationPhase = publishAnimationPhase;
@@ -179,6 +183,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         heldItemSlotsSuppressed = false;
         heldItemsRestored = false;
         cameraRestored = false;
+        normalWorldBackgroundCaptured = false;
         return TryOpen();
     }
 
@@ -218,6 +223,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         heldItemSlotsSuppressed = false;
         heldItemsRestored = false;
         cameraRestored = false;
+        normalWorldBackgroundCaptured = true;
         soundController.StopLightCue();
         return TryOpen();
     }
@@ -280,6 +286,16 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     {
         if (finishing) return;
 
+        // On the first Survival GUI frame the normal world has completed its
+        // ordinary render, while this transition deliberately skipped its
+        // Opaque-stage arms and scroll. Capture that pristine frame before
+        // preparing atlas shaders or changing the player's presentation.
+        if (!closing && !normalWorldBackgroundCaptured)
+        {
+            normalWorldBackgroundCaptured = captureNormalWorldBackground();
+            return;
+        }
+
         float elapsed = (float)Stopwatch.GetElapsedTime(startedTimestamp).TotalSeconds;
         if (!closing) resourcesReady = prepareAtlasResources();
         MaintainHeldItemSuppression();
@@ -338,7 +354,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     {
         if (stage != EnumRenderStage.Opaque) return;
 
-        if (!finishing && IsOpened())
+        if (!finishing && IsOpened() && (closing || normalWorldBackgroundCaptured))
         {
             float elapsed = (float)Stopwatch.GetElapsedTime(startedTimestamp).TotalSeconds;
             UpdatePlayerPresentation(elapsed);

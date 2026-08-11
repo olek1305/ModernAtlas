@@ -31,6 +31,7 @@ float paperFiber(vec2 position)
 void main(void)
 {
     vec3 baseColor;
+    float materialAlpha = alpha;
     if (materialKind == 0 || materialKind == 3)
     {
         float fiber = paperFiber(uv * 1.7);
@@ -82,7 +83,18 @@ void main(void)
     }
     else
     {
-        baseColor = texture(atlasTex, uv).rgb;
+        vec4 atlasColor = texture(atlasTex, uv);
+        baseColor = atlasColor.rgb;
+        // Atlas coverage is binary at presentation time. The completed atlas
+        // texture has already composed authored water alpha, OIT materials and
+        // fog internally. Do not blend that completed image a second time
+        // with the player's normal POV, because it makes world blocks appear
+        // translucent through the map.
+        // Native opaque chunk shaders do not provide presentation coverage in
+        // Primary's alpha attachment. The scroll viewport itself is the
+        // coverage mask, so make every pixel inside it fully opaque and let
+        // its scissor rectangle clip terrain and liquids at the paper edge.
+        materialAlpha = 1.0;
     }
 
     vec3 normal = normalize(viewNormal);
@@ -98,5 +110,5 @@ void main(void)
         ? baseColor * (0.90 + diffuse * 0.10)
         : baseColor * (diffuse + rim);
     finalColor += vec3(0.30, 0.42, 0.38) * sweep * 0.50;
-    outColor = vec4(finalColor, alpha);
+    outColor = vec4(finalColor, materialAlpha);
 }

@@ -20,6 +20,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     private const float UnlockedMinimumPitchDegrees = 0;
     private const int DefaultViewDistance = 500;
     private const int MaximumGameViewDistance = 1536;
+    private const float MaximumZoomIn = 8;
+    private const float MaximumZoomScreenshotSettleSeconds = 2;
     private const int FogTextureDownsample = 4;
     private const string SmokeScreenshotEnvironmentVariable =
         "MODERNATLAS_SMOKE_SCREENSHOT";
@@ -55,6 +57,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     private long lastInterfaceRestoreMilliseconds = -10000;
     private LoadedTexture? fogTexture;
     private LoadedTexture? searchMarkerTexture;
+    private LoadedTexture? normalWorldSnapshotTexture;
+    private bool normalWorldSnapshotCaptured;
     private MeshRef? opacityQuad;
     private bool leftDragging;
     private bool rightDragging;
@@ -106,6 +110,14 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool automatedSmokeTestForceSurvivalOreConcealment;
     private bool automatedSmokeTestSafeSurfaceFrameRendered;
     private bool automatedSmokeTestSafeSurfaceScreenshotHandled;
+    private bool automatedSmokeTestMaximumZoomPending;
+    private bool automatedSmokeTestMaximumZoomFrameRendered;
+    private bool automatedSmokeTestPartialZoomPending;
+    private bool automatedSmokeTestPartialZoomFrameRendered;
+    private float automatedSmokeTestZoomBeforeMaximum;
+    private float automatedSmokeTestPitchBeforeMaximum;
+    private float automatedSmokeTestMaximumZoomStartedSeconds;
+    private float automatedSmokeTestPartialZoomStartedSeconds;
     private int automatedSmokeTestSearchPhase;
     private bool automatedSmokeTestSearchPassed;
     private double automatedLanternBlockX;
@@ -120,6 +132,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool automatedOriginalSearchModeEnabled;
     private bool automatedOriginalCameraAngleLocked;
     private bool automatedOriginalRenderOnScroll;
+    private bool automatedOriginalFogEnabled;
     private bool pendingInterfaceRecompose;
     private AtlasMapLayer activeMapLayer = AtlasMapLayer.TexturedTerrain;
     private bool synchronizingMapLayerDropdown;
@@ -340,6 +353,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             loggedFirstRender = true;
             capi.Logger.Notification("[ModernAtlas] First 3D atlas GUI frame rendered.");
         }
+        CaptureNormalWorldSnapshot();
         bool rendered = RenderLiveWorld(deltaTime);
         if (SearchModeActive)
         {
@@ -380,7 +394,11 @@ public sealed class ModernAtlasDialog : GuiDialog
                 );
             }
             if (safeSurfaceFrameWasAlreadyRendered
-                && automatedSmokeTestSafeSurfaceScreenshotHandled)
+                && automatedSmokeTestSafeSurfaceScreenshotHandled
+                && automatedSmokeTestPartialZoomFrameRendered
+                && !automatedSmokeTestPartialZoomPending
+                && automatedSmokeTestMaximumZoomFrameRendered
+                && !automatedSmokeTestMaximumZoomPending)
             {
                 ExerciseAutomatedInterfaceControls();
                 ExerciseAutomatedSearchInput();
@@ -400,15 +418,17 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
         if (config.RenderOnScroll)
         {
+            RenderFogMask(true);
+            RestoreNormalWorldSnapshot();
+            capi.Render.CurrentFrameBuffer = null;
             scrollViewportRenderer.Render(
                 exactChunkRenderer?.PrimaryColorTextureId ?? 0,
                 AtlasViewport
             );
         }
-        RenderFogMask();
-        if (!config.RenderOnScroll)
+        else
         {
-            ForceOpaqueWindowAlpha();
+            RenderFogMask(false);
         }
         capi.Render.GetEngineShader(EnumShaderProgram.Gui).Use();
         capi.Render.GLDepthMask(false);
@@ -467,6 +487,13 @@ public sealed class ModernAtlasDialog : GuiDialog
                 visualLabModal?.Render(deltaTime);
             }
         }
+        if (config.RenderOnScroll)
+        {
+            RestoreNormalWorldSnapshotOutsidePaper();
+            scrollViewportRenderer.RenderRollersOverlay(AtlasViewport);
+        }
+        ForceOpaqueWindowAlpha();
+        capi.Render.GetEngineShader(EnumShaderProgram.Gui).Use();
         CaptureAutomatedSmokeScreenshot();
         AdvanceAutomatedSmokeTest();
     }
@@ -719,10 +746,18 @@ public sealed class ModernAtlasDialog : GuiDialog
             return;
         }
 
-        float wheel = args.deltaPrecise != 0 ? args.deltaPrecise : args.delta;
-        soundController.PlayPageTouch();
-        targetZoom = Math.Clamp(targetZoom * MathF.Pow(0.84f, wheel), 8, 30000);
+        ApplyZoomWheel(args.deltaPrecise != 0 ? args.deltaPrecise : args.delta, true);
         args.SetHandled();
+    }
+
+    private void ApplyZoomWheel(float wheel, bool playSound)
+    {
+        if (playSound) soundController.PlayPageTouch();
+        targetZoom = Math.Clamp(
+            targetZoom * MathF.Pow(0.84f, wheel),
+            MaximumZoomIn,
+            30000
+        );
     }
 
     public override void OnKeyDown(KeyEvent args)
@@ -859,7 +894,157 @@ public sealed class ModernAtlasDialog : GuiDialog
         surfaceHeightTexture.Reset();
         ResetPointerDrag();
         ResumeSingleplayerAfterAtlas();
+        ReleaseNormalWorldSnapshot();
         base.OnGuiClosed();
+    }
+
+    private void CaptureNormalWorldSnapshot()
+    {
+        if (!config.RenderOnScroll || normalWorldSnapshotCaptured) return;
+
+        try
+        {
+            int width = Math.Max(1, capi.Render.FrameWidth);
+            int height = Math.Max(1, capi.Render.FrameHeight);
+            using BitmapRef screenshot = capi.Render.GrabScreenshot(
+                width,
+                height,
+                false,
+                true,
+                true
+            );
+
+            normalWorldSnapshotTexture ??= new LoadedTexture(capi);
+            normalWorldSnapshotTexture.Width = width;
+            normalWorldSnapshotTexture.Height = height;
+            int[] snapshotPixels = screenshot.Pixels;
+            for (int index = 0; index < snapshotPixels.Length; index++)
+            {
+                // The normal world framebuffer does not use alpha as screen
+                // coverage, so valid RGB pixels can carry alpha zero. The GUI
+                // blit would discard those pixels and leave atlas geometry
+                // visible behind the scroll. This private snapshot represents
+                // a completed opaque POV, therefore normalize only its alpha.
+                snapshotPixels[index] |= unchecked((int)0xff000000);
+            }
+            capi.Render.LoadOrUpdateTextureFromBgra(
+                snapshotPixels,
+                false,
+                1,
+                ref normalWorldSnapshotTexture
+            );
+            normalWorldSnapshotCaptured = normalWorldSnapshotTexture.TextureId > 0;
+        }
+        catch (Exception exception)
+        {
+            capi.Logger.Warning(
+                "[ModernAtlas] Could not protect the normal world view behind the scroll: {0}",
+                exception.Message
+            );
+        }
+    }
+
+    internal bool CaptureNormalWorldSnapshotBeforeTransition()
+    {
+        // Survival opens through a world-rendered hand/scroll transition.
+        // Capture the completed POV before that transition can touch shared
+        // depth, alpha or chunk shader state. The atlas then uses the same
+        // pristine background that direct Creative opening receives.
+        ReleaseNormalWorldSnapshot();
+        CaptureNormalWorldSnapshot();
+        return normalWorldSnapshotCaptured;
+    }
+
+    private void RestoreNormalWorldSnapshot()
+    {
+        LoadedTexture? snapshot = normalWorldSnapshotTexture;
+        if (!normalWorldSnapshotCaptured || snapshot == null || snapshot.TextureId <= 0)
+        {
+            return;
+        }
+
+        IRenderAPI render = capi.Render;
+        render.CurrentActiveShader?.Stop();
+        render.CurrentFrameBuffer = null;
+        render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
+        render.GetEngineShader(EnumShaderProgram.Gui).Use();
+        render.GLDisableDepthTest();
+        render.GLDepthMask(false);
+        render.GlToggleBlend(false, EnumBlendMode.Standard);
+        render.Render2DTexture(
+            snapshot.TextureId,
+            0,
+            0,
+            render.FrameWidth,
+            render.FrameHeight,
+            0,
+            ColorUtil.WhiteArgbVec
+        );
+        render.GlToggleBlend(true, EnumBlendMode.Standard);
+        render.GLDepthMask(true);
+    }
+
+    private void ReleaseNormalWorldSnapshot()
+    {
+        normalWorldSnapshotTexture?.Dispose();
+        normalWorldSnapshotTexture = null;
+        normalWorldSnapshotCaptured = false;
+    }
+
+    private void RestoreNormalWorldSnapshotOutsidePaper()
+    {
+        LoadedTexture? snapshot = normalWorldSnapshotTexture;
+        if (!normalWorldSnapshotCaptured || snapshot == null || snapshot.TextureId <= 0)
+        {
+            return;
+        }
+
+        IRenderAPI render = capi.Render;
+        int frameWidth = Math.Max(1, render.FrameWidth);
+        int frameHeight = Math.Max(1, render.FrameHeight);
+        AtlasViewportBounds paper = scrollViewportRenderer.GetPaperBounds(AtlasViewport);
+        int left = Math.Clamp(paper.X, 0, frameWidth);
+        int top = Math.Clamp(paper.Y, 0, frameHeight);
+        int right = Math.Clamp(paper.Right, 0, frameWidth);
+        int bottom = Math.Clamp(paper.Bottom, 0, frameHeight);
+
+        render.CurrentActiveShader?.Stop();
+        render.CurrentFrameBuffer = null;
+        render.GlViewport(0, 0, frameWidth, frameHeight);
+        render.GetEngineShader(EnumShaderProgram.Gui).Use();
+        render.GLDisableDepthTest();
+        render.GLDepthMask(false);
+        render.GlToggleBlend(false, EnumBlendMode.Standard);
+        try
+        {
+            RestoreSnapshotRegion(snapshot.TextureId, 0, 0, frameWidth, top);
+            RestoreSnapshotRegion(snapshot.TextureId, 0, bottom, frameWidth, frameHeight - bottom);
+            RestoreSnapshotRegion(snapshot.TextureId, 0, top, left, bottom - top);
+            RestoreSnapshotRegion(snapshot.TextureId, right, top, frameWidth - right, bottom - top);
+        }
+        finally
+        {
+            render.GlScissorFlag(false);
+            render.GlToggleBlend(true, EnumBlendMode.Standard);
+            render.GLDepthMask(true);
+        }
+    }
+
+    private void RestoreSnapshotRegion(int textureId, int x, int y, int width, int height)
+    {
+        if (width <= 0 || height <= 0) return;
+        IRenderAPI render = capi.Render;
+        render.GlScissor(x, render.FrameHeight - y - height, width, height);
+        render.GlScissorFlag(true);
+        render.Render2DTexture(
+            textureId,
+            0,
+            0,
+            render.FrameWidth,
+            render.FrameHeight,
+            0,
+            ColorUtil.WhiteArgbVec
+        );
     }
 
     public void ScheduleNormalWorldShaderRestore()
@@ -944,11 +1129,14 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedOriginalSearchModeEnabled = config.SearchModeEnabled;
         automatedOriginalCameraAngleLocked = config.CameraAngleLocked;
         automatedOriginalRenderOnScroll = config.RenderOnScroll;
+        automatedOriginalFogEnabled = config.FogEnabled;
         automatedSmokeTestPreferencesCaptured = true;
         config.MapLayersEnabled = true;
         config.CaveModeEnabled = false;
         config.SearchModeEnabled = true;
         config.CameraAngleLocked = false;
+        config.RenderOnScroll = true;
+        config.FogEnabled = true;
         automatedSmokeTestActive = true;
         automatedSmokeTestElapsedSeconds = 0;
         automatedSmokeTestCompletion = completion;
@@ -983,6 +1171,14 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
         automatedSmokeTestSafeSurfaceFrameRendered = false;
         automatedSmokeTestSafeSurfaceScreenshotHandled = false;
+        automatedSmokeTestMaximumZoomPending = false;
+        automatedSmokeTestMaximumZoomFrameRendered = false;
+        automatedSmokeTestPartialZoomPending = false;
+        automatedSmokeTestPartialZoomFrameRendered = false;
+        automatedSmokeTestZoomBeforeMaximum = 0;
+        automatedSmokeTestPitchBeforeMaximum = 0;
+        automatedSmokeTestMaximumZoomStartedSeconds = 0;
+        automatedSmokeTestPartialZoomStartedSeconds = 0;
         automatedSmokeTestSearchPhase = 0;
         automatedSmokeTestSearchPassed = false;
         automatedLanternBlockX = 0;
@@ -1010,6 +1206,8 @@ public sealed class ModernAtlasDialog : GuiDialog
             && automatedSmokeTestBilingualSearchPassed
             && automatedSmokeTestOreConcealmentPassed
             && automatedSmokeTestCreativeOreRevealFrameRendered
+            && automatedSmokeTestPartialZoomFrameRendered
+            && automatedSmokeTestMaximumZoomFrameRendered
             && automatedSmokeTestSearchPassed
             && automatedSmokeTestMapLayerPassed;
         if (passed && automatedSmokeTestElapsedSeconds < 3f) return;
@@ -1280,6 +1478,104 @@ public sealed class ModernAtlasDialog : GuiDialog
                     $"{safePrefix}-survival-safe.png"
                 );
             }
+            automatedSmokeTestZoomBeforeMaximum = targetZoom;
+            automatedSmokeTestPitchBeforeMaximum = targetPitchDegrees;
+            targetPitchDegrees = 72;
+            pitchDegrees = 72;
+            config.FogEnabled = false;
+            InvalidateFogTexture();
+            ApplyZoomWheel(1, false);
+            ApplyZoomWheel(1, false);
+            automatedSmokeTestPartialZoomStartedSeconds =
+                automatedSmokeTestElapsedSeconds;
+            automatedSmokeTestPartialZoomPending = true;
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated smoke test is holding partial scroll zoom for 2 seconds before capture."
+            );
+            return;
+        }
+
+        if (automatedSmokeTestPartialZoomPending)
+        {
+            if (automatedSmokeTestElapsedSeconds
+                - automatedSmokeTestPartialZoomStartedSeconds
+                < MaximumZoomScreenshotSettleSeconds)
+            {
+                return;
+            }
+
+            automatedSmokeTestPartialZoomPending = false;
+            automatedSmokeTestPartialZoomFrameRendered = config.RenderOnScroll
+                && !EffectiveFogEnabled
+                && zoom > MaximumZoomIn + 0.001f
+                && zoom < automatedSmokeTestZoomBeforeMaximum - 0.001f;
+            if (!string.IsNullOrWhiteSpace(configuredPath))
+            {
+                string partialZoomPrefix = configuredPath.EndsWith(
+                    ".png",
+                    StringComparison.OrdinalIgnoreCase
+                )
+                    ? configuredPath[..^4]
+                    : configuredPath;
+                automatedSmokeTestPartialZoomFrameRendered &=
+                    TrySaveAutomatedSmokeScreenshot(
+                        $"{partialZoomPrefix}-scroll-partial-zoom.png"
+                    );
+            }
+            targetZoom = MaximumZoomIn;
+            zoom = MaximumZoomIn;
+            automatedSmokeTestMaximumZoomStartedSeconds =
+                automatedSmokeTestElapsedSeconds;
+            automatedSmokeTestMaximumZoomPending = true;
+            capi.Logger.Notification(
+                automatedSmokeTestPartialZoomFrameRendered
+                    ? "[ModernAtlas] Automated partial scroll zoom capture passed; holding maximum zoom for 2 seconds."
+                    : "[ModernAtlas] Automated partial scroll zoom capture failed; holding maximum zoom for 2 seconds."
+            );
+            return;
+        }
+
+        if (automatedSmokeTestMaximumZoomPending)
+        {
+            if (automatedSmokeTestElapsedSeconds
+                - automatedSmokeTestMaximumZoomStartedSeconds
+                < MaximumZoomScreenshotSettleSeconds)
+            {
+                return;
+            }
+
+            automatedSmokeTestMaximumZoomPending = false;
+            automatedSmokeTestMaximumZoomFrameRendered = config.RenderOnScroll
+                && Math.Abs(zoom - MaximumZoomIn) < 0.001f;
+            if (!string.IsNullOrWhiteSpace(configuredPath))
+            {
+                string maximumZoomPrefix = configuredPath.EndsWith(
+                    ".png",
+                    StringComparison.OrdinalIgnoreCase
+                )
+                    ? configuredPath[..^4]
+                    : configuredPath;
+                automatedSmokeTestMaximumZoomFrameRendered &=
+                    TrySaveAutomatedSmokeScreenshot(
+                        $"{maximumZoomPrefix}-scroll-maximum-zoom.png"
+                    );
+            }
+            targetZoom = automatedSmokeTestZoomBeforeMaximum;
+            zoom = automatedSmokeTestZoomBeforeMaximum;
+            targetPitchDegrees = automatedSmokeTestPitchBeforeMaximum;
+            pitchDegrees = automatedSmokeTestPitchBeforeMaximum;
+            if (automatedSmokeTestMaximumZoomFrameRendered)
+            {
+                capi.Logger.Notification(
+                    "[ModernAtlas] Automated scroll clipping check passed at maximum zoom."
+                );
+            }
+            else
+            {
+                capi.Logger.Error(
+                    "[ModernAtlas] Automated scroll clipping check failed at maximum zoom."
+                );
+            }
             if (automatedSmokeTestRequiresUnlockedPitch)
             {
                 targetPitchDegrees = UnlockedMinimumPitchDegrees;
@@ -1350,9 +1646,22 @@ public sealed class ModernAtlasDialog : GuiDialog
                 true,
                 true
             );
+            int minimumAlpha = 255;
+            foreach (int pixel in screenshot.Pixels)
+            {
+                minimumAlpha = Math.Min(minimumAlpha, (pixel >> 24) & 0xff);
+            }
+            if (minimumAlpha < 255)
+            {
+                capi.Logger.Error(
+                    "[ModernAtlas] Automated atlas UI screenshot retained transparent window pixels: minimum alpha {0}.",
+                    minimumAlpha
+                );
+                return false;
+            }
             screenshot.Save(path);
             capi.Logger.Notification(
-                "[ModernAtlas] Saved automated atlas UI screenshot: {0}",
+                "[ModernAtlas] Saved opaque automated atlas UI screenshot: {0}",
                 path
             );
             return true;
@@ -1372,11 +1681,23 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         if (!automatedSmokeTestPreferencesCaptured) return;
 
+        if (automatedSmokeTestPartialZoomPending
+            || automatedSmokeTestMaximumZoomPending)
+        {
+            targetZoom = automatedSmokeTestZoomBeforeMaximum;
+            zoom = automatedSmokeTestZoomBeforeMaximum;
+            targetPitchDegrees = automatedSmokeTestPitchBeforeMaximum;
+            pitchDegrees = automatedSmokeTestPitchBeforeMaximum;
+            automatedSmokeTestPartialZoomPending = false;
+            automatedSmokeTestMaximumZoomPending = false;
+        }
+
         automatedSmokeTestPreferencesCaptured = false;
         config.MapLayersEnabled = automatedOriginalMapLayersEnabled;
         config.CaveModeEnabled = automatedOriginalCaveModeEnabled;
         config.SearchModeEnabled = automatedOriginalSearchModeEnabled;
         config.CameraAngleLocked = automatedOriginalCameraAngleLocked;
+        config.FogEnabled = automatedOriginalFogEnabled;
         if (config.RenderOnScroll != automatedOriginalRenderOnScroll)
         {
             config.RenderOnScroll = automatedOriginalRenderOnScroll;
@@ -1832,6 +2153,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             exactChunkRenderer = null;
         }
         surfaceHeightTexture.Reset();
+        ReleaseNormalWorldSnapshot();
         InvalidateFogTexture();
         capi.Logger.Notification(
             "[ModernAtlas] Released world-specific atlas rendering resources."
@@ -1852,6 +2174,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         fogTexture = null;
         searchMarkerTexture?.Dispose();
         searchMarkerTexture = null;
+        ReleaseNormalWorldSnapshot();
         opacityQuad?.Dispose();
         opacityQuad = null;
         scrollViewportRenderer.Dispose();
@@ -2859,16 +3182,24 @@ public sealed class ModernAtlasDialog : GuiDialog
         EnsureSearchMarkerTexture();
         if (searchMarkerTexture?.TextureId <= 0) return;
 
-        float guiScale = (float)Math.Max(0.5, RuntimeEnv.GUIScale);
-        float pulse = 0.5f + 0.5f * MathF.Sin(capi.ElapsedMilliseconds / 230f);
-        float markerSize = Math.Clamp((28f + pulse * 6f) * guiScale, 24f, 58f);
-        foreach (AtlasSearchResult result in searchController.BlockResults)
+        bool clipped = BeginScrollContentClip();
+        try
         {
-            RenderSearchMarker(result, markerSize, pulse);
+            float guiScale = (float)Math.Max(0.5, RuntimeEnv.GUIScale);
+            float pulse = 0.5f + 0.5f * MathF.Sin(capi.ElapsedMilliseconds / 230f);
+            float markerSize = Math.Clamp((28f + pulse * 6f) * guiScale, 24f, 58f);
+            foreach (AtlasSearchResult result in searchController.BlockResults)
+            {
+                RenderSearchMarker(result, markerSize, pulse);
+            }
+            foreach (AtlasSearchResult result in searchController.DynamicResults)
+            {
+                RenderSearchMarker(result, markerSize + 4f, pulse);
+            }
         }
-        foreach (AtlasSearchResult result in searchController.DynamicResults)
+        finally
         {
-            RenderSearchMarker(result, markerSize + 4f, pulse);
+            EndScrollContentClip(clipped);
         }
     }
 
@@ -3444,7 +3775,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         frozenWaterFlowCounter = uniforms.WaterFlowCounter + animationOffset;
     }
 
-    private void RenderFogMask()
+    private void RenderFogMask(bool renderIntoAtlasTexture)
     {
         if (!EffectiveFogEnabled) return;
 
@@ -3467,18 +3798,69 @@ public sealed class ModernAtlasDialog : GuiDialog
 
         if (fogTexture?.TextureId > 0)
         {
-            capi.Render.GetEngineShader(EnumShaderProgram.Gui).Use();
-            capi.Render.GLDisableDepthTest();
-            capi.Render.GlToggleBlend(true, EnumBlendMode.Standard);
-            capi.Render.Render2DTexture(
-                fogTexture.TextureId,
-                viewport.X,
-                viewport.Y,
-                frameWidth,
-                frameHeight,
-                40
-            );
+            IRenderAPI render = capi.Render;
+            FrameBufferRef? previousFramebuffer = render.CurrentFrameBuffer;
+            bool clipped = !renderIntoAtlasTexture && BeginScrollContentClip();
+            try
+            {
+                int destinationX = viewport.X;
+                int destinationY = viewport.Y;
+                int destinationWidth = frameWidth;
+                int destinationHeight = frameHeight;
+                if (renderIntoAtlasTexture)
+                {
+                    FrameBufferRef primary = render.FrameBuffers[
+                        (int)EnumFrameBuffer.Primary
+                    ];
+                    render.CurrentFrameBuffer = primary;
+                    render.GlViewport(0, 0, primary.Width, primary.Height);
+                    destinationX = 0;
+                    destinationY = 0;
+                    destinationWidth = render.FrameWidth;
+                    destinationHeight = render.FrameHeight;
+                }
+
+                render.GetEngineShader(EnumShaderProgram.Gui).Use();
+                render.GLDisableDepthTest();
+                render.GLDepthMask(false);
+                render.GlToggleBlend(true, EnumBlendMode.Standard);
+                render.Render2DTexture(
+                    fogTexture.TextureId,
+                    destinationX,
+                    destinationY,
+                    destinationWidth,
+                    destinationHeight,
+                    40
+                );
+            }
+            finally
+            {
+                EndScrollContentClip(clipped);
+                render.GLDepthMask(true);
+                render.CurrentFrameBuffer = previousFramebuffer;
+                render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
+            }
         }
+    }
+
+    private bool BeginScrollContentClip()
+    {
+        if (!config.RenderOnScroll) return false;
+
+        AtlasViewportBounds clip = AtlasViewport.Inset(2);
+        capi.Render.GlScissor(
+            clip.X,
+            Math.Max(0, capi.Render.FrameHeight - clip.Bottom),
+            clip.Width,
+            clip.Height
+        );
+        capi.Render.GlScissorFlag(true);
+        return true;
+    }
+
+    private void EndScrollContentClip(bool clipped)
+    {
+        if (clipped) capi.Render.GlScissorFlag(false);
     }
 
     private void ForceOpaqueWindowAlpha()

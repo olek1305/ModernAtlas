@@ -136,6 +136,7 @@ public sealed class ModernAtlasSystem : ModSystem
         );
         openingTransition = new AtlasOpeningTransitionDialog(
             api,
+            dialog.CaptureNormalWorldSnapshotBeforeTransition,
             dialog.PrepareOpeningTransitionFrame,
             GetAtlasScrollShader,
             PublishScrollAnimationPhase,
