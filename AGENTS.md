@@ -215,7 +215,7 @@ the product scope when the atlas itself is correct.
 
 ## Current verified baseline
 
-- The working public version remains `0.6.1`. Do not change the version number
+- The working public version is `0.6.2`. Do not change the version number
   unless the project owner explicitly requests it. Package-content changes may
   continue under this version during the current test cycle.
 - The verified liquid implementation uses completed liquid chunk meshes and a
@@ -265,9 +265,13 @@ the product scope when the atlas itself is correct.
   Story's non-thread-safe translation diagnostics. Use the isolated search
   services, stable asset codes, explicit custom names and player nicknames.
 - Opening the atlas with `G` now plays a short real-time first-person scene:
-  the view bows, a procedural pocket scroll rises and unfolds, and a light zoom
-  enters the atlas. `G` skips it, `Escape` cancels it, and every captured camera
-  or animation field is restored on cancellation, completion and world leave.
+  the camera remains fixed while the left hand retrieves a procedural pocket
+  scroll from below-left, the right hand takes the other end and both hands
+  unroll it before the existing light enters the atlas. Closing the atlas rolls
+  and stows the scroll in reverse. The third-person scroll uses the same phase
+  timings and follows the animated `LeftHand` and `RightHand` attachment points.
+  Every captured camera, held-item and animation field is restored on
+  cancellation, completion and world leave.
 - Survival-safe atlas rendering replaces all registered
   `EnumBlockMaterial.Ore` composite textures with their baked host-rock base
   textures through cycle-safe, incrementally built transient GPU lookups.
@@ -289,7 +293,7 @@ the product scope when the atlas itself is correct.
 ## Build and in-game test workflow
 
 - For every rendering change, build `ModernAtlas.csproj` in Release mode,
-  create `Releases/modernatlas_0.6.1.zip`, validate the ZIP, and copy that exact
+  create `Releases/modernatlas_0.6.2.zip`, validate the ZIP, and copy that exact
   archive to the active Vintage Story `Mods` directory. Compare SHA-256 hashes
   so the release and active archives are demonstrably identical.
 - Close the running game cleanly before replacing or retesting the active mod.

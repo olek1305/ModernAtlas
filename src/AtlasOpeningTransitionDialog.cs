@@ -1,6 +1,6 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
-using System.Reflection;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Common.Entities;
@@ -9,22 +9,27 @@ using Vintagestory.API.MathTools;
 namespace ModernAtlas;
 
 /// <summary>
-/// A short cinematic atlas-opening scene over the live world. The player's
-/// full third-person model reaches into a pocket, lifts a physical scroll and
-/// unrolls it before the view enters the independent atlas framebuffer.
+/// A first-person atlas transition over the live world. The camera remains
+/// fixed while first-person forearms built from the loaded Seraph model
+/// retrieve, hold and unroll a physical scroll. Matching clips run on the
+/// third-person model.
 /// </summary>
 internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
 {
     private const float ScrollAppearsSeconds = 0.34f;
-    private const float PocketReachEndSeconds = 1.02f;
     private const float HandoffStartSeconds = 0.96f;
-    private const float HoldStartSeconds = 1.64f;
     private const float UnrollStartSeconds = 1.22f;
     private const float UnrollEndSeconds = 2.30f;
     private const float LightPhaseStartSeconds = 2.58f;
     private const float TotalDurationSeconds = 3.34f;
+    private const float ClosingDurationSeconds =
+        LightPhaseStartSeconds - ScrollAppearsSeconds;
+    private const float ClosingReleaseRightSeconds =
+        LightPhaseStartSeconds - UnrollStartSeconds;
+    private const float ClosingStowStartSeconds =
+        LightPhaseStartSeconds - HandoffStartSeconds;
     private const float PreparationTimeoutSeconds = 9f;
-    private const string BowAnimationCode = "modernatlas-opening-pocket-reach";
+    private const string BowAnimationCode = "modernatlas-scroll-left-hand";
     private const string HandoffAnimationCode = "modernatlas-opening-handoff";
     private const string HoldAnimationCode = "modernatlas-opening-scroll-hold";
     private const string SmokeScreenshotEnvironmentVariable =
@@ -32,11 +37,18 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
 
     private readonly Func<bool> prepareAtlasResources;
     private readonly Func<IShaderProgram?> getScrollShader;
+    private readonly Action<AtlasScrollPhase> publishAnimationPhase;
     private LoadedTexture solidTexture;
     private MeshRef? scrollSheetMesh;
     private MeshRef? scrollCylinderMesh;
+    private MeshRef? leftSeraphForearmMesh;
+    private MeshRef? rightSeraphForearmMesh;
+    private int seraphSkinTextureId;
+    private Vec4f seraphSkinColor = new(1f, 1f, 1f, 1f);
+    private readonly Dictionary<string, RemoteScrollState> remoteScrolls = new();
 
     private Action<bool>? completion;
+    private bool closing;
     private long startedTimestamp;
     private bool automatedTest;
     private bool finishing;
@@ -57,7 +69,8 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     private bool physicalScrollRendered;
     private bool rolledScrollRendered;
     private bool openScrollRendered;
-    private bool cinematicCameraApplied;
+    private bool seraphForearmMeshesReady;
+    private bool thirdPersonHandAnchorsReady;
     private bool automatedPocketScreenshotHandled;
     private bool automatedPocketScreenshotPassed;
     private bool automatedHandoffScreenshotHandled;
@@ -80,24 +93,9 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     private ItemSlot? savedRightHandItemSlot;
     private DummySlot? hiddenLeftHandItemSlot;
     private DummySlot? hiddenRightHandItemSlot;
-    private EntityRenderer? heldItemRenderer;
-    private FieldInfo? renderHeldItemField;
-    private bool savedRenderHeldItem;
     private bool heldItemSlotsSuppressed;
-    private bool rendererHeldItemSuppressed;
     private bool heldItemsRestored;
     private bool cameraRestored;
-    private FieldInfo? overrideCameraModeField;
-    private object? savedOverrideCameraMode;
-    private bool overrideCameraModeCaptured;
-    private object? engineCamera;
-    private FieldInfo? engineCameraModeField;
-    private object? savedEngineCameraMode;
-    private FieldInfo? thirdPersonDistanceField;
-    private object? savedThirdPersonDistance;
-    private FieldInfo? targetCameraDistanceField;
-    private object? savedTargetCameraDistance;
-    private bool engineCameraCaptured;
     private bool disposed;
 
     public override string ToggleKeyCombinationCode => "";
@@ -106,20 +104,38 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     public override double InputOrder => 0.01;
     public override bool PrefersUngrabbedMouse => false;
     public override bool DisableMouseGrab => false;
-    // Draw immediately before the normal entity pass. The scroll writes the
-    // same world-depth buffer, then the player's nearer hands can naturally
-    // appear in front of it instead of the scroll covering the model.
+    // Draw immediately before the normal entity pass. The transition-owned
+    // arms and scroll share one world-depth buffer and remain attached.
     public double RenderOrder => 0.39;
     public int RenderRange => int.MaxValue;
+    public bool IsClosing => closing;
+
+    public void SetRemoteAnimation(string playerUid, AtlasScrollPhase phase)
+    {
+        if (string.IsNullOrWhiteSpace(playerUid)) return;
+        if (phase == AtlasScrollPhase.Stop)
+        {
+            remoteScrolls.Remove(playerUid);
+            return;
+        }
+        remoteScrolls[playerUid] = new RemoteScrollState(
+            phase,
+            Stopwatch.GetTimestamp()
+        );
+    }
+
+    public void ClearRemoteAnimations() => remoteScrolls.Clear();
 
     public AtlasOpeningTransitionDialog(
         ICoreClientAPI capi,
         Func<bool> prepareAtlasResources,
-        Func<IShaderProgram?> getScrollShader
+        Func<IShaderProgram?> getScrollShader,
+        Action<AtlasScrollPhase> publishAnimationPhase
     ) : base(capi)
     {
         this.prepareAtlasResources = prepareAtlasResources;
         this.getScrollShader = getScrollShader;
+        this.publishAnimationPhase = publishAnimationPhase;
         solidTexture = new LoadedTexture(capi);
     }
 
@@ -127,6 +143,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     {
         if (disposed || IsOpened()) return false;
 
+        closing = false;
         automatedTest = automated;
         completion = onCompleted;
         finishing = false;
@@ -147,7 +164,8 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         physicalScrollRendered = false;
         rolledScrollRendered = false;
         openScrollRendered = false;
-        cinematicCameraApplied = false;
+        seraphForearmMeshesReady = false;
+        thirdPersonHandAnchorsReady = false;
         automatedPocketScreenshotHandled = false;
         automatedPocketScreenshotPassed = false;
         automatedHandoffScreenshotHandled = false;
@@ -155,26 +173,53 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         automatedScreenshotHandled = false;
         automatedScreenshotPassed = false;
         heldItemSlotsSuppressed = false;
-        rendererHeldItemSuppressed = false;
         heldItemsRestored = false;
         cameraRestored = false;
-        overrideCameraModeField = null;
-        savedOverrideCameraMode = null;
-        overrideCameraModeCaptured = false;
-        engineCamera = null;
-        engineCameraModeField = null;
-        savedEngineCameraMode = null;
-        thirdPersonDistanceField = null;
-        savedThirdPersonDistance = null;
-        targetCameraDistanceField = null;
-        savedTargetCameraDistance = null;
-        engineCameraCaptured = false;
+        return TryOpen();
+    }
+
+    public bool BeginClosing(bool automated, Action<bool> onCompleted)
+    {
+        if (disposed || IsOpened()) return false;
+
+        closing = true;
+        automatedTest = automated;
+        completion = onCompleted;
+        finishing = false;
+        resourcesReady = true;
+        cameraCaptured = false;
+        cameraMoved = false;
+        bowAnimationStarted = false;
+        handoffAnimationStarted = false;
+        holdAnimationStarted = false;
+        handoffPhaseStarted = false;
+        holdPhaseStarted = false;
+        pocketSoundAttempted = false;
+        pocketSoundPlayed = false;
+        unrollSoundAttempted = false;
+        unrollSoundPlayed = false;
+        swooshSoundAttempted = true;
+        swooshSoundPlayed = true;
+        physicalScrollRendered = false;
+        rolledScrollRendered = false;
+        openScrollRendered = false;
+        seraphForearmMeshesReady = false;
+        thirdPersonHandAnchorsReady = false;
+        automatedPocketScreenshotHandled = false;
+        automatedPocketScreenshotPassed = false;
+        automatedHandoffScreenshotHandled = false;
+        automatedHandoffScreenshotPassed = false;
+        automatedScreenshotHandled = false;
+        automatedScreenshotPassed = false;
+        heldItemSlotsSuppressed = false;
+        heldItemsRestored = false;
+        cameraRestored = false;
         return TryOpen();
     }
 
     public void SkipToAtlas()
     {
-        if (!IsOpened() || finishing) return;
+        if (!IsOpened() || finishing || closing) return;
         resourcesReady = prepareAtlasResources();
         QueueFinish(!automatedTest || ValidateAutomatedScene());
     }
@@ -184,6 +229,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         completion = null;
         finishing = true;
         RestorePlayerPresentation();
+        publishAnimationPhase(AtlasScrollPhase.Stop);
         if (IsOpened()) TryClose();
     }
 
@@ -191,15 +237,31 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     {
         base.OnGuiOpened();
         EnsureRenderResources();
+        RefreshSeraphForearmMeshes();
         CapturePlayerPresentation();
         startedTimestamp = Stopwatch.GetTimestamp();
-        bowAnimationStarted = StartClientAnimation(
-            "bow",
-            BowAnimationCode,
-            1.0f
-        );
+        if (closing)
+        {
+            publishAnimationPhase(AtlasScrollPhase.RollClosed);
+            holdAnimationStarted = StartClientAnimationPair(
+                "holdbothhandslarge",
+                HoldAnimationCode,
+                1.0f
+            );
+        }
+        else
+        {
+            publishAnimationPhase(AtlasScrollPhase.Retrieve);
+            bowAnimationStarted = StartClientAnimationPair(
+                "holdinglanternlefthand",
+                BowAnimationCode,
+                1.0f
+            );
+        }
         capi.Logger.Notification(
-            "[ModernAtlas] Started the physical scroll opening transition."
+            closing
+                ? "[ModernAtlas] Started the first-person scroll stowing transition."
+                : "[ModernAtlas] Started the stationary first-person scroll opening transition."
         );
     }
 
@@ -214,14 +276,16 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         if (finishing) return;
 
         float elapsed = (float)Stopwatch.GetElapsedTime(startedTimestamp).TotalSeconds;
-        resourcesReady = prepareAtlasResources();
+        if (!closing) resourcesReady = prepareAtlasResources();
         MaintainHeldItemSuppression();
         UpdatePlayerPresentation(elapsed);
-        AdvanceAnimationAndSound(elapsed);
-        RenderFinalAtlasEntry(elapsed);
+        if (closing) AdvanceClosingAnimationAndSound(elapsed);
+        else AdvanceAnimationAndSound(elapsed);
+        if (!closing) RenderFinalAtlasEntry(elapsed);
         CaptureAutomatedScreenshot(elapsed);
 
-        if (elapsed >= TotalDurationSeconds && resourcesReady)
+        float duration = closing ? ClosingDurationSeconds : TotalDurationSeconds;
+        if (elapsed >= duration && resourcesReady)
         {
             QueueFinish(!automatedTest || ValidateAutomatedScene());
         }
@@ -239,6 +303,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
 
     public override bool OnEscapePressed()
     {
+        if (closing) return true;
         CancelWithoutOpening();
         return true;
     }
@@ -247,11 +312,11 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     {
         if (args.KeyCode == (int)GlKeys.Escape)
         {
-            CancelWithoutOpening();
+            if (!closing) CancelWithoutOpening();
         }
         else if (args.KeyCode == (int)GlKeys.G)
         {
-            SkipToAtlas();
+            if (!closing) SkipToAtlas();
         }
         args.Handled = true;
     }
@@ -266,14 +331,19 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
 
     public void OnRenderFrame(float deltaTime, EnumRenderStage stage)
     {
-        if (stage != EnumRenderStage.Opaque || finishing || !IsOpened()) return;
+        if (stage != EnumRenderStage.Opaque) return;
 
-        float elapsed = (float)Stopwatch.GetElapsedTime(startedTimestamp).TotalSeconds;
-        // Entity control updates can overwrite BodyYaw after the GUI update.
-        // Reapply the cinematic facing immediately before the entity render
-        // order so the real player model holds the scroll toward the camera.
-        UpdatePlayerPresentation(elapsed);
-        physicalScrollRendered |= RenderPhysicalScroll(elapsed);
+        if (!finishing && IsOpened())
+        {
+            float elapsed = (float)Stopwatch.GetElapsedTime(startedTimestamp).TotalSeconds;
+            UpdatePlayerPresentation(elapsed);
+            thirdPersonHandAnchorsReady |= ValidateCurrentThirdPersonHandAnchors();
+            float scrollTime = closing
+                ? Math.Max(0, LightPhaseStartSeconds - elapsed)
+                : elapsed;
+            physicalScrollRendered |= RenderPhysicalScroll(scrollTime);
+        }
+        RenderRemoteScrolls();
     }
 
     public override void Dispose()
@@ -285,6 +355,10 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         scrollSheetMesh = null;
         scrollCylinderMesh?.Dispose();
         scrollCylinderMesh = null;
+        leftSeraphForearmMesh?.Dispose();
+        leftSeraphForearmMesh = null;
+        rightSeraphForearmMesh?.Dispose();
+        rightSeraphForearmMesh = null;
         solidTexture.Dispose();
         base.Dispose();
     }
@@ -307,7 +381,6 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             savedHeadPitch = player.Pos.HeadPitch;
             savedHeadYaw = player.Pos.HeadYaw;
             cameraCaptured = true;
-            ApplyCinematicCamera(clientPlayer);
             SuppressHeldItems(player);
         }
         catch (Exception exception)
@@ -320,57 +393,6 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         }
     }
 
-    private void ApplyCinematicCamera(IClientPlayer clientPlayer)
-    {
-        overrideCameraModeField = FindField(
-            clientPlayer.GetType(),
-            "OverrideCameraMode"
-        );
-        Type? overrideType = overrideCameraModeField?.FieldType;
-        Type? cameraModeType = overrideType == null
-            ? null
-            : Nullable.GetUnderlyingType(overrideType) ?? overrideType;
-        FieldInfo? gameField = FindField(capi.GetType(), "game");
-        object? game = gameField?.GetValue(capi);
-        FieldInfo? mainCameraField = game == null
-            ? null
-            : FindField(game.GetType(), "MainCamera");
-        engineCamera = mainCameraField?.GetValue(game);
-        engineCameraModeField = engineCamera == null
-            ? null
-            : FindField(engineCamera.GetType(), "CameraMode");
-        thirdPersonDistanceField = engineCamera == null
-            ? null
-            : FindField(engineCamera.GetType(), "Tppcameradistance");
-        targetCameraDistanceField = engineCamera == null
-            ? null
-            : FindField(engineCamera.GetType(), "targetCameraDistance");
-
-        if (cameraModeType != typeof(EnumCameraMode)
-            || engineCameraModeField?.FieldType != typeof(EnumCameraMode)
-            || thirdPersonDistanceField?.FieldType != typeof(float)
-            || targetCameraDistanceField?.FieldType != typeof(float))
-        {
-            capi.Logger.Warning(
-                "[ModernAtlas] The cinematic third-person camera is unavailable; preserving the current camera mode."
-            );
-            cinematicCameraApplied = false;
-            return;
-        }
-
-        savedOverrideCameraMode = overrideCameraModeField!.GetValue(clientPlayer);
-        savedEngineCameraMode = engineCameraModeField.GetValue(engineCamera);
-        savedThirdPersonDistance = thirdPersonDistanceField.GetValue(engineCamera);
-        savedTargetCameraDistance = targetCameraDistanceField.GetValue(engineCamera);
-        overrideCameraModeCaptured = true;
-        engineCameraCaptured = true;
-        overrideCameraModeField.SetValue(clientPlayer, EnumCameraMode.ThirdPerson);
-        engineCameraModeField.SetValue(engineCamera, EnumCameraMode.ThirdPerson);
-        thirdPersonDistanceField.SetValue(engineCamera, 3.25f);
-        targetCameraDistanceField.SetValue(engineCamera, 3.25f);
-        cinematicCameraApplied = true;
-    }
-
     private void SuppressHeldItems(EntityPlayer player)
     {
         heldItemAgent = player;
@@ -381,17 +403,6 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         player.LeftHandItemSlot = hiddenLeftHandItemSlot;
         player.RightHandItemSlot = hiddenRightHandItemSlot;
         heldItemSlotsSuppressed = true;
-
-        EntityRenderer? renderer = player.Properties.Client.Renderer;
-        if (renderer == null) return;
-
-        heldItemRenderer = renderer;
-        renderHeldItemField = FindField(renderer.GetType(), "DoRenderHeldItem");
-        if (renderHeldItemField?.FieldType != typeof(bool)) return;
-
-        savedRenderHeldItem = (bool)(renderHeldItemField.GetValue(renderer) ?? true);
-        renderHeldItemField.SetValue(renderer, false);
-        rendererHeldItemSuppressed = true;
     }
 
     private void MaintainHeldItemSuppression()
@@ -405,10 +416,6 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
                 heldItemAgent.LeftHandItemSlot = hiddenLeftHandItemSlot;
                 heldItemAgent.RightHandItemSlot = hiddenRightHandItemSlot;
             }
-            if (renderHeldItemField != null && heldItemRenderer != null)
-            {
-                renderHeldItemField.SetValue(heldItemRenderer, false);
-            }
         }
         catch
         {
@@ -419,53 +426,24 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     private void UpdatePlayerPresentation(float elapsed)
     {
         if (!cameraCaptured) return;
-
-        float bowAmount;
-        if (elapsed <= PocketReachEndSeconds)
-        {
-            bowAmount = SmoothStep(elapsed / 0.58f);
-        }
-        else
-        {
-            bowAmount = 1f - SmoothStep(
-                (elapsed - PocketReachEndSeconds) / 0.70f
-            );
-        }
-        bowAmount = Math.Clamp(bowAmount, 0f, 1f);
         try
         {
             IClientPlayer clientPlayer = capi.World.Player;
             EntityPlayer player = capi.World.Player.Entity;
-            float cameraBlend = SmoothStep(elapsed / 0.46f);
-            float targetYaw = savedEntityYaw + 0.30f;
-            float targetPitch = 0.10f + bowAmount * 0.055f;
-            float targetRoll = -bowAmount * 0.025f;
-            float cameraYaw = LerpAngle(savedCameraYaw, targetYaw, cameraBlend);
-            float cameraPitch = Lerp(savedCameraPitch, targetPitch, cameraBlend);
-            float cameraRoll = Lerp(savedCameraRoll, targetRoll, cameraBlend);
-            float bodyBlend = SmoothStep(elapsed / 0.34f);
-            float bodyYaw = LerpAngle(
-                savedBodyYaw,
-                targetYaw + MathF.PI,
-                bodyBlend
-            );
-
-            clientPlayer.CameraYaw = cameraYaw;
-            clientPlayer.CameraPitch = cameraPitch;
-            clientPlayer.CameraRoll = cameraRoll;
-            capi.Input.MouseYaw = cameraYaw;
-            capi.Input.MousePitch = cameraPitch;
-
-            // Face the model toward the cinematic camera while the full-body
-            // clips bend its torso, neck and head. Rotating BodyYaw keeps the
-            // skeleton intact; the former first-person arm clips did not.
+            // Input is captured for the transition, and these assignments also
+            // prevent other client systems from introducing a camera bow or
+            // pocket-facing turn while the scroll is in the player's hands.
+            clientPlayer.CameraYaw = savedCameraYaw;
+            clientPlayer.CameraPitch = savedCameraPitch;
+            clientPlayer.CameraRoll = savedCameraRoll;
+            capi.Input.MouseYaw = savedMouseYaw;
+            capi.Input.MousePitch = savedMousePitch;
             player.Pos.Pitch = savedEntityPitch;
-            player.Pos.Yaw = bodyYaw;
+            player.Pos.Yaw = savedEntityYaw;
             player.Pos.Roll = savedEntityRoll;
-            player.BodyYaw = bodyYaw;
+            player.BodyYaw = savedBodyYaw;
             player.Pos.HeadPitch = savedHeadPitch;
-            player.Pos.HeadYaw = bodyYaw;
-            cameraMoved |= cameraBlend >= 0.95f && bowAmount >= 0.75f;
+            player.Pos.HeadYaw = savedHeadYaw;
         }
         catch
         {
@@ -484,8 +462,9 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         if (!handoffPhaseStarted && elapsed >= HandoffStartSeconds)
         {
             handoffPhaseStarted = true;
+            publishAnimationPhase(AtlasScrollPhase.Handoff);
             StopClientAnimation(BowAnimationCode);
-            handoffAnimationStarted = StartClientAnimation(
+            handoffAnimationStarted = StartClientAnimationPair(
                 "twohandplaceblock",
                 HandoffAnimationCode,
                 0.80f
@@ -498,11 +477,12 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             unrollSoundPlayed = PlayLocalSound("sounds/block/cloth", 0.62f);
         }
 
-        if (!holdPhaseStarted && elapsed >= HoldStartSeconds)
+        if (!holdPhaseStarted && elapsed >= UnrollEndSeconds)
         {
             holdPhaseStarted = true;
+            publishAnimationPhase(AtlasScrollPhase.HoldOpen);
             StopClientAnimation(HandoffAnimationCode);
-            holdAnimationStarted = StartClientAnimation(
+            holdAnimationStarted = StartClientAnimationPair(
                 "holdbothhandslarge",
                 HoldAnimationCode,
                 1.0f
@@ -516,9 +496,52 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         }
     }
 
-    private bool RenderPhysicalScroll(float elapsed)
+    private void AdvanceClosingAnimationAndSound(float elapsed)
     {
-        if (elapsed < ScrollAppearsSeconds || !EnsureRenderResources()) return false;
+        if (!unrollSoundAttempted && elapsed >= 0.18f)
+        {
+            unrollSoundAttempted = true;
+            unrollSoundPlayed = PlayLocalSound("sounds/block/cloth", 0.62f);
+        }
+
+        if (!handoffPhaseStarted && elapsed >= ClosingReleaseRightSeconds)
+        {
+            handoffPhaseStarted = true;
+            publishAnimationPhase(AtlasScrollPhase.ReleaseRight);
+            StopClientAnimation(HoldAnimationCode);
+            handoffAnimationStarted = StartClientAnimationPair(
+                "twohandplaceblock",
+                HandoffAnimationCode,
+                0.80f
+            );
+        }
+
+        if (!holdPhaseStarted && elapsed >= ClosingStowStartSeconds)
+        {
+            holdPhaseStarted = true;
+            publishAnimationPhase(AtlasScrollPhase.Stow);
+            StopClientAnimation(HandoffAnimationCode);
+            bowAnimationStarted = StartClientAnimationPair(
+                "holdinglanternlefthand",
+                BowAnimationCode,
+                1.0f,
+                1000f
+            );
+        }
+
+        if (!pocketSoundAttempted && elapsed >= 1.78f)
+        {
+            pocketSoundAttempted = true;
+            pocketSoundPlayed = PlayLocalSound("sounds/block/cloth", 0.48f);
+        }
+    }
+
+    private bool RenderPhysicalScroll(
+        float elapsed,
+        RemoteScrollPose? remotePose = null
+    )
+    {
+        if (!EnsureRenderResources()) return false;
 
         IShaderProgram? shader = getScrollShader();
         if (shader == null || shader.Disposed
@@ -528,7 +551,11 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             return false;
         }
 
-        float visible = SmoothStep((elapsed - ScrollAppearsSeconds) / 0.20f);
+        // The mesh becomes visible only after the left hand has moved below
+        // frame. It then enters together with that hand; there is no detached
+        // fade or mid-screen appearance.
+        float visible = elapsed >= ScrollAppearsSeconds ? 1f : 0f;
+        float reach = SmoothStep(elapsed / ScrollAppearsSeconds);
         float lift = EaseOutCubic(
             (elapsed - ScrollAppearsSeconds)
                 / (UnrollStartSeconds - ScrollAppearsSeconds)
@@ -543,15 +570,18 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         );
 
         IRenderAPI render = capi.Render;
-        Vec3f playerAnchor = TransformPlayerLocalPoint(
-            render.CameraMatrixOriginf,
-            0,
-            1.24f,
-            0
-        );
-        float anchoredX = playerAnchor.X + Lerp(0.29f, 0f, lift);
-        float anchoredY = playerAnchor.Y + Lerp(-0.43f, 0.01f, lift);
-        float anchoredZ = playerAnchor.Z + Lerp(0.16f, 0.24f, lift);
+        // View-space placement makes the rolled scroll share the fixed
+        // first-person left-hand path: below-left, then centered. Once the
+        // right hand arrives, the two roller endpoints separate together.
+        float pocketX = elapsed < ScrollAppearsSeconds
+            ? Lerp(-0.38f, -0.68f, reach)
+            : -0.68f;
+        float pocketY = elapsed < ScrollAppearsSeconds
+            ? Lerp(-0.48f, -0.82f, reach)
+            : -0.82f;
+        float anchoredX = Lerp(pocketX, 0f, lift);
+        float anchoredY = Lerp(pocketY, -0.04f, lift);
+        float anchoredZ = Lerp(-1.36f, -1.18f, lift);
         float centerX = Lerp(anchoredX, 0.02f, dive);
         float centerY = Lerp(anchoredY, 0.02f, dive);
         float centerZ = Lerp(anchoredZ, -0.34f, dive);
@@ -568,12 +598,28 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
 
         float[] projection = render.CurrentProjectionMatrix;
 
-        float[] parent = Mat4f.Create();
-        Mat4f.Translate(parent, parent, centerX, centerY, centerZ);
-        Mat4f.RotateZ(parent, parent, rotationZ);
-        Mat4f.RotateY(parent, parent, rotationY);
-        Mat4f.RotateX(parent, parent, rotationX);
-        Mat4f.Scale(parent, parent, parentScale, parentScale, parentScale);
+        float[] parent;
+        if (remotePose is RemoteScrollPose pose)
+        {
+            float handDistance = Distance(pose.LeftHand, pose.RightHand);
+            scrollWidth = Lerp(
+                0.11f,
+                Math.Clamp(handDistance, 0.30f, 1.15f),
+                unroll
+            );
+            scrollHeight = 0.42f;
+            sweep = 0;
+            parent = CreateRemoteScrollParent(pose, unroll);
+        }
+        else
+        {
+            parent = Mat4f.Create();
+            Mat4f.Translate(parent, parent, centerX, centerY, centerZ);
+            Mat4f.RotateZ(parent, parent, rotationZ);
+            Mat4f.RotateY(parent, parent, rotationY);
+            Mat4f.RotateX(parent, parent, rotationX);
+            Mat4f.Scale(parent, parent, parentScale, parentScale, parentScale);
+        }
 
         render.CurrentActiveShader?.Stop();
         shader.Use();
@@ -649,6 +695,20 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
                     sweep
                 );
             }
+
+            // Opening shows the empty left hand reaching below frame. During
+            // closing, once that hand and the scroll are already below frame,
+            // do not draw an extra return sweep back across the camera.
+            if (remotePose == null && (!closing || visible > 0))
+            {
+                RenderFirstPersonArms(
+                    shader,
+                    parent,
+                    rollerOffset,
+                    unroll,
+                    elapsed
+                );
+            }
         }
         finally
         {
@@ -664,14 +724,312 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         return true;
     }
 
-    private static Vec3f TransformPlayerLocalPoint(
+    private void RenderFirstPersonArms(
+        IShaderProgram shader,
+        float[] parent,
+        float rollerOffset,
+        float unroll,
+        float elapsed
+    )
+    {
+        if (leftSeraphForearmMesh == null || rightSeraphForearmMesh == null) return;
+
+        shader.BindTexture2D(
+            "entityTex",
+            seraphSkinTextureId,
+            0
+        );
+        shader.Uniform("entityColor", seraphSkinColor);
+
+        float leftGripX = unroll > 0.025f ? -rollerOffset : rollerOffset;
+        float leftGripY = -0.12f;
+        float leftReach = elapsed < ScrollAppearsSeconds
+            ? SmoothStep(elapsed / ScrollAppearsSeconds)
+            : 1f;
+        float leftReturn = SmoothStep(
+            (elapsed - ScrollAppearsSeconds)
+                / (HandoffStartSeconds - ScrollAppearsSeconds)
+        );
+        float leftStartX = Lerp(
+            Lerp(-0.58f, -0.78f, leftReach),
+            -0.64f,
+            leftReturn
+        );
+        float leftStartY = Lerp(
+            Lerp(-0.60f, -0.76f, leftReach),
+            -0.62f,
+            leftReturn
+        );
+        RenderArm(
+            shader,
+            leftSeraphForearmMesh,
+            parent,
+            leftStartX,
+            leftStartY,
+            leftGripX,
+            leftGripY,
+            1f
+        );
+
+        float rightAlpha = SmoothStep((unroll - 0.04f) / 0.24f);
+        RenderArm(
+            shader,
+            rightSeraphForearmMesh,
+            parent,
+            0.64f,
+            -0.62f,
+            rollerOffset,
+            -0.12f,
+            rightAlpha
+        );
+    }
+
+    private void RenderArm(
+        IShaderProgram shader,
+        MeshRef forearmMesh,
+        float[] parent,
+        float startX,
+        float startY,
+        float gripX,
+        float gripY,
+        float alpha
+    )
+    {
+        if (alpha <= 0.001f) return;
+
+        RenderArmSegment(
+            shader,
+            forearmMesh,
+            parent,
+            startX,
+            startY,
+            gripX,
+            gripY,
+            alpha
+        );
+    }
+
+    private void RenderArmSegment(
+        IShaderProgram shader,
+        MeshRef forearmMesh,
+        float[] parent,
+        float startX,
+        float startY,
+        float endX,
+        float endY,
+        float alpha
+    )
+    {
+        float dx = endX - startX;
+        float dy = endY - startY;
+        float length = MathF.Sqrt(dx * dx + dy * dy);
+        float[] model = Mat4f.CloneIt(parent);
+        Mat4f.Translate(
+            model,
+            model,
+            (startX + endX) * 0.5f,
+            (startY + endY) * 0.5f,
+            -0.035f
+        );
+        // LowerArmL/R extend from their elbow at positive local Y toward the
+        // hand at negative local Y. Point that authored hand end at the scroll
+        // grip instead of attaching a second synthetic hand mesh.
+        Mat4f.RotateZ(model, model, MathF.PI - MathF.Atan2(dx, dy));
+        // Preserve the authored rectangular Seraph proportions and emphasize
+        // their blocky cross-section in first person. Y remains exactly the
+        // required reach length while X/Z stay visibly thick.
+        Mat4f.Scale(model, model, length * 1.35f, length, length * 1.35f);
+        RenderComponent(shader, forearmMesh, model, 6, alpha, 0);
+    }
+
+    private void RenderRemoteScrolls()
+    {
+        if (remoteScrolls.Count == 0 || capi.World.Player?.Entity == null) return;
+
+        List<string>? expired = null;
+        foreach (KeyValuePair<string, RemoteScrollState> entry in remoteScrolls)
+        {
+            EntityPlayer? remotePlayer = null;
+            foreach (Entity entity in capi.World.LoadedEntities.Values)
+            {
+                if (entity is EntityPlayer candidate
+                    && candidate.PlayerUID == entry.Key)
+                {
+                    remotePlayer = candidate;
+                    break;
+                }
+            }
+            if (remotePlayer == null) continue;
+
+            float phaseElapsed = (float)Stopwatch.GetElapsedTime(
+                entry.Value.StartedTimestamp
+            ).TotalSeconds;
+            float scrollTime = RemoteScrollTime(entry.Value.Phase, phaseElapsed);
+            float stowDuration = ClosingDurationSeconds - ClosingStowStartSeconds;
+            if (entry.Value.Phase == AtlasScrollPhase.Stow
+                && phaseElapsed > stowDuration + 0.05f)
+            {
+                (expired ??= new List<string>()).Add(entry.Key);
+                continue;
+            }
+
+            if (TryGetRemoteScrollPose(remotePlayer, out RemoteScrollPose pose))
+            {
+                RenderPhysicalScroll(scrollTime, pose);
+            }
+        }
+
+        if (expired != null)
+        {
+            foreach (string uid in expired) remoteScrolls.Remove(uid);
+        }
+    }
+
+    private static float RemoteScrollTime(AtlasScrollPhase phase, float elapsed)
+    {
+        return phase switch
+        {
+            AtlasScrollPhase.Retrieve =>
+                Lerp(0, HandoffStartSeconds, SmoothStep(elapsed / HandoffStartSeconds)),
+            AtlasScrollPhase.Handoff =>
+                Lerp(
+                    HandoffStartSeconds,
+                    UnrollEndSeconds,
+                    SmoothStep(elapsed / (UnrollEndSeconds - HandoffStartSeconds))
+                ),
+            AtlasScrollPhase.HoldOpen => UnrollEndSeconds,
+            AtlasScrollPhase.RollClosed =>
+                Lerp(
+                    LightPhaseStartSeconds,
+                    UnrollStartSeconds,
+                    SmoothStep(elapsed / ClosingReleaseRightSeconds)
+                ),
+            AtlasScrollPhase.ReleaseRight =>
+                Lerp(
+                    UnrollStartSeconds,
+                    HandoffStartSeconds,
+                    SmoothStep(
+                        elapsed
+                            / (ClosingStowStartSeconds - ClosingReleaseRightSeconds)
+                    )
+                ),
+            AtlasScrollPhase.Stow =>
+                Lerp(
+                    HandoffStartSeconds,
+                    ScrollAppearsSeconds,
+                    SmoothStep(elapsed / (ClosingDurationSeconds - ClosingStowStartSeconds))
+                ),
+            _ => 0
+        };
+    }
+
+    private bool TryGetRemoteScrollPose(
+        EntityPlayer player,
+        out RemoteScrollPose pose
+    )
+    {
+        pose = default;
+        IAnimator? animator = player.TpAnimManager.Animator;
+        AttachmentPointAndPose? left = animator?.GetAttachmentPointPose("LeftHand");
+        AttachmentPointAndPose? right = animator?.GetAttachmentPointPose("RightHand");
+        if (left?.AttachPoint == null || right?.AttachPoint == null) return false;
+
+        EntityPlayer localPlayer = capi.World.Player.Entity;
+        float[] entityModel = Mat4f.Create();
+        Mat4f.Translate(
+            entityModel,
+            entityModel,
+            (float)(player.Pos.X - localPlayer.CameraPos.X),
+            (float)(player.Pos.Y - localPlayer.CameraPos.Y),
+            (float)(player.Pos.Z - localPlayer.CameraPos.Z)
+        );
+
+        float halfHeight = player.SelectionBox.Y2 * 0.5f;
+        CompositeShape? shape = player.Properties.Client.Shape;
+        float shapeYaw = (shape?.rotateY ?? 0) + 90f;
+        Mat4f.Translate(entityModel, entityModel, 0, halfHeight, 0);
+        Mat4f.RotateY(
+            entityModel,
+            entityModel,
+            player.Pos.Yaw + shapeYaw * GameMath.DEG2RAD
+        );
+        Mat4f.Translate(entityModel, entityModel, 0, -halfHeight, 0);
+        float size = player.Properties.Client.Size;
+        Mat4f.Scale(entityModel, entityModel, size, size, size);
+        Mat4f.Translate(entityModel, entityModel, -0.5f, 0, -0.5f);
+
+        float[] modelView = Mat4f.Create();
+        Mat4f.Mul(modelView, capi.Render.CameraMatrixOriginf, entityModel);
+        Vec3f leftHand = TransformAttachmentPoint(modelView, left);
+        Vec3f rightHand = TransformAttachmentPoint(modelView, right);
+        Vec3f rightAxis = Normalize(TransformDirection(modelView, 1, 0, 0));
+        Vec3f upAxis = Normalize(TransformDirection(modelView, 0, 1, 0));
+        if (!IsFinite(leftHand)
+            || !IsFinite(rightHand)
+            || !IsFinite(rightAxis)
+            || !IsFinite(upAxis))
+        {
+            return false;
+        }
+
+        pose = new RemoteScrollPose(leftHand, rightHand, rightAxis, upAxis);
+        return true;
+    }
+
+    private static Vec3f TransformAttachmentPoint(
+        float[] modelView,
+        AttachmentPointAndPose point
+    )
+    {
+        Vec3f local = TransformPoint(
+            point.AnimModelMatrix,
+            (float)(point.AttachPoint.PosX / 16.0),
+            (float)(point.AttachPoint.PosY / 16.0),
+            (float)(point.AttachPoint.PosZ / 16.0)
+        );
+        return TransformPoint(modelView, local.X, local.Y, local.Z);
+    }
+
+    private static float[] CreateRemoteScrollParent(
+        RemoteScrollPose pose,
+        float unroll
+    )
+    {
+        Vec3f handAxis = Subtract(pose.RightHand, pose.LeftHand);
+        float handDistance = Length(handAxis);
+        Vec3f xAxis = handDistance > 0.03f
+            ? Scale(handAxis, 1f / handDistance)
+            : pose.RightAxis;
+        Vec3f upProjection = Subtract(
+            pose.UpAxis,
+            Scale(xAxis, Dot(pose.UpAxis, xAxis))
+        );
+        Vec3f yAxis = Length(upProjection) > 0.03f
+            ? Normalize(upProjection)
+            : new Vec3f(0, 1, 0);
+        Vec3f zAxis = Normalize(Cross(xAxis, yAxis));
+        yAxis = Normalize(Cross(zAxis, xAxis));
+
+        float gripBlend = SmoothStep(unroll);
+        Vec3f midpoint = Scale(Add(pose.LeftHand, pose.RightHand), 0.5f);
+        Vec3f center = Lerp(pose.LeftHand, midpoint, gripBlend);
+        return new[]
+        {
+            xAxis.X, xAxis.Y, xAxis.Z, 0,
+            yAxis.X, yAxis.Y, yAxis.Z, 0,
+            zAxis.X, zAxis.Y, zAxis.Z, 0,
+            center.X, center.Y, center.Z, 1
+        };
+    }
+
+    private static Vec3f TransformPoint(
         float[] matrix,
         float x,
         float y,
         float z
     )
     {
-        if (matrix.Length < 16) return new Vec3f(0, -0.18f, -2.8f);
+        if (matrix.Length < 16) return new Vec3f();
 
         return new Vec3f(
             matrix[0] * x + matrix[4] * y + matrix[8] * z + matrix[12],
@@ -679,6 +1037,59 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             matrix[2] * x + matrix[6] * y + matrix[10] * z + matrix[14]
         );
     }
+
+    private static Vec3f TransformDirection(
+        float[] matrix,
+        float x,
+        float y,
+        float z
+    ) => new(
+        matrix[0] * x + matrix[4] * y + matrix[8] * z,
+        matrix[1] * x + matrix[5] * y + matrix[9] * z,
+        matrix[2] * x + matrix[6] * y + matrix[10] * z
+    );
+
+    private static Vec3f Add(Vec3f a, Vec3f b) =>
+        new(a.X + b.X, a.Y + b.Y, a.Z + b.Z);
+
+    private static Vec3f Subtract(Vec3f a, Vec3f b) =>
+        new(a.X - b.X, a.Y - b.Y, a.Z - b.Z);
+
+    private static Vec3f Scale(Vec3f value, float scale) =>
+        new(value.X * scale, value.Y * scale, value.Z * scale);
+
+    private static Vec3f Lerp(Vec3f a, Vec3f b, float amount) =>
+        new(
+            Lerp(a.X, b.X, amount),
+            Lerp(a.Y, b.Y, amount),
+            Lerp(a.Z, b.Z, amount)
+        );
+
+    private static float Dot(Vec3f a, Vec3f b) =>
+        a.X * b.X + a.Y * b.Y + a.Z * b.Z;
+
+    private static Vec3f Cross(Vec3f a, Vec3f b) => new(
+        a.Y * b.Z - a.Z * b.Y,
+        a.Z * b.X - a.X * b.Z,
+        a.X * b.Y - a.Y * b.X
+    );
+
+    private static float Length(Vec3f value) =>
+        MathF.Sqrt(Dot(value, value));
+
+    private static float Distance(Vec3f a, Vec3f b) =>
+        Length(Subtract(a, b));
+
+    private static Vec3f Normalize(Vec3f value)
+    {
+        float length = Length(value);
+        return length > 0.0001f ? Scale(value, 1f / length) : new Vec3f();
+    }
+
+    private static bool IsFinite(Vec3f value) =>
+        float.IsFinite(value.X)
+        && float.IsFinite(value.Y)
+        && float.IsFinite(value.Z);
 
     private void RenderRoller(
         IShaderProgram shader,
@@ -777,6 +1188,196 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         );
     }
 
+    private void RefreshSeraphForearmMeshes()
+    {
+        leftSeraphForearmMesh?.Dispose();
+        leftSeraphForearmMesh = null;
+        rightSeraphForearmMesh?.Dispose();
+        rightSeraphForearmMesh = null;
+        seraphSkinTextureId = 0;
+        seraphSkinColor = new Vec4f(1f, 1f, 1f, 1f);
+
+        try
+        {
+            EntityPlayer player = capi.World.Player.Entity;
+            Shape? loadedShape = player.Properties.Client.LoadedShapeForEntity
+                ?? player.Properties.Client.LoadedShape;
+            if (loadedShape == null)
+            {
+                throw new InvalidOperationException(
+                    "The loaded Seraph shape is unavailable."
+                );
+            }
+
+            Shape? bareSeraphShape = Shape.TryGet(
+                capi,
+                new AssetLocation(
+                    "game",
+                    "shapes/entity/humanoid/seraph-hairless.json"
+                )
+            );
+            if (bareSeraphShape == null)
+            {
+                throw new InvalidOperationException(
+                    "The base Seraph skin shape is unavailable."
+                );
+            }
+
+            if (!PlayerSkinTextureAdapter.TryGet(
+                    player,
+                    out ITexPositionSource? textureSource,
+                    out seraphSkinTextureId,
+                    out seraphSkinColor
+                )
+                || textureSource == null)
+            {
+                throw new InvalidOperationException(
+                    "The player's composed skin texture is unavailable."
+                );
+            }
+            string leftBoneName = player.GetBoneName(
+                "lowerArmLBoneName",
+                "LowerArmL"
+            );
+            string rightBoneName = player.GetBoneName(
+                "lowerArmRBoneName",
+                "LowerArmR"
+            );
+            if (FindShapeElement(loadedShape.Elements, leftBoneName) == null
+                || FindShapeElement(loadedShape.Elements, rightBoneName) == null)
+            {
+                throw new InvalidOperationException(
+                    "The loaded player model has no compatible forearm bones."
+                );
+            }
+
+            Shape leftForearmShape = CreateSingleElementShape(
+                bareSeraphShape,
+                "LowerArmL"
+            );
+            Shape rightForearmShape = CreateSingleElementShape(
+                bareSeraphShape,
+                "LowerArmR"
+            );
+            capi.Tesselator.TesselateShape(
+                "ModernAtlas left skin forearm",
+                leftForearmShape,
+                out MeshData leftMesh,
+                textureSource,
+                new Vec3f(),
+                0,
+                0,
+                0
+            );
+            capi.Tesselator.TesselateShape(
+                "ModernAtlas right skin forearm",
+                rightForearmShape,
+                out MeshData rightMesh,
+                textureSource,
+                new Vec3f(),
+                0,
+                0,
+                0
+            );
+            NormalizeForearmMesh(leftMesh);
+            NormalizeForearmMesh(rightMesh);
+            leftSeraphForearmMesh = capi.Render.UploadMesh(leftMesh);
+            rightSeraphForearmMesh = capi.Render.UploadMesh(rightMesh);
+            seraphForearmMeshesReady = true;
+            capi.Logger.Debug(
+                "[ModernAtlas] Prepared thick first-person Seraph forearms from player skin texture {0} with tint {1:F3}, {2:F3}, {3:F3}, {4:F3}.",
+                seraphSkinTextureId,
+                seraphSkinColor.R,
+                seraphSkinColor.G,
+                seraphSkinColor.B,
+                seraphSkinColor.A
+            );
+        }
+        catch (Exception exception)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Could not build first-person arms from the loaded Seraph model: {0}",
+                exception.Message
+            );
+        }
+    }
+
+    private static ShapeElement? FindShapeElement(
+        ShapeElement[]? elements,
+        string name
+    )
+    {
+        if (elements == null) return null;
+        foreach (ShapeElement element in elements)
+        {
+            if (string.Equals(element.Name, name, StringComparison.OrdinalIgnoreCase))
+            {
+                return element;
+            }
+            ShapeElement? child = FindShapeElement(element.Children, name);
+            if (child != null) return child;
+        }
+        return null;
+    }
+
+    private static Shape CreateSingleElementShape(
+        Shape source,
+        string elementName
+    )
+    {
+        Shape shape = source.Clone();
+        ShapeElement element = FindShapeElement(shape.Elements, elementName)
+            ?? throw new InvalidOperationException(
+                $"The base Seraph shape has no {elementName} element."
+            );
+        element.ParentElement = null;
+        shape.Elements = new[] { element };
+        shape.Animations = Array.Empty<Animation>();
+        return shape;
+    }
+
+    private static void NormalizeForearmMesh(MeshData mesh)
+    {
+        if (mesh.VerticesCount <= 0)
+        {
+            throw new InvalidOperationException(
+                "The selected Seraph forearm contains no vertices."
+            );
+        }
+
+        float minX = float.MaxValue;
+        float minY = float.MaxValue;
+        float minZ = float.MaxValue;
+        float maxX = float.MinValue;
+        float maxY = float.MinValue;
+        float maxZ = float.MinValue;
+        for (int vertex = 0; vertex < mesh.VerticesCount; vertex++)
+        {
+            int index = vertex * 3;
+            float x = mesh.xyz[index];
+            float y = mesh.xyz[index + 1];
+            float z = mesh.xyz[index + 2];
+            minX = Math.Min(minX, x);
+            minY = Math.Min(minY, y);
+            minZ = Math.Min(minZ, z);
+            maxX = Math.Max(maxX, x);
+            maxY = Math.Max(maxY, y);
+            maxZ = Math.Max(maxZ, z);
+        }
+
+        float sizeY = Math.Max(0.001f, maxY - minY);
+        float centerX = (minX + maxX) * 0.5f;
+        float centerY = (minY + maxY) * 0.5f;
+        float centerZ = (minZ + maxZ) * 0.5f;
+        for (int vertex = 0; vertex < mesh.VerticesCount; vertex++)
+        {
+            int index = vertex * 3;
+            mesh.xyz[index] = (mesh.xyz[index] - centerX) / sizeY;
+            mesh.xyz[index + 1] = (mesh.xyz[index + 1] - centerY) / sizeY;
+            mesh.xyz[index + 2] = (mesh.xyz[index + 2] - centerZ) / sizeY;
+        }
+    }
+
     private bool EnsureRenderResources()
     {
         if (solidTexture.TextureId <= 0)
@@ -792,7 +1393,10 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             );
         }
 
-        if (scrollSheetMesh != null && scrollCylinderMesh != null) return true;
+        if (scrollSheetMesh != null && scrollCylinderMesh != null)
+        {
+            return true;
+        }
 
         try
         {
@@ -893,31 +1497,33 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         return mesh;
     }
 
-    private bool StartClientAnimation(
+    private bool StartClientAnimationPair(
         string sourceCode,
         string transitionCode,
-        float speed
+        float speed,
+        float easeOutSpeed = 8f
     )
     {
         try
         {
             EntityPlayer player = capi.World.Player.Entity;
-            if (!player.Properties.Client.AnimationsByMetaCode.TryGetValue(
+            bool thirdPersonStarted = StartClientAnimation(
+                player,
+                player.TpAnimManager,
                 sourceCode,
-                out AnimationMetaData? source
-            ))
-            {
-                return false;
-            }
-
-            AnimationMetaData animation = source.Clone();
-            animation.Code = transitionCode;
-            animation.AnimationSpeed = speed;
-            animation.ClientSide = true;
-            animation.EaseInSpeed = Math.Max(animation.EaseInSpeed, 8f);
-            animation.EaseOutSpeed = Math.Max(animation.EaseOutSpeed, 8f);
-            animation.Init();
-            return player.TpAnimManager.StartAnimation(animation);
+                transitionCode,
+                speed,
+                easeOutSpeed
+            );
+            bool firstPersonStarted = StartClientAnimation(
+                player,
+                player.SelfFpAnimManager,
+                $"{sourceCode}-fp",
+                transitionCode,
+                speed,
+                easeOutSpeed
+            );
+            return thirdPersonStarted && firstPersonStarted;
         }
         catch (Exception exception)
         {
@@ -928,6 +1534,33 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             );
             return false;
         }
+    }
+
+    private static bool StartClientAnimation(
+        EntityPlayer player,
+        IAnimationManager manager,
+        string sourceCode,
+        string transitionCode,
+        float speed,
+        float easeOutSpeed
+    )
+    {
+        if (!player.Properties.Client.AnimationsByMetaCode.TryGetValue(
+            sourceCode,
+            out AnimationMetaData? source
+        ))
+        {
+            return false;
+        }
+
+        AnimationMetaData animation = source.Clone();
+        animation.Code = transitionCode;
+        animation.AnimationSpeed = speed;
+        animation.ClientSide = true;
+        animation.EaseInSpeed = Math.Max(animation.EaseInSpeed, 8f);
+        animation.EaseOutSpeed = Math.Max(animation.EaseOutSpeed, easeOutSpeed);
+        animation.Init();
+        return manager.StartAnimation(animation);
     }
 
     private void StopClientAnimation(string code)
@@ -951,8 +1584,6 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         StopClientAnimation(HoldAnimationCode);
 
         bool cameraAnglesRestored = !cameraCaptured;
-        bool overrideCameraModeRestored = !overrideCameraModeCaptured;
-        bool engineCameraRestored = !engineCameraCaptured;
         if (cameraCaptured)
         {
             try
@@ -978,59 +1609,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             }
             cameraCaptured = false;
         }
-        if (overrideCameraModeCaptured && overrideCameraModeField != null)
-        {
-            try
-            {
-                overrideCameraModeField.SetValue(
-                    capi.World.Player,
-                    savedOverrideCameraMode
-                );
-                overrideCameraModeRestored = true;
-            }
-            catch
-            {
-                // The client player may already be gone during world shutdown.
-            }
-        }
-        if (engineCameraCaptured
-            && engineCamera != null
-            && engineCameraModeField != null
-            && thirdPersonDistanceField != null
-            && targetCameraDistanceField != null)
-        {
-            try
-            {
-                engineCameraModeField.SetValue(engineCamera, savedEngineCameraMode);
-                thirdPersonDistanceField.SetValue(
-                    engineCamera,
-                    savedThirdPersonDistance
-                );
-                targetCameraDistanceField.SetValue(
-                    engineCamera,
-                    savedTargetCameraDistance
-                );
-                engineCameraRestored = true;
-            }
-            catch
-            {
-                // The engine camera may already be gone during world shutdown.
-            }
-        }
-        cameraRestored = cameraAnglesRestored
-            && overrideCameraModeRestored
-            && engineCameraRestored;
-        overrideCameraModeCaptured = false;
-        overrideCameraModeField = null;
-        savedOverrideCameraMode = null;
-        engineCameraCaptured = false;
-        engineCamera = null;
-        engineCameraModeField = null;
-        savedEngineCameraMode = null;
-        thirdPersonDistanceField = null;
-        savedThirdPersonDistance = null;
-        targetCameraDistanceField = null;
-        savedTargetCameraDistance = null;
+        cameraRestored = cameraAnglesRestored;
 
         bool slotsRestored = heldItemsRestored || !heldItemSlotsSuppressed;
         if (heldItemAgent != null)
@@ -1046,23 +1625,9 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
                 // The entity may already have been disposed during teardown.
             }
         }
-        bool rendererRestored = heldItemsRestored || !rendererHeldItemSuppressed;
-        if (renderHeldItemField != null && heldItemRenderer != null)
+        if (heldItemSlotsSuppressed)
         {
-            try
-            {
-                renderHeldItemField.SetValue(heldItemRenderer, savedRenderHeldItem);
-                rendererRestored = true;
-            }
-            catch
-            {
-                // The renderer may already have been released.
-            }
-        }
-
-        if (heldItemSlotsSuppressed || rendererHeldItemSuppressed)
-        {
-            heldItemsRestored = slotsRestored && rendererRestored;
+            heldItemsRestored = slotsRestored;
         }
         if (heldItemsRestored)
         {
@@ -1071,8 +1636,6 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             savedRightHandItemSlot = null;
             hiddenLeftHandItemSlot = null;
             hiddenRightHandItemSlot = null;
-            heldItemRenderer = null;
-            renderHeldItemField = null;
         }
     }
 
@@ -1114,6 +1677,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         if (finishing) return;
         finishing = true;
         RestorePlayerPresentation();
+        publishAnimationPhase(AtlasScrollPhase.Stop);
         if (automatedTest && (!heldItemsRestored || !cameraRestored)) passed = false;
 
         if (automatedTest)
@@ -1121,20 +1685,22 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             if (passed)
             {
                 capi.Logger.Notification(
-                    "[ModernAtlas] AUTOMATED OPENING TRANSITION CHECK PASSED: full-player pocket reach, hidden held items, physical rolled scroll, two-handed unroll, restored camera/player state and atlas preparation completed."
+                    "[ModernAtlas] AUTOMATED {0} TRANSITION CHECK PASSED: stationary camera, first-person arms, synchronized third-person gesture, attached physical scroll and restored player state.",
+                    closing ? "CLOSING" : "OPENING"
                 );
             }
             else
             {
                 capi.Logger.Error(
-                    "[ModernAtlas] AUTOMATED OPENING TRANSITION CHECK FAILED: camera={0}/{1}, bow={2}, handoff={3}, hold={4}, hidden={5}/{6}, scroll={7}/{8}/{9}, sounds={10}/{11}/{12}, restored={13}, screenshot={14}, resources={15}.",
-                    cinematicCameraApplied,
+                    "[ModernAtlas] AUTOMATED {0} TRANSITION CHECK FAILED: cameraStationary={1}/{2}, left={3}, handoff={4}, hold={5}, hidden={6}/{7}, scroll={8}/{9}/{10}, sounds={11}/{12}/{13}, restored={14}, screenshot={15}, resources={16}, seraphForearms={17}, handAnchors={18}, phaseTimings={19}.",
+                    closing ? "CLOSING" : "OPENING",
+                    !cameraMoved,
                     cameraRestored,
                     bowAnimationStarted,
                     handoffAnimationStarted,
                     holdAnimationStarted,
                     heldItemSlotsSuppressed,
-                    rendererHeldItemSuppressed,
+                    true,
                     physicalScrollRendered,
                     rolledScrollRendered,
                     openScrollRendered,
@@ -1143,7 +1709,10 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
                     swooshSoundPlayed,
                     heldItemsRestored,
                     automatedScreenshotPassed,
-                    resourcesReady
+                    resourcesReady,
+                    seraphForearmMeshesReady,
+                    thirdPersonHandAnchorsReady,
+                    ValidateSynchronizedPhaseTimings()
                 );
             }
         }
@@ -1166,13 +1735,14 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             Environment.GetEnvironmentVariable(SmokeScreenshotEnvironmentVariable)
         );
         return resourcesReady
-            && cameraMoved
-            && cinematicCameraApplied
+            && seraphForearmMeshesReady
+            && thirdPersonHandAnchorsReady
+            && ValidateSynchronizedPhaseTimings()
+            && !cameraMoved
             && bowAnimationStarted
             && handoffAnimationStarted
             && holdAnimationStarted
             && heldItemSlotsSuppressed
-            && rendererHeldItemSuppressed
             && physicalScrollRendered
             && rolledScrollRendered
             && openScrollRendered
@@ -1183,6 +1753,92 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
                 || (automatedPocketScreenshotPassed
                     && automatedHandoffScreenshotPassed
                     && automatedScreenshotPassed));
+    }
+
+    private bool ValidateCurrentThirdPersonHandAnchors()
+    {
+        EntityPlayer? player = capi.World.Player?.Entity;
+        if (player == null
+            || !TryGetRemoteScrollPose(player, out RemoteScrollPose pose))
+        {
+            return false;
+        }
+
+        float handDistance = Distance(pose.LeftHand, pose.RightHand);
+        return float.IsFinite(handDistance)
+            && handDistance > 0.05f
+            && handDistance < 3f;
+    }
+
+    private static bool ValidateSynchronizedPhaseTimings()
+    {
+        const float tolerance = 0.001f;
+        static bool Equal(float left, float right) =>
+            Math.Abs(left - right) <= tolerance;
+
+        float openingHandoffDuration =
+            UnrollEndSeconds - HandoffStartSeconds;
+        float closingReleaseDuration =
+            ClosingStowStartSeconds - ClosingReleaseRightSeconds;
+        float closingStowDuration =
+            ClosingDurationSeconds - ClosingStowStartSeconds;
+
+        return Equal(RemoteScrollTime(AtlasScrollPhase.Retrieve, 0), 0)
+            && Equal(
+                RemoteScrollTime(
+                    AtlasScrollPhase.Retrieve,
+                    HandoffStartSeconds
+                ),
+                HandoffStartSeconds
+            )
+            && Equal(
+                RemoteScrollTime(AtlasScrollPhase.Handoff, 0),
+                HandoffStartSeconds
+            )
+            && Equal(
+                RemoteScrollTime(
+                    AtlasScrollPhase.Handoff,
+                    openingHandoffDuration
+                ),
+                UnrollEndSeconds
+            )
+            && Equal(
+                RemoteScrollTime(AtlasScrollPhase.HoldOpen, 0),
+                UnrollEndSeconds
+            )
+            && Equal(
+                RemoteScrollTime(AtlasScrollPhase.RollClosed, 0),
+                LightPhaseStartSeconds
+            )
+            && Equal(
+                RemoteScrollTime(
+                    AtlasScrollPhase.RollClosed,
+                    ClosingReleaseRightSeconds
+                ),
+                UnrollStartSeconds
+            )
+            && Equal(
+                RemoteScrollTime(AtlasScrollPhase.ReleaseRight, 0),
+                UnrollStartSeconds
+            )
+            && Equal(
+                RemoteScrollTime(
+                    AtlasScrollPhase.ReleaseRight,
+                    closingReleaseDuration
+                ),
+                HandoffStartSeconds
+            )
+            && Equal(
+                RemoteScrollTime(AtlasScrollPhase.Stow, 0),
+                HandoffStartSeconds
+            )
+            && Equal(
+                RemoteScrollTime(
+                    AtlasScrollPhase.Stow,
+                    closingStowDuration
+                ),
+                ScrollAppearsSeconds
+            );
     }
 
     private void CaptureAutomatedScreenshot(float elapsed)
@@ -1207,25 +1863,26 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             ".png",
             StringComparison.OrdinalIgnoreCase
         ) ? configuredPath[..^4] : configuredPath;
+        string phaseName = closing ? "closing" : "opening";
         if (!automatedPocketScreenshotHandled && elapsed >= 0.72f)
         {
             automatedPocketScreenshotHandled = true;
             automatedPocketScreenshotPassed = TryCaptureAutomatedScreenshot(
-                $"{prefix}-opening-pocket.png"
+                $"{prefix}-{phaseName}-pocket.png"
             );
         }
         if (!automatedHandoffScreenshotHandled && elapsed >= 1.48f)
         {
             automatedHandoffScreenshotHandled = true;
             automatedHandoffScreenshotPassed = TryCaptureAutomatedScreenshot(
-                $"{prefix}-opening-handoff.png"
+                $"{prefix}-{phaseName}-handoff.png"
             );
         }
         if (!automatedScreenshotHandled && elapsed >= 2.12f)
         {
             automatedScreenshotHandled = true;
             automatedScreenshotPassed = TryCaptureAutomatedScreenshot(
-                $"{prefix}-opening.png"
+                $"{prefix}-{phaseName}.png"
             );
         }
     }
@@ -1259,22 +1916,6 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         }
     }
 
-    private static FieldInfo? FindField(Type type, string name)
-    {
-        for (Type? current = type; current != null; current = current.BaseType)
-        {
-            FieldInfo? field = current.GetField(
-                name,
-                BindingFlags.Instance
-                    | BindingFlags.Public
-                    | BindingFlags.NonPublic
-                    | BindingFlags.DeclaredOnly
-            );
-            if (field != null) return field;
-        }
-        return null;
-    }
-
     private static float SmoothStep(float value)
     {
         float clamped = Math.Clamp(value, 0f, 1f);
@@ -1296,10 +1937,15 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     private static float Lerp(float from, float to, float amount) =>
         from + (to - from) * Math.Clamp(amount, 0f, 1f);
 
-    private static float LerpAngle(float from, float to, float amount)
-    {
-        float difference = GameMath.Mod(to - from + MathF.PI, MathF.PI * 2f)
-            - MathF.PI;
-        return from + difference * Math.Clamp(amount, 0f, 1f);
-    }
+    private readonly record struct RemoteScrollState(
+        AtlasScrollPhase Phase,
+        long StartedTimestamp
+    );
+
+    private readonly record struct RemoteScrollPose(
+        Vec3f LeftHand,
+        Vec3f RightHand,
+        Vec3f RightAxis,
+        Vec3f UpAxis
+    );
 }

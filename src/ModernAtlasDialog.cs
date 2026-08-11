@@ -30,6 +30,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private readonly ModernAtlasServerPolicy serverPolicy;
     private readonly ModernAtlasServerPolicy visibleEntityPolicy = new();
     private readonly Action saveConfig;
+    private readonly Func<bool> requestClose;
     private readonly Func<IShaderProgram?> stableLiquidShaderProvider;
     private readonly Func<IShaderProgram?> atlasCloudShaderProvider;
     private readonly Func<IShaderProgram?> atlasOpacityShaderProvider;
@@ -208,6 +209,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         ModernAtlasConfig config,
         ModernAtlasServerPolicy serverPolicy,
         Action saveConfig,
+        Func<bool> requestClose,
         Func<IShaderProgram?> stableLiquidShaderProvider,
         Func<IShaderProgram?> atlasCloudShaderProvider,
         Func<IShaderProgram?> atlasOpacityShaderProvider
@@ -216,6 +218,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         this.config = config;
         this.serverPolicy = serverPolicy;
         this.saveConfig = saveConfig;
+        this.requestClose = requestClose;
         this.stableLiquidShaderProvider = stableLiquidShaderProvider;
         this.atlasCloudShaderProvider = atlasCloudShaderProvider;
         this.atlasOpacityShaderProvider = atlasOpacityShaderProvider;
@@ -677,7 +680,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
         if (args.KeyCode == (int)GlKeys.G)
         {
-            TryClose();
+            requestClose();
             args.Handled = true;
             return;
         }
@@ -2450,7 +2453,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         return true;
     }
 
-    private bool CloseAtlas() => TryClose();
+    private bool CloseAtlas() => requestClose();
 
     private bool HideInterface()
     {
@@ -2480,7 +2483,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             // that same Escape press.
             return true;
         }
-        return TryClose();
+        return requestClose();
     }
 
     private void OnMapLayerChanged(string value, bool selected)

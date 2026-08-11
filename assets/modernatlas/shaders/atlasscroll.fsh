@@ -3,6 +3,8 @@
 uniform int materialKind;
 uniform float alpha;
 uniform float lightSweep;
+uniform sampler2D entityTex;
+uniform vec4 entityColor;
 
 in vec2 uv;
 in vec3 viewNormal;
@@ -59,10 +61,23 @@ void main(void)
         float grain = sin((uv.y * 22.0 + uv.x * 2.5) * 6.28318) * 0.5 + 0.5;
         baseColor = mix(vec3(0.12, 0.055, 0.018), vec3(0.34, 0.18, 0.055), grain);
     }
-    else
+    else if (materialKind == 2)
     {
         float patina = hash21(floor(uv * 40.0));
         baseColor = mix(vec3(0.46, 0.27, 0.075), vec3(0.88, 0.68, 0.26), patina);
+    }
+    else if (materialKind == 4)
+    {
+        baseColor = vec3(0.64, 0.42, 0.28);
+    }
+    else if (materialKind == 5)
+    {
+        float weave = sin((uv.x + uv.y) * 110.0) * 0.025;
+        baseColor = vec3(0.16, 0.20, 0.18) + weave;
+    }
+    else
+    {
+        baseColor = texture(entityTex, uv).rgb * entityColor.rgb;
     }
 
     vec3 normal = normalize(viewNormal);

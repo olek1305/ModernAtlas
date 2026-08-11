@@ -25,6 +25,7 @@ public sealed class ModernAtlasSystem : ModSystem
     private ModernAtlasServerConfig? serverConfig;
     private readonly ModernAtlasServerPolicy serverPolicy = new();
     private IServerNetworkChannel? serverPolicyChannel;
+    private IClientNetworkChannel? clientPolicyChannel;
     private IShaderProgram? stableLiquidShader;
     private IShaderProgram? atlasCloudShader;
     private IShaderProgram? atlasOpacityShader;
@@ -46,7 +47,11 @@ public sealed class ModernAtlasSystem : ModSystem
 
         serverPolicyChannel = api.Network
             .RegisterChannel(PolicyChannelName)
-            .RegisterMessageType<ModernAtlasServerPolicy>();
+            .RegisterMessageType<ModernAtlasServerPolicy>()
+            .RegisterMessageType<AtlasScrollAnimationMessage>()
+            .SetMessageHandler<AtlasScrollAnimationMessage>(
+                OnServerScrollAnimation
+            );
         api.Event.PlayerNowPlaying += OnPlayerNowPlaying;
 
         ModernAtlasServerPolicy policy = serverConfig.ToPolicy();
@@ -67,10 +72,14 @@ public sealed class ModernAtlasSystem : ModSystem
         SaveConfig();
         serverPolicy.ResetToSafeDefaults();
 
-        api.Network
+        clientPolicyChannel = api.Network
             .RegisterChannel(PolicyChannelName)
             .RegisterMessageType<ModernAtlasServerPolicy>()
-            .SetMessageHandler<ModernAtlasServerPolicy>(OnServerPolicyReceived);
+            .RegisterMessageType<AtlasScrollAnimationMessage>()
+            .SetMessageHandler<ModernAtlasServerPolicy>(OnServerPolicyReceived)
+            .SetMessageHandler<AtlasScrollAnimationMessage>(
+                OnRemoteScrollAnimation
+            );
         api.Event.LeaveWorld += OnLeaveWorld;
         api.Event.LevelFinalize += OnLevelFinalize;
 
@@ -96,6 +105,7 @@ public sealed class ModernAtlasSystem : ModSystem
             config,
             serverPolicy,
             SaveConfig,
+            RequestCloseAtlas,
             GetStableLiquidShader,
             GetAtlasCloudShader,
             GetAtlasOpacityShader
@@ -103,7 +113,8 @@ public sealed class ModernAtlasSystem : ModSystem
         openingTransition = new AtlasOpeningTransitionDialog(
             api,
             dialog.PrepareOpeningTransitionFrame,
-            GetAtlasScrollShader
+            GetAtlasScrollShader,
+            PublishScrollAnimationPhase
         );
         api.Event.RegisterRenderer(
             openingTransition,
@@ -134,7 +145,7 @@ public sealed class ModernAtlasSystem : ModSystem
 
         if (openingTransition?.IsOpened() == true)
         {
-            openingTransition.SkipToAtlas();
+            if (!openingTransition.IsClosing) openingTransition.SkipToAtlas();
             return true;
         }
 
@@ -148,11 +159,35 @@ public sealed class ModernAtlasSystem : ModSystem
 
         if (dialog?.IsOpened() == true)
         {
-            dialog.TryClose();
+            RequestCloseAtlas();
             return true;
         }
 
         StartOpeningTransition();
+        return true;
+    }
+
+    private bool RequestCloseAtlas()
+    {
+        return RequestCloseAtlas(null);
+    }
+
+    private bool RequestCloseAtlas(Action<bool>? onCompleted)
+    {
+        if (dialog?.IsOpened() != true) return false;
+
+        if (!dialog.TryClose()) return false;
+        if (openingTransition == null
+            || !openingTransition.BeginClosing(
+                false,
+                passed => onCompleted?.Invoke(passed)
+            ))
+        {
+            clientApi?.Logger.Warning(
+                "[ModernAtlas] The scroll stowing transition was unavailable."
+            );
+            onCompleted?.Invoke(false);
+        }
         return true;
     }
 
@@ -225,6 +260,7 @@ public sealed class ModernAtlasSystem : ModSystem
         config = null;
         serverConfig = null;
         serverPolicyChannel = null;
+        clientPolicyChannel = null;
         activeWorldIdentifier = null;
         base.Dispose();
     }
@@ -251,6 +287,89 @@ public sealed class ModernAtlasSystem : ModSystem
         );
     }
 
+    private void PublishScrollAnimationPhase(AtlasScrollPhase phase)
+    {
+        if (clientPolicyChannel?.Connected != true || clientApi?.IsSinglePlayer == true)
+        {
+            return;
+        }
+
+        clientPolicyChannel.SendPacket(new AtlasScrollAnimationMessage
+        {
+            Phase = phase
+        });
+    }
+
+    private void OnServerScrollAnimation(
+        IServerPlayer player,
+        AtlasScrollAnimationMessage message
+    )
+    {
+        if (!Enum.IsDefined(message.Phase)) return;
+
+        message.PlayerUid = player.PlayerUID;
+        serverPolicyChannel?.BroadcastPacket(message, player);
+    }
+
+    private void OnRemoteScrollAnimation(AtlasScrollAnimationMessage message)
+    {
+        if (clientApi == null || string.IsNullOrWhiteSpace(message.PlayerUid)) return;
+
+        openingTransition?.SetRemoteAnimation(message.PlayerUid, message.Phase);
+
+        foreach (var entry in clientApi.World.LoadedEntities)
+        {
+            if (entry.Value is not EntityPlayer player
+                || player.PlayerUID != message.PlayerUid)
+            {
+                continue;
+            }
+
+            StopRemoteScrollAnimations(player);
+            string? sourceCode = message.Phase switch
+            {
+                AtlasScrollPhase.Retrieve or AtlasScrollPhase.Stow =>
+                    "holdinglanternlefthand",
+                AtlasScrollPhase.Handoff or AtlasScrollPhase.ReleaseRight =>
+                    "twohandplaceblock",
+                AtlasScrollPhase.HoldOpen or AtlasScrollPhase.RollClosed =>
+                    "holdbothhandslarge",
+                _ => null
+            };
+            if (sourceCode != null
+                && player.Properties.Client.AnimationsByMetaCode.TryGetValue(
+                    sourceCode,
+                    out AnimationMetaData? source
+                ))
+            {
+                AnimationMetaData animation = source.Clone();
+                animation.Code = $"modernatlas-remote-{message.Phase}";
+                animation.ClientSide = true;
+                animation.EaseInSpeed = Math.Max(animation.EaseInSpeed, 8f);
+                float easeOutSpeed = message.Phase == AtlasScrollPhase.Stow
+                    ? 1000f
+                    : 8f;
+                animation.EaseOutSpeed = Math.Max(
+                    animation.EaseOutSpeed,
+                    easeOutSpeed
+                );
+                animation.Init();
+                player.TpAnimManager.StartAnimation(animation);
+            }
+            break;
+        }
+    }
+
+    private static void StopRemoteScrollAnimations(
+        EntityPlayer player
+    )
+    {
+        foreach (AtlasScrollPhase phase in Enum.GetValues<AtlasScrollPhase>())
+        {
+            player.TpAnimManager.StopAnimation($"modernatlas-remote-{phase}");
+        }
+    }
+
     private void OnLeaveWorld()
     {
         bool completeAutomatedWorldExit = automatedWorldExitRequested;
@@ -263,6 +382,7 @@ public sealed class ModernAtlasSystem : ModSystem
         cheatModeDialog?.Dispose();
         cheatModeDialog = null;
         openingTransition?.CancelWithoutOpening();
+        openingTransition?.ClearRemoteAnimations();
         activeWorldIdentifier = null;
         dialog?.OnWorldLeave();
         serverPolicy.ResetToSafeDefaults();
@@ -337,11 +457,11 @@ public sealed class ModernAtlasSystem : ModSystem
     private void ScheduleAutomatedSmokeTest(string worldIdentifier, int sessionGeneration)
     {
         clientApi?.Logger.Notification(
-            "[ModernAtlas] Automated smoke test scheduled for the loaded singleplayer world."
+            "[ModernAtlas] Automated smoke test scheduled 7.5 seconds after world load so initial chunk meshes can finish streaming."
         );
         clientApi?.Event.RegisterCallback(
             _ => OpenAtlasForAutomatedSmokeTest(worldIdentifier, sessionGeneration),
-            2500
+            7500
         );
     }
 
@@ -444,7 +564,30 @@ public sealed class ModernAtlasSystem : ModSystem
 
         if (dialog.IsOpened())
         {
-            dialog.TryClose();
+            if (openingTransition != null
+                && dialog.TryClose()
+                && openingTransition.BeginClosing(
+                    true,
+                    closePassed =>
+                    {
+                        if (!closePassed)
+                        {
+                            clientApi?.Logger.Error(
+                                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: the reverse scroll transition did not complete."
+                            );
+                        }
+                        clientApi?.Event.RegisterCallback(
+                            _ => ExitWorldForAutomatedSmokeTest(
+                                worldIdentifier,
+                                sessionGeneration
+                            ),
+                            1000
+                        );
+                    }
+                ))
+            {
+                return;
+            }
         }
 
         clientApi.Event.RegisterCallback(

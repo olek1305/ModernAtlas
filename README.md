@@ -4,13 +4,18 @@ ModernAtlas is a 3D map enhancement for Vintage Story 1.22.6. Its public name
 is deliberately independent from Google trademarks. The renderer remains
 client-side; an optional server component supplies fog and living-entity policy.
 
-## Current 0.6.1 prototype
+## Current 0.6.2 prototype
 
 - keeps the vanilla map, discovered areas and waypoints intact;
 - opens a separate full-screen 3D atlas with `G` (rebindable in Controls) after
-  a short first-person transition in which the view bows, a pocket scroll rises
-  and unfolds, and its light zooms into the atlas; `G` skips the transition and
-  `Escape` cancels it;
+  a short first-person transition in which the stationary view shows only the
+  thick rectangular Seraph forearms using the player's composed skin texture
+  and tint retrieving a pocket scroll from below-left and unrolling it with
+  both hands before its light enters the atlas; closing rolls and stows the
+  scroll in reverse and ends as soon as the scroll leaves view, without a
+  returning hand sweep, while matching multiplayer gestures keep the scroll on
+  the animated hand attachment points; `G` skips and `Escape` cancels only the
+  opening;
 - pauses the game while the atlas is open in singleplayer and never attempts
   to pause a multiplayer server;
 - provides an `Atlas animations` switch: enabled keeps atlas liquids and

@@ -12,8 +12,14 @@ geometry is concealed by the player-anchored fog boundary.
 ## Render flow
 
 1. Play the short input-capturing first-person opening scene while preparing
-   atlas-only transient resources within a frame budget; cancellation restores
-   the captured camera and animation state without opening the atlas.
+   atlas-only transient resources within a frame budget. The camera stays fixed
+   while thick rectangular forearms tesselated from the base Seraph arm shape
+   and shaded with the player's composed entity skin texture and renderer tint
+   retrieve and unroll the view-space scroll. Matching third-person arm clips
+   use the same phase timings, and the world-space scroll is anchored
+   to the animated `LeftHand` and `RightHand` attachment points instead of the
+   player origin. Cancellation restores the captured camera, held-item and
+   animation state.
 2. Open a dedicated full-screen atlas framebuffer and orthographic camera.
 3. Reuse completed opaque chunk meshes with the engine's registered block
    texture atlases, color maps and current animation uniforms.
@@ -30,6 +36,10 @@ geometry is concealed by the player-anchored fog boundary.
 8. Draw optional live cloud cover, fog and lightweight GUI markers afterward.
 9. Restore every modified engine uniform and framebuffer state before normal
    world rendering resumes.
+10. After any normal atlas close path, show the live world again while both
+    hands roll the scroll, the right hand releases it and the left hand carries
+    it below-left. End the transition as it leaves the camera view so neither
+    the scroll nor a custom first-person arm sweeps back into view afterward.
 
 ## Visibility and disclosure
 
