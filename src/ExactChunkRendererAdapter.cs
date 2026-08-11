@@ -113,6 +113,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private bool loggedUndergroundSafetyFailure;
     private bool loggedOreTextureBindingFailure;
     private bool loggedPreparationClearFailure;
+    private bool loggedNormalWorldShaderRestore;
     private bool disposed;
 
     public int LastRenderedEntityCount { get; private set; }
@@ -874,6 +875,66 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         visibilityHarmony.UnpatchAll(VisibilityPatchId);
         oreTextureReplacement.Dispose();
         cloudRenderer?.Dispose();
+    }
+
+    public void RestoreNormalWorldShaders()
+    {
+        if (disposed || atlasFilterShaders.Count == 0) return;
+
+        DefaultShaderUniforms uniforms = capi.Render.ShaderUniforms;
+        if (uniforms.ColorMapRects4 == null
+            || uniforms.ColorMapRects4.Length < 40 * 4)
+        {
+            return;
+        }
+
+        foreach (EnumShaderProgram program in AtlasFilterPrograms)
+        {
+            if (!atlasFilterShaders.TryGetValue(
+                program,
+                out AtlasFilterShaderState? state
+            ))
+            {
+                continue;
+            }
+
+            IShaderProgram shader = state.Shader;
+            if (shader.Disposed || shader.FragmentShader == null)
+            {
+                atlasFilterShaders.Remove(program);
+                continue;
+            }
+
+            shader.FragmentShader.Code = state.OriginalFragmentCode;
+            atlasFilterShaders.Remove(program);
+        }
+
+        try
+        {
+            capi.Render.CurrentActiveShader?.Stop();
+            if (!capi.Shader.ReloadShaders())
+            {
+                capi.Logger.Warning(
+                    "[ModernAtlas] The engine reported a failure while reloading normal-world shaders."
+                );
+                return;
+            }
+
+            if (!loggedNormalWorldShaderRestore)
+            {
+                loggedNormalWorldShaderRestore = true;
+                capi.Logger.Notification(
+                    "[ModernAtlas] Restored the complete normal-world shader state after closing the atlas."
+                );
+            }
+        }
+        catch (Exception exception)
+        {
+            capi.Logger.Warning(
+                "[ModernAtlas] Could not reload the normal-world shaders: {0}",
+                exception.Message
+            );
+        }
     }
 
     public void RenderSurfacePreparationFrame(
@@ -1639,6 +1700,27 @@ void main()
             unloadFramebuffer.Invoke(platform, new object[] { EnumFrameBuffer.Transparent });
             framebufferLoaded = false;
 
+            // Compose at the Primary framebuffer's own resolution before the
+            // final blit. OIT uses texelFetch(gl_FragCoord), so composing it
+            // directly onto a differently sized window target under SSAA
+            // makes transparent blocks slide relative to terrain while the
+            // camera pans.
+            mergeTransparentRenderPass.Invoke(platform, Array.Empty<object>());
+            BeginOreTextureBinding(concealSurvivalOres);
+            try
+            {
+                renderAfterOit.Invoke(chunkRenderer, new object[] { deltaTime });
+            }
+            finally
+            {
+                EndOreTextureBinding();
+            }
+
+            // Resolve every real transparent block before blending stable
+            // liquids into Primary. This preserves the world's authored
+            // texture colors below water, including the yellow and orange
+            // bacterial mats in hot springs, instead of compositing those
+            // surfaces at full strength on top of the water afterward.
             RenderStableLiquidBlocks(
                 deltaTime,
                 projection,
@@ -1653,21 +1735,6 @@ void main()
                 fogEnabled,
                 disclosureRadius
             );
-
-            // Compose at the Primary framebuffer's own resolution before the
-            // final blit. OIT uses texelFetch(gl_FragCoord), so composing it
-            // directly onto a differently sized window target under SSAA
-            // makes fluids slide relative to blocks while the camera pans.
-            mergeTransparentRenderPass.Invoke(platform, Array.Empty<object>());
-            BeginOreTextureBinding(concealSurvivalOres);
-            try
-            {
-                renderAfterOit.Invoke(chunkRenderer, new object[] { deltaTime });
-            }
-            finally
-            {
-                EndOreTextureBinding();
-            }
             if (cloudsEnabled && !blitToDefault)
             {
                 cloudRenderer?.Render(

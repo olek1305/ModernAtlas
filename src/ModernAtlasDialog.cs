@@ -857,6 +857,18 @@ public sealed class ModernAtlasDialog : GuiDialog
         base.OnGuiClosed();
     }
 
+    public void ScheduleNormalWorldShaderRestore()
+    {
+        // Reload the unmodified engine shaders between frames. Compiling only
+        // the three atlas-modified chunk programs leaves engine-owned uniform
+        // state uninitialized and can produce a colored chunk ring in the
+        // normal world view.
+        capi.Event.RegisterCallback(
+            _ => exactChunkRenderer?.RestoreNormalWorldShaders(),
+            1
+        );
+    }
+
     public void OnServerPolicyChanged()
     {
         RefreshVisibleEntityPolicy();
