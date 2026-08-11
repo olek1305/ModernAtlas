@@ -25,6 +25,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     private const int FogTextureDownsample = 4;
     private const string SmokeScreenshotEnvironmentVariable =
         "MODERNATLAS_SMOKE_SCREENSHOT";
+    private const string SmokeFixedSunHourEnvironmentVariable =
+        "MODERNATLAS_SMOKE_FIXED_SUN_HOUR";
 
     private ExactChunkRendererAdapter? exactChunkRenderer;
     private readonly float[] projection = Mat4f.Create();
@@ -132,6 +134,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool automatedOriginalCameraAngleLocked;
     private bool automatedOriginalRenderOnScroll;
     private bool automatedOriginalFogEnabled;
+    private bool automatedOriginalLiveLightingEnabled;
+    private int automatedOriginalFixedSunHour;
     private bool pendingInterfaceRecompose;
     private AtlasMapLayer activeMapLayer = AtlasMapLayer.TexturedTerrain;
     private bool synchronizingMapLayerDropdown;
@@ -498,7 +502,6 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
         if (config.RenderOnScroll)
         {
-            RestoreNormalWorldSnapshotOutsidePaper();
             scrollViewportRenderer.RenderRollersOverlay(AtlasViewport);
         }
         ForceOpaqueWindowAlpha();
@@ -1000,62 +1003,6 @@ public sealed class ModernAtlasDialog : GuiDialog
         normalWorldSnapshotCaptured = false;
     }
 
-    private void RestoreNormalWorldSnapshotOutsidePaper()
-    {
-        LoadedTexture? snapshot = normalWorldSnapshotTexture;
-        if (!normalWorldSnapshotCaptured || snapshot == null || snapshot.TextureId <= 0)
-        {
-            return;
-        }
-
-        IRenderAPI render = capi.Render;
-        int frameWidth = Math.Max(1, render.FrameWidth);
-        int frameHeight = Math.Max(1, render.FrameHeight);
-        AtlasViewportBounds paper = scrollViewportRenderer.GetPaperBounds(AtlasViewport);
-        int left = Math.Clamp(paper.X, 0, frameWidth);
-        int top = Math.Clamp(paper.Y, 0, frameHeight);
-        int right = Math.Clamp(paper.Right, 0, frameWidth);
-        int bottom = Math.Clamp(paper.Bottom, 0, frameHeight);
-
-        render.CurrentActiveShader?.Stop();
-        render.CurrentFrameBuffer = null;
-        render.GlViewport(0, 0, frameWidth, frameHeight);
-        render.GetEngineShader(EnumShaderProgram.Gui).Use();
-        render.GLDisableDepthTest();
-        render.GLDepthMask(false);
-        render.GlToggleBlend(false, EnumBlendMode.Standard);
-        try
-        {
-            RestoreSnapshotRegion(snapshot.TextureId, 0, 0, frameWidth, top);
-            RestoreSnapshotRegion(snapshot.TextureId, 0, bottom, frameWidth, frameHeight - bottom);
-            RestoreSnapshotRegion(snapshot.TextureId, 0, top, left, bottom - top);
-            RestoreSnapshotRegion(snapshot.TextureId, right, top, frameWidth - right, bottom - top);
-        }
-        finally
-        {
-            render.GlScissorFlag(false);
-            render.GlToggleBlend(true, EnumBlendMode.Standard);
-            render.GLDepthMask(true);
-        }
-    }
-
-    private void RestoreSnapshotRegion(int textureId, int x, int y, int width, int height)
-    {
-        if (width <= 0 || height <= 0) return;
-        IRenderAPI render = capi.Render;
-        render.GlScissor(x, render.FrameHeight - y - height, width, height);
-        render.GlScissorFlag(true);
-        render.Render2DTexture(
-            textureId,
-            0,
-            0,
-            render.FrameWidth,
-            render.FrameHeight,
-            0,
-            ColorUtil.WhiteArgbVec
-        );
-    }
-
     public void ScheduleNormalWorldShaderRestore()
     {
         // Switch off the atlas-only branches between frames. The compiled
@@ -1138,6 +1085,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedOriginalCameraAngleLocked = config.CameraAngleLocked;
         automatedOriginalRenderOnScroll = config.RenderOnScroll;
         automatedOriginalFogEnabled = config.FogEnabled;
+        automatedOriginalLiveLightingEnabled = config.LiveLightingEnabled;
+        automatedOriginalFixedSunHour = config.FixedSunHour;
         automatedSmokeTestPreferencesCaptured = true;
         config.MapLayersEnabled = true;
         config.CaveModeEnabled = false;
@@ -1145,6 +1094,18 @@ public sealed class ModernAtlasDialog : GuiDialog
         config.CameraAngleLocked = false;
         config.RenderOnScroll = true;
         config.FogEnabled = true;
+        string? forcedSunHour = Environment.GetEnvironmentVariable(
+            SmokeFixedSunHourEnvironmentVariable
+        );
+        if (int.TryParse(forcedSunHour, out int parsedSunHour))
+        {
+            config.LiveLightingEnabled = false;
+            config.FixedSunHour = Math.Clamp(parsedSunHour, 0, 23);
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated smoke test forced the atlas sun to {0}:00 for lighting inspection.",
+                config.FixedSunHour
+            );
+        }
         automatedSmokeTestActive = true;
         automatedSmokeTestElapsedSeconds = 0;
         automatedSmokeTestCompletion = completion;
@@ -1558,8 +1519,13 @@ public sealed class ModernAtlasDialog : GuiDialog
             }
 
             automatedSmokeTestMaximumZoomPending = false;
+            // Streaming continues while the atlas is open, so a newly
+            // completed edge mesh can make a frame more expensive and leave
+            // the smoothed value a fraction behind its already clamped
+            // target. Capture the exact target used by real wheel input.
+            zoom = targetZoom;
             automatedSmokeTestMaximumZoomFrameRendered = config.RenderOnScroll
-                && Math.Abs(zoom - MaximumZoomIn) < 0.001f;
+                && Math.Abs(targetZoom - MaximumZoomIn) < 0.001f;
             if (!string.IsNullOrWhiteSpace(configuredPath))
             {
                 string maximumZoomPrefix = configuredPath.EndsWith(
@@ -1711,6 +1677,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         config.SearchModeEnabled = automatedOriginalSearchModeEnabled;
         config.CameraAngleLocked = automatedOriginalCameraAngleLocked;
         config.FogEnabled = automatedOriginalFogEnabled;
+        config.LiveLightingEnabled = automatedOriginalLiveLightingEnabled;
+        config.FixedSunHour = automatedOriginalFixedSunHour;
         if (config.RenderOnScroll != automatedOriginalRenderOnScroll)
         {
             config.RenderOnScroll = automatedOriginalRenderOnScroll;
@@ -2537,7 +2505,7 @@ public sealed class ModernAtlasDialog : GuiDialog
                 AtlasUiStyle.DrawSeparator
             )
             .AddStaticText(
-                "Live sun and weather",
+                "Use live world sun",
                 AtlasUiStyle.DetailFont(12),
                 ElementBounds.Fixed(28, 504, 200, 24)
             )
@@ -2547,13 +2515,13 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "live-lighting"
             )
             .AddStaticText(
-                "Fixed sun hour",
+                "Atlas sun hour (fixed)",
                 AtlasUiStyle.DetailFont(12),
-                ElementBounds.Fixed(28, 541, 130, 24)
+                ElementBounds.Fixed(28, 541, 180, 24)
             )
             .AddAtlasSlider(
                 OnFixedSunHourChanged,
-                ElementBounds.Fixed(166, 532, 246, 42),
+                ElementBounds.Fixed(212, 532, 200, 42),
                 "fixed-sun-hour"
             )
             .AddStaticText(

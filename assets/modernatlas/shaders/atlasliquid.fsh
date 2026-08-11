@@ -19,6 +19,7 @@ uniform vec2 atlasLayerOriginXZ;
 uniform float atlasLayerSampleSize;
 uniform float atlasLayerOpacity;
 uniform vec3 atlasSunDirection;
+uniform vec3 atlasSunColor;
 uniform float atlasExposure;
 
 in vec2 uv;
@@ -119,7 +120,8 @@ void main(void)
         float topLight = mix(0.55, 1.0, clamp(atlasSunDirection.y, 0.0, 1.0));
         float exposure = mix(0.14, 1.0, clamp(atlasExposure, 0.0, 1.0))
             * mix(1.0, 1.5, clamp((atlasExposure - 1.0) * 2.0, 0.0, 1.0));
-        color.rgb *= topLight * exposure;
+        vec3 celestialTint = mix(vec3(1.0), atlasSunColor, 0.28);
+        color.rgb *= celestialTint * topLight * exposure;
     }
     if (atlasLayerEnabled > 0)
     {

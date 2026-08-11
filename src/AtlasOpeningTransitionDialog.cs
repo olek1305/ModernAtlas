@@ -101,6 +101,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     private bool heldItemsRestored;
     private bool cameraRestored;
     private bool disposed;
+    private float[]? localPerspectiveProjection;
 
     public override string ToggleKeyCombinationCode => "";
     public override EnumDialogType DialogType => EnumDialogType.HUD;
@@ -184,6 +185,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         heldItemsRestored = false;
         cameraRestored = false;
         normalWorldBackgroundCaptured = false;
+        localPerspectiveProjection = null;
         return TryOpen();
     }
 
@@ -224,6 +226,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         heldItemsRestored = false;
         cameraRestored = false;
         normalWorldBackgroundCaptured = true;
+        localPerspectiveProjection = null;
         soundController.StopLightCue();
         return TryOpen();
     }
@@ -302,6 +305,18 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         UpdatePlayerPresentation(elapsed);
         if (closing) AdvanceClosingAnimationAndSound(elapsed);
         else AdvanceAnimationAndSound(elapsed);
+        if (localPerspectiveProjection != null
+            && (closing || normalWorldBackgroundCaptured))
+        {
+            float scrollTime = closing
+                ? Math.Max(0, LightPhaseStartSeconds - elapsed)
+                : elapsed;
+            physicalScrollRendered |= RenderPhysicalScroll(
+                scrollTime,
+                null,
+                localPerspectiveProjection
+            );
+        }
         if (!closing) RenderFinalAtlasEntry(elapsed);
         CaptureAutomatedScreenshot(elapsed);
 
@@ -354,15 +369,12 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     {
         if (stage != EnumRenderStage.Opaque) return;
 
+        localPerspectiveProjection = Mat4f.CloneIt(capi.Render.CurrentProjectionMatrix);
         if (!finishing && IsOpened() && (closing || normalWorldBackgroundCaptured))
         {
             float elapsed = (float)Stopwatch.GetElapsedTime(startedTimestamp).TotalSeconds;
             UpdatePlayerPresentation(elapsed);
             thirdPersonHandAnchorsReady |= ValidateCurrentThirdPersonHandAnchors();
-            float scrollTime = closing
-                ? Math.Max(0, LightPhaseStartSeconds - elapsed)
-                : elapsed;
-            physicalScrollRendered |= RenderPhysicalScroll(scrollTime);
         }
         RenderRemoteScrolls();
     }
@@ -559,7 +571,8 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
 
     private bool RenderPhysicalScroll(
         float elapsed,
-        RemoteScrollPose? remotePose = null
+        RemoteScrollPose? remotePose = null,
+        float[]? projectionOverride = null
     )
     {
         if (!EnsureRenderResources()) return false;
@@ -617,7 +630,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
                 / (TotalDurationSeconds - LightPhaseStartSeconds)
         );
 
-        float[] projection = render.CurrentProjectionMatrix;
+        float[] projection = projectionOverride ?? render.CurrentProjectionMatrix;
 
         float[] parent;
         if (remotePose is RemoteScrollPose pose)
@@ -645,8 +658,19 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         render.CurrentActiveShader?.Stop();
         shader.Use();
         shader.UniformMatrix("projectionMatrix", projection);
-        render.GLDepthMask(visible >= 0.96f);
-        render.GLEnableDepthTest();
+        bool remoteWorldScroll = remotePose != null;
+        render.GLDepthMask(remoteWorldScroll && visible >= 0.96f);
+        if (remoteWorldScroll)
+        {
+            render.GLEnableDepthTest();
+        }
+        else
+        {
+            // The local pocket scroll is a first-person overlay. Testing it
+            // against the previous world depth lets bowls, jugs, walls and
+            // their shadows punch silhouettes through the parchment.
+            render.GLDisableDepthTest();
+        }
         render.GlDisableCullFace();
         render.GlToggleBlend(true, EnumBlendMode.Standard);
         try
@@ -668,7 +692,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
                     scrollSheetMesh,
                     sheetModel,
                     0,
-                    sheetAlpha,
+                    remoteWorldScroll ? sheetAlpha : 1f,
                     sweep
                 );
             }
@@ -692,7 +716,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
                     scrollCylinderMesh,
                     paperRollModel,
                     3,
-                    visible,
+                    remoteWorldScroll ? visible : 1f,
                     sweep
                 );
             }
@@ -702,7 +726,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
                 parent,
                 rollerOffset,
                 scrollHeight,
-                visible,
+                remoteWorldScroll ? visible : 1f,
                 sweep
             );
             if (unroll > 0.025f)
@@ -712,7 +736,9 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
                     parent,
                     -rollerOffset,
                     scrollHeight,
-                    visible * SmoothStep(unroll / 0.20f),
+                    remoteWorldScroll
+                        ? visible * SmoothStep(unroll / 0.20f)
+                        : 1f,
                     sweep
                 );
             }
@@ -738,6 +764,12 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             render.GLEnableDepthTest();
             render.GLDepthMask(true);
             render.GlToggleBlend(false, EnumBlendMode.Standard);
+            if (!remoteWorldScroll && projectionOverride != null)
+            {
+                // Late GUI renderers following this dialog (notably the
+                // crosshair) expect the engine GUI shader to remain active.
+                render.GetEngineShader(EnumShaderProgram.Gui).Use();
+            }
         }
 
         rolledScrollRendered |= elapsed < UnrollStartSeconds + 0.18f;

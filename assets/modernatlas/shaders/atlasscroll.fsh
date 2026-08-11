@@ -81,6 +81,10 @@ void main(void)
     {
         baseColor = texture(entityTex, uv).rgb * entityColor.rgb;
     }
+    else if (materialKind == 8)
+    {
+        baseColor = vec3(0.012, 0.020, 0.027);
+    }
     else
     {
         vec4 atlasColor = texture(atlasTex, uv);

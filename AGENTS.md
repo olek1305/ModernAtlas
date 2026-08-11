@@ -40,6 +40,16 @@ the product scope when the atlas itself is correct.
   biome tint, directional daylight and connected or multipart block geometry.
   Do not sample the normal camera's shadow map from the atlas camera; it causes
   severe frame loss and square shadow boundaries.
+- Give the atlas its own safe directional celestial lighting. Live mode must
+  read the public client calendar's normalized sun or moon direction, light
+  color and daylight strength. Fixed-hour mode must evaluate the calendar's
+  sun position for the current date and player location, then apply bounded
+  dawn, daylight, sunset and moonlit-night colors. Directional face shading is
+  allowed; never re-enable the perspective camera's cast-shadow texture to
+  make atlas shadows. Never pass a below-horizon sun or moon vector directly
+  into native chunk face lighting: preserve its azimuth but clamp the atlas
+  light to a shallow positive elevation so completed mesh sections cannot turn
+  into large dark patches resembling chunk shadows.
 - Keep atlas exposure neutral and stable. Player-local underwater, lava, fog
   sphere, night vision, perception, held-light and world-warp effects must not
   change atlas brightness, tint or haze. Restore every engine uniform after the
@@ -108,6 +118,12 @@ the product scope when the atlas itself is correct.
 - Smoothly interpolate pan, rotation, tilt and wheel zoom using real render
   time so controls continue to animate while singleplayer is paused. Keep fog
   texture uploads throttled while the camera is moving.
+- Opening `G` must not pause singleplayer. World ticks, client chunk streaming
+  and completion of GPU chunk meshes continue while the atlas is open, and
+  newly completed exact meshes must appear without closing and reopening it.
+  Do not reintroduce an atlas-owned `PauseGame(true)` call. If another game UI
+  or external state already paused the game, real render time still drives the
+  atlas camera and optional render-only animation offsets.
 - Keep atlas GUI controls clickable and prevent atlas input from leaking into
   the hotbar, inventories or dialogs underneath it. Forward both `OnKeyDown`
   and `OnKeyPress` to the active atlas composer because editable text inserts
@@ -209,6 +225,33 @@ the product scope when the atlas itself is correct.
   only then blit the completed atlas to the window. Direct composition onto the
   window breaks `texelFetch(gl_FragCoord)` when SSAA changes framebuffer size
   and makes fluids slide relative to terrain during camera movement.
+- In scroll presentation, compose the completed opaque atlas at 100 percent
+  opacity only inside the scroll's rectangular map viewport. The parchment and
+  stationary opaque backdrop must not change with atlas zoom. The backdrop
+  conceals world shadows, held items and HUD content behind and around the
+  scroll. In the opened atlas viewport, render the physical parchment sheet
+  and rollers with alpha one and blending disabled; nominal alpha-one blending
+  is not sufficient because a leaked or externally changed blend state can
+  reveal the world through the scroll. The separate opening and closing
+  transition may still animate its own arm alpha, but its local first-person
+  parchment and rollers remain opaque. Render that local transition without
+  testing against the normal world's depth buffer, otherwise nearby bowls,
+  jugs, walls and their shadows punch silhouettes through the paper. Draw the
+  local first-person scroll at the transition dialog's late GUI order using a
+  captured perspective projection; drawing it in the Opaque world stage lets
+  entities and held objects render over it afterward. Remote third-person
+  scrolls continue in the world Opaque stage with world depth. After the local
+  late-GUI scroll stops its custom shader, reactivate the engine GUI shader;
+  later GUI renderers such as the crosshair assume it is active and otherwise
+  throw `Can't set uniform on not active shader gui`. Do not use a full-window
+  translucent layer, framebuffer alpha leakage or geometry clipping as a
+  substitute for the final viewport clip.
+- Never call a global shader reload when the atlas closes, when `G` and
+  `Escape` are alternated, or during world leave. A global reload previously
+  caused a red window border, changed normal-world rendering and produced a
+  severe closing hitch. Disable atlas-only shader paths through their managed
+  state and per-draw uniforms, restore engine values in `finally`, and leave
+  ordinary world shaders compiled and active.
 - Test with an isolated Vintage Story data directory containing vanilla plus
   ModernAtlas. Do not delete or permanently disable the user's other mods.
 - World-leave and client shutdown are required lifecycle tests. Dispose dialogs,
@@ -236,12 +279,21 @@ the product scope when the atlas itself is correct.
   though its animation and transparency matched the normal world more closely.
 - Water exposure follows the selected live or fixed sun state so water does
   not remain bright blue against dark terrain at night. Lava stays emissive.
+- Live atlas lighting uses `IClientGameCalendar` rather than inferring the sun
+  from the normal camera. Fixed-hour lighting uses `IGameCalendar.GetSunPosition`
+  for the current date and player location, preserving seasonal and latitude
+  changes while keeping atlas exposure bounded and independent of player-local
+  vision effects.
 - The atlas disables `DropShadowIntensity` only for its own draw. Reusing the
   game's perspective-camera shadow map caused square shadows and roughly one
   frame per second. The engine value is restored after atlas draw.
 - The atlas uses smooth target-camera interpolation and draws at GUI order
   `0.98` so ordinary third-party HUDs remain behind the scroll or full-screen
   map presentation.
+- Commits `37af5c1`, `3d132d4` and `7bc6876` are the scroll-viewport clipping,
+  shader-reload removal and live chunk-streaming safety checkpoints. Preserve
+  their invariants when changing GUI composition, engine uniforms, closing
+  transitions, view-distance fitting or atlas lighting.
 - Persistent ModernAtlas terrain cache code, shaders and Settings controls are
   removed. The atlas renders only current exact chunk meshes.
 - Cave openings use a thin neutral-gray atlas-only band of real geometry,
@@ -322,6 +374,9 @@ the product scope when the atlas itself is correct.
   Add `MODERNATLAS_SMOKE_SCREENSHOT=/tmp/modernatlas-smoke` to capture the
   Survival-safe surface before Cave Mode is enabled, followed by the base
   atlas, Settings, Creative/Cheat and visual-lab frames for UI inspection.
+  Add `MODERNATLAS_SMOKE_FIXED_SUN_HOUR=6`, `12`, `18` or `0` together with
+  the screenshot variable to inspect fixed dawn, noon, sunset and moonlit
+  night without persisting the temporary lighting selection.
 
   The `-o` argument performs the world join. `OnLevelFinalize` waits for that
   world to be ready, then `BeginAutomatedSmokeTest` and `TryOpen` open the same

@@ -64,6 +64,19 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
 
         try
         {
+            // Keep world shadows, held items and HUD content from showing
+            // around or through the physical scroll. This backdrop is fully
+            // opaque and stationary, so wheel zoom affects only the map.
+            render.GlToggleBlend(false, EnumBlendMode.Standard);
+            RenderComponent(
+                shader,
+                sheetMesh,
+                CreateModel(0f, 0f, -0.10f, aspect * 2f, 2f, 1f),
+                8
+            );
+            // The physical parchment is opaque too. Keep blending disabled
+            // for the sheet and rollers so driver blend state cannot reveal
+            // the frozen world through their nominally alpha-one pixels.
             RenderComponent(
                 shader,
                 sheetMesh,
@@ -99,7 +112,7 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
             }
             finally
             {
-                render.GlToggleBlend(true, EnumBlendMode.Standard);
+                render.GlToggleBlend(false, EnumBlendMode.Standard);
                 render.GlScissorFlag(false);
             }
 
@@ -118,14 +131,6 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
             render.GLEnableDepthTest();
             render.GlToggleBlend(false, EnumBlendMode.Standard);
         }
-    }
-
-    public AtlasViewportBounds GetPaperBounds(AtlasViewportBounds viewport)
-    {
-        int frameHeight = Math.Max(1, capi.Render.FrameHeight);
-        int horizontalMargin = (int)MathF.Ceiling(frameHeight * 0.0425f);
-        int verticalMargin = (int)MathF.Ceiling(frameHeight * 0.05f);
-        return viewport.Expand(horizontalMargin, verticalMargin);
     }
 
     public void RenderRollersOverlay(AtlasViewportBounds viewport)
@@ -155,7 +160,7 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
         render.GLDisableDepthTest();
         render.GLDepthMask(false);
         render.GlDisableCullFace();
-        render.GlToggleBlend(true, EnumBlendMode.Standard);
+        render.GlToggleBlend(false, EnumBlendMode.Standard);
         shader.Use();
         shader.UniformMatrix("projectionMatrix", projection);
         shader.Uniform("entityColor", new Vec4f(1f, 1f, 1f, 1f));
