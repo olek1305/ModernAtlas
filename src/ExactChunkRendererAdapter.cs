@@ -27,6 +27,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private const int MapLayerTextureUnit = 13;
     private const int OreMappingTextureUnit = 14;
     private const int OreStoneTextureUnit = 15;
+    private const int OpaqueDepthTextureUnit = 11;
     private const float VisibleSubsurfaceDepth = 3f;
     private const float CaveEntranceConcealmentDepth = 1.5f;
     private static readonly Vec3f CaveConcealmentColor = new(0.24f, 0.25f, 0.25f);
@@ -436,6 +437,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     public void ResetTerrainCoverageDiagnostics()
     {
         loggedTerrainCoverage = false;
+        loggedStableLiquidDiagnostics = false;
     }
 
     public bool Render(
@@ -2203,6 +2205,20 @@ void main()
         activeLiquidShader.Uniform(
             "waterFlowCounter",
             waterFlowCounter
+        );
+        FrameBufferRef primaryFramebuffer = render.FrameBuffers[
+            (int)EnumFrameBuffer.Primary
+        ];
+        if (primaryFramebuffer.DepthTextureId <= 0)
+        {
+            throw new InvalidOperationException(
+                "The Primary opaque depth texture is unavailable for atlas liquid clipping."
+            );
+        }
+        activeLiquidShader.BindTexture2D(
+            "opaqueDepthTex",
+            primaryFramebuffer.DepthTextureId,
+            OpaqueDepthTextureUnit
         );
 
         MeshDataPoolManager[] managers = passes[(int)EnumChunkRenderPass.Liquid];

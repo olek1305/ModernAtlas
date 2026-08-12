@@ -1,6 +1,7 @@
 #version 330 core
 
 uniform sampler2D terrainTex;
+uniform sampler2D opaqueDepthTex;
 uniform vec2 blockTextureSize;
 uniform vec2 textureAtlasSize;
 uniform float waterFlowCounter;
@@ -52,6 +53,21 @@ bool readSurfaceHeight(ivec2 samplePosition, out float surfaceHeight)
 
 void main(void)
 {
+    // Stable atlas liquids are drawn after opaque exact chunk geometry into
+    // the same Primary framebuffer. A cleared depth texel means that no
+    // opaque terrain or structure exists behind this liquid fragment. Do not
+    // let an independently completed water mesh bridge unloaded terrain or
+    // extend beyond the live exact atlas edge.
+    ivec2 depthPosition = ivec2(gl_FragCoord.xy);
+    ivec2 depthDimensions = textureSize(opaqueDepthTex, 0);
+    if (any(lessThan(depthPosition, ivec2(0)))
+        || any(greaterThanEqual(depthPosition, depthDimensions)))
+    {
+        discard;
+    }
+    float opaqueDepth = texelFetch(opaqueDepthTex, depthPosition, 0).r;
+    if (opaqueDepth >= 0.999999) discard;
+
     vec2 disclosureDelta = absoluteWorldPosition.xz - disclosureCenterXZ;
     float disclosureDistance = length(disclosureDelta);
     if (disclosureDistance >= disclosureRadius) discard;
