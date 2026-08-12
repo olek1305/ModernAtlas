@@ -84,6 +84,10 @@ client-side; an optional server component supplies fog and living-entity policy.
   registered ore blocks from already loaded chunk columns;
 - includes an atlas-only visual lab under Settings for exposure, layer opacity,
   boundary softness, cave-mask brightness and neutral fog palettes;
+- includes a dedicated Settings > Performance panel with neutral flat atlas
+  lighting, full/half/quarter texture detail and an optional transient filter
+  for registered plant and leaf materials, including correctly registered mod
+  vegetation; shared terrain textures are retained to avoid holes;
 - uses compact translucent controls with white typography, a normal Settings
   switch for the default 3D-scroll presentation and map-layer controls, a
   Creative/Cheat-only panel for cave mode,

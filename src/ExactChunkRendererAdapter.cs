@@ -27,6 +27,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private const int MapLayerTextureUnit = 13;
     private const int OreMappingTextureUnit = 14;
     private const int OreStoneTextureUnit = 15;
+    private const int VegetationMaskTextureUnit = 10;
     private const int OpaqueDepthTextureUnit = 11;
     private const float VisibleSubsurfaceDepth = 3f;
     private const float CaveEntranceConcealmentDepth = 1.5f;
@@ -61,6 +62,9 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private static bool atlasOreTextureBindingOverride;
 
     [ThreadStatic]
+    private static bool atlasVegetationTextureBindingOverride;
+
+    [ThreadStatic]
     private static bool atlasOreTextureBindingRecursion;
 
     [ThreadStatic]
@@ -77,6 +81,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private readonly VolumetricCloudRendererAdapter? cloudRenderer;
     private readonly AtlasEntityModelRendererAdapter entityModelRenderer;
     private readonly AtlasOreTextureReplacement oreTextureReplacement;
+    private readonly AtlasVegetationTextureMask vegetationTextureMask;
     private readonly Func<IShaderProgram?> stableLiquidShaderProvider;
     private readonly MethodInfo renderOpaque;
     private readonly MethodInfo renderOit;
@@ -134,6 +139,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     public IReadOnlyCollection<(int X, int Z)> CompletedTerrainColumns =>
         consideredTerrainColumns;
     public int LastRenderedTextureDetailReduction { get; private set; }
+    public bool LastRenderedVegetationHidden { get; private set; }
+    public bool LastRenderedPerformanceLightingEnabled { get; private set; } = true;
 
     private sealed class AtlasFilterShaderState
     {
@@ -192,6 +199,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         this.cloudRenderer = cloudRenderer;
         entityModelRenderer = new AtlasEntityModelRendererAdapter(capi);
         oreTextureReplacement = new AtlasOreTextureReplacement(capi);
+        vegetationTextureMask = new AtlasVegetationTextureMask(capi);
         this.stableLiquidShaderProvider = stableLiquidShaderProvider;
         this.renderOpaque = renderOpaque;
         this.renderOit = renderOit;
@@ -458,6 +466,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         AtlasMapLayerTexture? mapLayerTexture,
         float mapLayerOpacity,
         int textureDetailReduction,
+        bool performanceLightingEnabled,
+        bool hideVegetation,
         Vec3f fogColor,
         float visualExposureMultiplier,
         float boundarySoftness,
@@ -476,6 +486,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     {
         if (disabled) return false;
         if (concealSurvivalOres && !oreTextureReplacement.Advance()) return false;
+        if (hideVegetation && !vegetationTextureMask.Advance()) return false;
 
         IRenderAPI render = capi.Render;
         Vec3d cameraPosition = capi.World.Player.Entity.CameraPos;
@@ -525,6 +536,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         atlasCaveMaskBrightness = Math.Clamp(caveMaskBrightness, 0.5f, 1.5f);
         atlasTextureMipBias = Math.Clamp(textureDetailReduction, 0, 2);
         LastRenderedTextureDetailReduction = (int)atlasTextureMipBias;
+        LastRenderedVegetationHidden = hideVegetation;
+        LastRenderedPerformanceLightingEnabled = performanceLightingEnabled;
 
         try
         {
@@ -537,6 +550,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             ApplyAtlasLighting(
                 ambient,
                 shaderUniforms,
+                performanceLightingEnabled,
                 liveLightingEnabled,
                 fixedSunHour,
                 savedAmbientColor,
@@ -665,6 +679,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                         true,
                         hideUndergroundCaves,
                         concealSurvivalOres,
+                        hideVegetation,
                         fogEnabled,
                         viewDistanceBlocks
                     ))
@@ -678,14 +693,14 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                     }
                     return false;
                 }
-                BeginOreTextureBinding(concealSurvivalOres);
+                BeginAtlasTextureBindings(concealSurvivalOres, hideVegetation);
                 try
                 {
                     renderOpaque.Invoke(chunkRenderer, new object[] { deltaTime });
                 }
                 finally
                 {
-                    EndOreTextureBinding();
+                    EndAtlasTextureBindings();
                 }
             }
             finally
@@ -714,6 +729,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 pausedCloudAnimationDeltaTime,
                 hideUndergroundCaves,
                 concealSurvivalOres,
+                hideVegetation,
                 surfaceHeightTexture,
                 mapLayerTexture,
                 mapLayerOpacity,
@@ -768,7 +784,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             atlasVisibleTerrainColumns = null;
             atlasConsideredTerrainColumns = null;
             atlasLiquidAdapter = null;
-            EndOreTextureBinding();
+            EndAtlasTextureBindings();
             atlasVisibilityOverride = false;
             if (atlasFilterConfigured)
             {
@@ -779,6 +795,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                         null,
                         0,
                         cameraPosition,
+                        false,
                         false,
                         false,
                         false,
@@ -830,6 +847,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private void ApplyAtlasLighting(
         IAmbientManager ambient,
         DefaultShaderUniforms shaderUniforms,
+        bool performanceLightingEnabled,
         bool liveLightingEnabled,
         int fixedSunHour,
         Vec3f liveAmbientColor,
@@ -840,6 +858,25 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     )
     {
         float visualExposure = Math.Clamp(visualExposureMultiplier, 0.5f, 1.5f);
+        if (!performanceLightingEnabled)
+        {
+            Vec3f neutralLight = new(1f, 1f, 1f);
+            Vec3f overheadLight = new(0.08f, 0.99f, -0.10f);
+            ambientColorProperty.SetValue(
+                ambient,
+                ScaleColor(neutralLight, visualExposure)
+            );
+            ambientSceneBrightnessProperty.SetValue(
+                ambient,
+                Math.Clamp(visualExposure, 0.5f, 1.5f)
+            );
+            shaderUniforms.LightPosition3D = overheadLight;
+            skyDaylightUniformField.SetValue(shaderUniforms, 1f);
+            atlasSunDirection = overheadLight;
+            atlasSunColor = neutralLight;
+            atlasExposure = visualExposure;
+            return;
+        }
         IClientGameCalendar? calendar = capi.World.Calendar as IClientGameCalendar;
         if (liveLightingEnabled && calendar != null)
         {
@@ -1107,6 +1144,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         RestoreAtlasFilterSources();
         visibilityHarmony.UnpatchAll(VisibilityPatchId);
         oreTextureReplacement.Dispose();
+        vegetationTextureMask.Dispose();
         cloudRenderer?.Dispose();
     }
 
@@ -1188,6 +1226,12 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     public bool ValidateSurvivalOreConcealment(out string diagnostic) =>
         oreTextureReplacement.Validate(out diagnostic);
 
+    public bool AdvanceVegetationMask() =>
+        !disabled && vegetationTextureMask.Advance();
+
+    public bool ValidateVegetationMask(out string diagnostic) =>
+        vegetationTextureMask.Validate(out diagnostic);
+
     public int PrimaryColorTextureId
     {
         get
@@ -1207,6 +1251,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         bool enabled,
         bool hideUndergroundCaves,
         bool concealSurvivalOres,
+        bool hideVegetation,
         bool fogEnabled,
         int disclosureRadius
     )
@@ -1221,6 +1266,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 && (surfaceHeightTexture?.Ready != true
                     || surfaceHeightTexture.TextureId <= 0))
             || (concealSurvivalOres && !oreTextureReplacement.Ready)
+            || (hideVegetation && !vegetationTextureMask.Ready)
             || !EnsureAtlasFilterShaders())
         {
             return false;
@@ -1242,6 +1288,10 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                     "atlasConcealOres",
                     concealSurvivalOres ? 1 : 0
                 );
+                if (shader.HasUniform("atlasHideVegetation"))
+                {
+                    shader.Uniform("atlasHideVegetation", hideVegetation ? 1 : 0);
+                }
                 if (shader.HasUniform("atlasTextureMipBias"))
                 {
                     shader.Uniform("atlasTextureMipBias", atlasTextureMipBias);
@@ -1364,7 +1414,9 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             && source.Contains(AtlasFilterMarker, StringComparison.Ordinal))
         {
             return shader.HasUniform("atlasHideCaves")
-                && shader.HasUniform("atlasConcealOres");
+                && shader.HasUniform("atlasConcealOres")
+                && shader.HasUniform("atlasHideVegetation")
+                && shader.HasUniform("atlasVegetationMaskTex");
         }
 
         if (state != null && !ReferenceEquals(shader, state.Shader))
@@ -1399,7 +1451,9 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
 
         atlasFilterShaders[program] = new AtlasFilterShaderState(shader, source);
         return shader.HasUniform("atlasHideCaves")
-            && shader.HasUniform("atlasConcealOres");
+            && shader.HasUniform("atlasConcealOres")
+            && shader.HasUniform("atlasHideVegetation")
+            && shader.HasUniform("atlasVegetationMaskTex");
     }
 
     private void DisableAtlasFilterUniforms()
@@ -1426,6 +1480,10 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 if (shader.HasUniform("atlasConcealOres"))
                 {
                     shader.Uniform("atlasConcealOres", 0);
+                }
+                if (shader.HasUniform("atlasHideVegetation"))
+                {
+                    shader.Uniform("atlasHideVegetation", 0);
                 }
                 if (shader.HasUniform("atlasLayerEnabled"))
                 {
@@ -1586,6 +1644,19 @@ uniform int atlasConcealOres;
 uniform float atlasTextureMipBias;
 uniform sampler2D atlasOreMapTex;
 uniform sampler2D atlasStoneTex;
+uniform int atlasHideVegetation;
+uniform sampler2D atlasVegetationMaskTex;
+
+bool modernAtlasIsVegetation(vec2 sourceUv)
+{
+    ivec2 dimensions = textureSize(atlasVegetationMaskTex, 0);
+    ivec2 position = clamp(
+        ivec2(floor(sourceUv * vec2(dimensions))),
+        ivec2(0),
+        dimensions - ivec2(1)
+    );
+    return texelFetch(atlasVegetationMaskTex, position, 0).r > 0.5;
+}
 
 vec4 modernAtlasSampleTerrain(sampler2D sourceTexture, vec2 sourceUv)
 {
@@ -1673,6 +1744,10 @@ bool modernAtlasInCaveEntranceBand(vec3 absoluteWorldPosition)
 void main()
 {
     vec3 modernAtlasAbsoluteWorldPosition = worldPos.xyz + atlasWorldOffset;
+    if (atlasHideVegetation > 0 && modernAtlasIsVegetation(uv))
+    {
+        discard;
+    }
 """ + caveFilterCode + """
     modernAtlasOriginalMain();
 """ + mapLayerCode + """
@@ -1826,17 +1901,24 @@ void main()
         );
     }
 
-    private void BeginOreTextureBinding(bool enabled)
+    private void BeginAtlasTextureBindings(
+        bool concealSurvivalOres,
+        bool hideVegetation
+    )
     {
-        atlasOreTextureBindingAdapter = enabled ? this : null;
-        atlasOreTextureBindingOverride = enabled;
+        atlasOreTextureBindingAdapter = concealSurvivalOres || hideVegetation
+            ? this
+            : null;
+        atlasOreTextureBindingOverride = concealSurvivalOres;
+        atlasVegetationTextureBindingOverride = hideVegetation;
         atlasOreTextureBindingRecursion = false;
     }
 
-    private static void EndOreTextureBinding()
+    private static void EndAtlasTextureBindings()
     {
         atlasOreTextureBindingRecursion = false;
         atlasOreTextureBindingOverride = false;
+        atlasVegetationTextureBindingOverride = false;
         atlasOreTextureBindingAdapter = null;
     }
 
@@ -1845,7 +1927,7 @@ void main()
         object[] __args
     )
     {
-        if (!atlasOreTextureBindingOverride
+        if ((!atlasOreTextureBindingOverride && !atlasVegetationTextureBindingOverride)
             || atlasOreTextureBindingRecursion
             || atlasOreTextureBindingAdapter is not ExactChunkRendererAdapter adapter
             || __instance is not IShaderProgram shader
@@ -1853,9 +1935,7 @@ void main()
             || __args[0] is not string samplerName
             || !string.Equals(samplerName, "terrainTex", StringComparison.Ordinal)
             || __args[1] is not int terrainTextureId
-            || !shader.HasUniform("atlasConcealOres")
-            || !shader.HasUniform("atlasOreMapTex")
-            || !shader.HasUniform("atlasStoneTex"))
+            || !shader.HasUniform("atlasConcealOres"))
         {
             return;
         }
@@ -1863,16 +1943,29 @@ void main()
         atlasOreTextureBindingRecursion = true;
         try
         {
-            if (!adapter.oreTextureReplacement.BindForTerrainTexture(
-                shader,
-                terrainTextureId,
-                OreMappingTextureUnit,
-                OreStoneTextureUnit
-            ) && !adapter.loggedOreTextureBindingFailure)
+            if (atlasOreTextureBindingOverride
+                && !adapter.oreTextureReplacement.BindForTerrainTexture(
+                    shader,
+                    terrainTextureId,
+                    OreMappingTextureUnit,
+                    OreStoneTextureUnit
+                )
+                && !adapter.loggedOreTextureBindingFailure)
             {
                 adapter.loggedOreTextureBindingFailure = true;
                 adapter.capi.Logger.Error(
                     "[ModernAtlas] Survival ore concealment could not bind its atlas textures."
+                );
+            }
+            if (atlasVegetationTextureBindingOverride
+                && !adapter.vegetationTextureMask.BindForTerrainTexture(
+                    shader,
+                    terrainTextureId,
+                    VegetationMaskTextureUnit
+                ))
+            {
+                throw new InvalidOperationException(
+                    "The atlas vegetation mask could not bind its texture."
                 );
             }
         }
@@ -1893,6 +1986,7 @@ void main()
         float pausedCloudAnimationDeltaTime,
         bool hideUndergroundCaves,
         bool concealSurvivalOres,
+        bool hideVegetation,
         AtlasSurfaceHeightTexture? surfaceHeightTexture,
         AtlasMapLayerTexture? mapLayerTexture,
         float mapLayerOpacity,
@@ -1927,6 +2021,7 @@ void main()
                 true,
                 hideUndergroundCaves,
                 concealSurvivalOres,
+                hideVegetation,
                 fogEnabled,
                 disclosureRadius
             ))
@@ -1935,14 +2030,14 @@ void main()
                     "The transparent-block safety filters could not be configured."
                 );
             }
-            BeginOreTextureBinding(concealSurvivalOres);
+            BeginAtlasTextureBindings(concealSurvivalOres, hideVegetation);
             try
             {
                 renderOit.Invoke(chunkRenderer, new object[] { deltaTime });
             }
             finally
             {
-                EndOreTextureBinding();
+                EndAtlasTextureBindings();
             }
             RestoreLiquidPools(hiddenLiquidPools);
             runAfterOit.Invoke(
@@ -1958,14 +2053,14 @@ void main()
             // makes transparent blocks slide relative to terrain while the
             // camera pans.
             mergeTransparentRenderPass.Invoke(platform, Array.Empty<object>());
-            BeginOreTextureBinding(concealSurvivalOres);
+            BeginAtlasTextureBindings(concealSurvivalOres, hideVegetation);
             try
             {
                 renderAfterOit.Invoke(chunkRenderer, new object[] { deltaTime });
             }
             finally
             {
-                EndOreTextureBinding();
+                EndAtlasTextureBindings();
             }
 
             // Resolve every real transparent block before blending stable
