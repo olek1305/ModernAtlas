@@ -91,6 +91,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private long lastAtlasFrameMilliseconds;
     private float atlasRealDeltaTime;
     private bool loggedEntityModels;
+    private int preparedGameViewDistance = -1;
     private bool cheatModeEnabled;
     private bool preparingSurfaceFilter;
     private bool preparingOreConcealment;
@@ -148,19 +149,15 @@ public sealed class ModernAtlasDialog : GuiDialog
         get
         {
             int viewDistance = capi.Settings.Int["viewDistance"];
-            // Vintage Story exposes the configured width of the rendered
-            // chunk area. Exact completed mesh pools extend approximately
-            // half of that value from the player in each direction. Keep one
-            // chunk as a streaming guard because the received outer columns
-            // can exist before their GPU meshes are complete. The atlas must
-            // conceal that unavailable edge instead of exposing framebuffer
-            // gaps or inventing replacement terrain.
-            int configuredDiameter = viewDistance > 0
+            // Use Vintage Story's configured view distance directly as the
+            // player-anchored atlas radius. The existing boundary fog conceals
+            // outer columns whose GPU meshes are not complete yet.
+            int configuredDistance = viewDistance > 0
                 ? Math.Clamp(viewDistance, GlobalConstants.ChunkSize * 2, MaximumGameViewDistance)
                 : DefaultViewDistance;
             return Math.Max(
                 GlobalConstants.ChunkSize,
-                configuredDiameter / 2 - GlobalConstants.ChunkSize
+                configuredDistance
             );
         }
     }
@@ -231,8 +228,10 @@ public sealed class ModernAtlasDialog : GuiDialog
         {
             float configured = Math.Clamp(config.MapLayerOpacityPercent, 0, 100) / 100f;
             // A perceptual response makes middle slider values visibly useful
-            // while preserving exact zero and full-strength endpoints.
-            return 1f - MathF.Pow(1f - configured, 1.35f);
+            // while preserving exact zero and full-strength endpoints. Boost
+            // the final tint so terrain materials cannot overpower layer colors.
+            float perceptual = 1f - MathF.Pow(1f - configured, 1.35f);
+            return Math.Min(1f, perceptual * 1.3f);
         }
     }
     private AtlasViewportBounds AtlasViewport
@@ -353,6 +352,15 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnRenderGUI(float deltaTime)
     {
+        if (EnsureExactChunkRenderer())
+        {
+            // Vintage Story may rebuild its chunk renderer when view distance
+            // changes. Rebuild only the transient atlas filters against the
+            // replacement renderer; the game remains the sole mesh owner.
+            PrepareSurfaceSafetyFilter();
+            PrepareMapLayer();
+        }
+        SynchronizeGameViewDistance();
         if (pendingInterfaceRecompose)
         {
             pendingInterfaceRecompose = false;
@@ -903,7 +911,11 @@ public sealed class ModernAtlasDialog : GuiDialog
         searchController.Clear();
         mapLayerTexture.Reset();
         preparingSurfaceFilter = false;
-        surfaceHeightTexture.Reset();
+        // Keep the small transient surface-safety samples for this world.
+        // Changing graphics view distance happens while G is closed; retaining
+        // the overlap prevents already known exact mesh columns from becoming
+        // unknown when the resized filter is rebuilt on the next open. World
+        // leave still releases all of this non-persistent data.
         ResetPointerDrag();
         ReleaseNormalWorldSnapshot();
         ScheduleNormalWorldShaderRestore();
@@ -926,6 +938,14 @@ public sealed class ModernAtlasDialog : GuiDialog
                 true
             );
 
+            if (normalWorldSnapshotTexture != null
+                && normalWorldSnapshotTexture.TextureId > 0
+                && (normalWorldSnapshotTexture.Width != width
+                    || normalWorldSnapshotTexture.Height != height))
+            {
+                normalWorldSnapshotTexture.Dispose();
+                normalWorldSnapshotTexture = null;
+            }
             normalWorldSnapshotTexture ??= new LoadedTexture(capi);
             normalWorldSnapshotTexture.Width = width;
             normalWorldSnapshotTexture.Height = height;
@@ -1058,13 +1078,50 @@ public sealed class ModernAtlasDialog : GuiDialog
             || exactChunkRenderer.AdvanceSurvivalOreConcealment();
     }
 
-    private void EnsureExactChunkRenderer()
+    private bool EnsureExactChunkRenderer()
     {
-        exactChunkRenderer ??= ExactChunkRendererAdapter.TryCreate(
+        if (exactChunkRenderer != null
+            && !exactChunkRenderer.ReferencesCurrentChunkRenderer())
+        {
+            capi.Logger.Notification(
+                "[ModernAtlas] Vintage Story replaced its chunk renderer; rebinding the atlas to the current exact chunk mesh pools."
+            );
+            exactChunkRenderer.Dispose();
+            exactChunkRenderer = null;
+        }
+
+        if (exactChunkRenderer != null) return false;
+
+        exactChunkRenderer = ExactChunkRendererAdapter.TryCreate(
             capi,
             stableLiquidShaderProvider,
             atlasCloudShaderProvider
         );
+        return exactChunkRenderer != null;
+    }
+
+    private void SynchronizeGameViewDistance()
+    {
+        int currentViewDistance = GameViewDistance;
+        if (preparedGameViewDistance < 0)
+        {
+            preparedGameViewDistance = currentViewDistance;
+            return;
+        }
+        if (preparedGameViewDistance == currentViewDistance) return;
+
+        int previousViewDistance = preparedGameViewDistance;
+        preparedGameViewDistance = currentViewDistance;
+        capi.Logger.Notification(
+            "[ModernAtlas] Game view distance changed from {0} to {1} blocks; rebuilding transient atlas filters from current loaded data and exact mesh pools.",
+            previousViewDistance,
+            currentViewDistance
+        );
+        exactChunkRenderer?.ResetTerrainCoverageDiagnostics();
+        FitLoadedTerrain();
+        PrepareSurfaceSafetyFilter();
+        PrepareMapLayer();
+        InvalidateFogTexture();
     }
 
     private void ClampPitchToAccessLevel(bool immediate)
@@ -2128,6 +2185,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         {
             exactChunkRenderer = null;
         }
+        preparedGameViewDistance = -1;
         surfaceHeightTexture.Reset();
         ReleaseNormalWorldSnapshot();
         InvalidateFogTexture();
@@ -3384,6 +3442,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private void PrepareSurfaceSafetyFilter()
     {
+        preparedGameViewDistance = GameViewDistance;
         preparingSurfaceFilter = SurfaceSafetyEnabled;
         if (!SurfaceSafetyEnabled)
         {
@@ -3476,6 +3535,28 @@ public sealed class ModernAtlasDialog : GuiDialog
         float measuredForwardExtent = 0;
         bool found = false;
 
+        IReadOnlyCollection<(int X, int Z)> completedColumns = exactChunkRenderer
+            ?.CompletedTerrainColumns ?? Array.Empty<(int X, int Z)>();
+        foreach ((int X, int Z) column in completedColumns)
+        {
+            if (column.X < minimumChunkX || column.X > maximumChunkX
+                || column.Z < minimumChunkZ || column.Z > maximumChunkZ)
+            {
+                continue;
+            }
+            MeasureChunk(column.X, column.Z);
+        }
+        if (found)
+        {
+            horizontalExtent = measuredHorizontalExtent;
+            forwardExtent = measuredForwardExtent;
+            return true;
+        }
+
+        // Before the first atlas frame there is no completed-mesh snapshot.
+        // Fall back to loaded columns only for that initial fit. Later resets
+        // use actual GPU mesh coverage so a view-distance increase cannot zoom
+        // out to thousands of queued, not-yet-renderable chunks.
         for (int chunkZ = minimumChunkZ; chunkZ <= maximumChunkZ; chunkZ++)
         {
             for (int chunkX = minimumChunkX; chunkX <= maximumChunkX; chunkX++)
@@ -3492,21 +3573,26 @@ public sealed class ModernAtlasDialog : GuiDialog
                 }
                 if (!loaded) continue;
 
-                found = true;
-                double minimumX = chunkX * (double)chunkSize - originX;
-                double maximumX = minimumX + chunkSize;
-                double minimumZ = chunkZ * (double)chunkSize - originZ;
-                double maximumZ = minimumZ + chunkSize;
-                MeasureProjectedCorner(minimumX, minimumZ);
-                MeasureProjectedCorner(minimumX, maximumZ);
-                MeasureProjectedCorner(maximumX, minimumZ);
-                MeasureProjectedCorner(maximumX, maximumZ);
+                MeasureChunk(chunkX, chunkZ);
             }
         }
 
         horizontalExtent = measuredHorizontalExtent;
         forwardExtent = measuredForwardExtent;
         return found;
+
+        void MeasureChunk(int chunkX, int chunkZ)
+        {
+            found = true;
+            double minimumX = chunkX * (double)chunkSize - originX;
+            double maximumX = minimumX + chunkSize;
+            double minimumZ = chunkZ * (double)chunkSize - originZ;
+            double maximumZ = minimumZ + chunkSize;
+            MeasureProjectedCorner(minimumX, minimumZ);
+            MeasureProjectedCorner(minimumX, maximumZ);
+            MeasureProjectedCorner(maximumX, minimumZ);
+            MeasureProjectedCorner(maximumX, maximumZ);
+        }
 
         void MeasureProjectedCorner(double x, double z)
         {

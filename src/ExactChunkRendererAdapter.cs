@@ -66,6 +66,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private static ExactChunkRendererAdapter? atlasOreTextureBindingAdapter;
 
     private readonly ICoreClientAPI capi;
+    private readonly object game;
+    private readonly FieldInfo chunkRendererField;
     private readonly object chunkRenderer;
     private readonly object mainCamera;
     private readonly object platform;
@@ -127,6 +129,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         entityModelRenderer.LastSuppressedHeldItemCount;
     public IReadOnlyList<AtlasRenderedEntity> LastRenderedEntities =>
         entityModelRenderer.LastRenderedEntities;
+    public IReadOnlyCollection<(int X, int Z)> CompletedTerrainColumns =>
+        consideredTerrainColumns;
 
     private sealed class AtlasFilterShaderState
     {
@@ -142,6 +146,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
 
     private ExactChunkRendererAdapter(
         ICoreClientAPI capi,
+        object game,
+        FieldInfo chunkRendererField,
         object chunkRenderer,
         object mainCamera,
         object platform,
@@ -173,6 +179,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     )
     {
         this.capi = capi;
+        this.game = game;
+        this.chunkRendererField = chunkRendererField;
         this.chunkRenderer = chunkRenderer;
         this.mainCamera = mainCamera;
         this.platform = platform;
@@ -375,6 +383,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             );
             return new ExactChunkRendererAdapter(
                 capi,
+                game,
+                rendererField,
                 renderer,
                 camera,
                 platform,
@@ -415,6 +425,17 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             );
             return null;
         }
+    }
+
+    public bool ReferencesCurrentChunkRenderer()
+    {
+        return !disposed
+            && ReferenceEquals(chunkRendererField.GetValue(game), chunkRenderer);
+    }
+
+    public void ResetTerrainCoverageDiagnostics()
+    {
+        loggedTerrainCoverage = false;
     }
 
     public bool Render(

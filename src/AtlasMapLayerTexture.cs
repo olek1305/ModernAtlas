@@ -135,9 +135,30 @@ internal sealed class AtlasMapLayerTexture : IDisposable
         int height = Math.Max(1, (maximumZ - OriginZ) / HorizontalSampleSize + 1);
 
         pixels = new int[checked(width * height)];
-        texture ??= new LoadedTexture(capi);
+        EnsureTextureSize(width, height);
+        if (texture == null) return;
         texture.Width = width;
         texture.Height = height;
+    }
+
+    private void EnsureTextureSize(int width, int height)
+    {
+        if (texture != null
+            && texture.TextureId > 0
+            && (texture.Width != width || texture.Height != height))
+        {
+            capi.Logger.Notification(
+                "[ModernAtlas] Reallocating the transient map-layer texture from {0}x{1} to {2}x{3} after the game view distance changed.",
+                texture.Width,
+                texture.Height,
+                width,
+                height
+            );
+            texture.Dispose();
+            texture = null;
+        }
+
+        texture ??= new LoadedTexture(capi);
     }
 
     public bool Advance()
