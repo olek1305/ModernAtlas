@@ -1284,6 +1284,10 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 capi.Render.CurrentActiveShader?.Stop();
                 shader.Use();
                 shader.Uniform("atlasHideCaves", hideUndergroundCaves ? 1 : 0);
+                if (shader.HasUniform("atlasSeaLevel"))
+                {
+                    shader.Uniform("atlasSeaLevel", (float)capi.World.SeaLevel);
+                }
                 shader.Uniform(
                     "atlasConcealOres",
                     concealSurvivalOres ? 1 : 0
@@ -1363,6 +1367,14 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 {
                     shader.Uniform("atlasDisableHorizonFade", 1);
                 }
+                if (shader.HasUniform("atlasDisableLod0Fade"))
+                {
+                    // Leaves and other exact LOD0 meshes are already bounded
+                    // by the game's loaded chunk set. The normal perspective
+                    // shader fade must not remove them from a distant atlas
+                    // view while leaving their non-LOD trunks behind.
+                    shader.Uniform("atlasDisableLod0Fade", 1);
+                }
                 shader.Stop();
             }
             return true;
@@ -1391,9 +1403,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         {
             loggedCaveFilterReady = true;
             capi.Logger.Notification(
-                "[ModernAtlas] Surface-only terrain safety is active with a {0}-block exterior allowance, a {1:0.0}-block cave-entrance concealment band, deep-cave discard and a player-anchored fog boundary.",
-                VisibleSubsurfaceDepth,
-                CaveEntranceConcealmentDepth
+                "[ModernAtlas] Terrain at or above sea level retains all exact walls and floors; below sea level the atlas keeps a {0}-block exterior layer and hides deeper caves.",
+                VisibleSubsurfaceDepth
             );
         }
         return true;
@@ -1498,6 +1509,10 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                     // variant; every other atlas branch is reset above.
                     shader.Uniform("atlasDisableHorizonFade", 1);
                 }
+                if (shader.HasUniform("atlasDisableLod0Fade"))
+                {
+                    shader.Uniform("atlasDisableLod0Fade", 0);
+                }
                 shader.Stop();
             }
             catch
@@ -1559,6 +1574,19 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             mainIndex,
             "vec4 modernAtlasSampleTerrain(sampler2D sourceTexture, vec2 sourceUv);\n\n"
         );
+        const string lod0FadeTerm = "- lod0Fade";
+        if (renamed.Contains(lod0FadeTerm, StringComparison.Ordinal))
+        {
+            renamed = renamed.Replace(
+                lod0FadeTerm,
+                "- (atlasDisableLod0Fade > 0 ? 0.0 : lod0Fade)",
+                StringComparison.Ordinal
+            );
+            renamed = renamed.Insert(
+                mainIndex,
+                "uniform int atlasDisableLod0Fade;\n\n"
+            );
+        }
         const string horizonFadeCondition = "if (haxyFade > 0)";
         if (renamed.Contains(horizonFadeCondition, StringComparison.Ordinal))
         {
@@ -1599,36 +1627,12 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     }
 """
             : "";
-        string caveFilterCode = supportsBoundaryColor
-            ? """
-    if (atlasHideCaves > 0)
-    {
-        float modernAtlasExteriorFloor;
-        bool modernAtlasHasExteriorFloor = modernAtlasReadExteriorFloor(
-            modernAtlasAbsoluteWorldPosition,
-            normal,
-            modernAtlasExteriorFloor
-        );
-        if (!modernAtlasHasExteriorFloor
-            || modernAtlasAbsoluteWorldPosition.y < modernAtlasExteriorFloor)
-        {
-            if (modernAtlasHasExteriorFloor
-                && modernAtlasAbsoluteWorldPosition.y
-                >= modernAtlasExteriorFloor - atlasCaveConcealmentDepth)
-            {
-                // Keep only a thin band of real opaque faces near the exterior to
-                // quiet clipped cave mouths. Deeper cave walls are discarded so
-                // they cannot trace an underground tunnel network from the side.
-                modernAtlasOriginalMain();
-                outColor = vec4(atlasCaveConcealmentColor, 1.0);
-                return;
-            }
-            discard;
-        }
-    }
-"""
-            : """
-    if (atlasHideCaves > 0)
+        // Above sea level the complete exact mesh is always exterior-safe.
+        // Below it, retain only the configured surface thickness so deep cave
+        // networks stay hidden without cutting high cliffs, ruins or buildings.
+        string caveFilterCode = """
+    if (atlasHideCaves > 0
+        && modernAtlasAbsoluteWorldPosition.y < atlasSeaLevel)
     {
         float modernAtlasExteriorFloor;
         bool modernAtlasHasExteriorFloor = modernAtlasReadExteriorFloor(
@@ -1648,6 +1652,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
 
 // MODERNATLAS_SURFACE_AND_BOUNDARY_FILTER
 uniform int atlasHideCaves;
+uniform float atlasSeaLevel;
 uniform sampler2D atlasSurfaceHeightTex;
 uniform vec2 atlasSurfaceOriginXZ;
 uniform float atlasSurfaceSampleSize;
@@ -2308,6 +2313,7 @@ void main()
             && surfaceHeightTexture?.Ready == true
             && surfaceHeightTexture.TextureId > 0;
         activeLiquidShader.Uniform("atlasHideCaves", applySurfaceFilter ? 1 : 0);
+        activeLiquidShader.Uniform("atlasSeaLevel", (float)capi.World.SeaLevel);
         if (applySurfaceFilter && surfaceHeightTexture != null)
         {
             activeLiquidShader.BindTexture2D(
