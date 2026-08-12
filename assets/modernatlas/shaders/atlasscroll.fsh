@@ -6,6 +6,8 @@ uniform float lightSweep;
 uniform sampler2D entityTex;
 uniform vec4 entityColor;
 uniform sampler2D atlasTex;
+uniform sampler2D backgroundTex;
+uniform int backgroundAvailable;
 
 in vec2 uv;
 in vec3 viewNormal;
@@ -26,6 +28,12 @@ float paperFiber(vec2 position)
     float coarse = hash21(cell);
     float thread = sin(position.y * 980.0 + coarse * 5.0) * 0.5 + 0.5;
     return coarse * 0.62 + thread * 0.38;
+}
+
+vec3 frozenBackground(vec2 position)
+{
+    vec2 backgroundPosition = vec2(position.x, 1.0 - position.y);
+    return texture(backgroundTex, backgroundPosition).rgb;
 }
 
 void main(void)
@@ -83,7 +91,9 @@ void main(void)
     }
     else if (materialKind == 8)
     {
-        baseColor = vec3(0.012, 0.020, 0.027);
+        baseColor = backgroundAvailable > 0
+            ? frozenBackground(uv) * vec3(0.62, 0.66, 0.64)
+            : vec3(0.012, 0.020, 0.027);
     }
     else
     {
@@ -110,7 +120,9 @@ void main(void)
     float sweep = materialKind == 0
         ? exp(-pow((uv.x - sweepCenter) * 6.0, 2.0)) * smoothstep(0.0, 0.28, lightSweep)
         : 0.0;
-    vec3 finalColor = materialKind == 7
+    vec3 finalColor = materialKind == 8
+        ? baseColor
+        : materialKind == 7
         ? baseColor * (0.90 + diffuse * 0.10)
         : baseColor * (diffuse + rim);
     finalColor += vec3(0.30, 0.42, 0.38) * sweep * 0.50;

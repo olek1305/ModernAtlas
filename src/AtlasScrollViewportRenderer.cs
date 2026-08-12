@@ -27,7 +27,11 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
         this.shaderProvider = shaderProvider;
     }
 
-    public void Render(int atlasTextureId, AtlasViewportBounds viewport)
+    public void Render(
+        int atlasTextureId,
+        int backgroundTextureId,
+        AtlasViewportBounds viewport
+    )
     {
         if (atlasTextureId <= 0 || !EnsureMeshes()) return;
         IShaderProgram? shader = shaderProvider();
@@ -61,12 +65,17 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
         shader.UniformMatrix("projectionMatrix", projection);
         shader.Uniform("entityColor", new Vec4f(1f, 1f, 1f, 1f));
         shader.BindTexture2D("atlasTex", atlasTextureId, 0);
+        shader.Uniform("backgroundAvailable", backgroundTextureId > 0 ? 1 : 0);
+        if (backgroundTextureId > 0)
+        {
+            shader.BindTexture2D("backgroundTex", backgroundTextureId, 1);
+        }
 
         try
         {
-            // Keep world shadows, held items and HUD content from showing
-            // around or through the physical scroll. This backdrop is fully
-            // opaque and stationary, so wheel zoom affects only the map.
+            // Present a dimmed frozen POV behind the scroll. It remains fully
+            // opaque and stationary, so the live world cannot leak through or
+            // move while the atlas is open.
             render.GlToggleBlend(false, EnumBlendMode.Standard);
             RenderComponent(
                 shader,
@@ -168,6 +177,52 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
         {
             RenderRoller(shader, centerX - rollerX, centerY, rollerHeight);
             RenderRoller(shader, centerX + rollerX, centerY, rollerHeight);
+        }
+        finally
+        {
+            shader.Stop();
+            render.GLDepthMask(true);
+            render.GlToggleBlend(false, EnumBlendMode.Standard);
+        }
+    }
+
+    public void RenderAtlasFullscreen(int atlasTextureId)
+    {
+        if (atlasTextureId <= 0 || !EnsureMeshes() || sheetMesh == null) return;
+        IShaderProgram? shader = shaderProvider();
+        if (shader == null || shader.Disposed) return;
+
+        IRenderAPI render = capi.Render;
+        float frameHeight = Math.Max(1, render.FrameHeight);
+        float aspect = render.FrameWidth / frameHeight;
+        float[] projection = Mat4f.Create();
+        Mat4f.Ortho(projection, -aspect, aspect, -1f, 1f, -4f, 4f);
+
+        render.CurrentActiveShader?.Stop();
+        render.CurrentFrameBuffer = null;
+        render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
+        render.GLDisableDepthTest();
+        render.GLDepthMask(false);
+        render.GlDisableCullFace();
+        render.GlScissorFlag(false);
+        render.GlToggleBlend(false, EnumBlendMode.Standard);
+        shader.Use();
+        shader.UniformMatrix("projectionMatrix", projection);
+        shader.Uniform("entityColor", new Vec4f(1f, 1f, 1f, 1f));
+        shader.Uniform("backgroundAvailable", 0);
+        shader.BindTexture2D("atlasTex", atlasTextureId, 0);
+        try
+        {
+            // Framebuffer textures use the orientation expected by the atlas
+            // presentation shader. The engine GUI texture helper flips this
+            // GPU-owned texture, which made throttled full-screen frames
+            // alternate between upright and upside-down presentations.
+            RenderComponent(
+                shader,
+                sheetMesh,
+                CreateModel(0f, 0f, 0f, aspect * 2f, 2f, 1f),
+                7
+            );
         }
         finally
         {

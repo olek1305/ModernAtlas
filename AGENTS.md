@@ -260,7 +260,7 @@ the product scope when the atlas itself is correct.
 
 ## Current verified baseline
 
-- The working public version is `0.6.2`. Do not change the version number
+- The working public version is `0.6.3`. Do not change the version number
   unless the project owner explicitly requests it. Package-content changes may
   continue under this version during the current test cycle.
 - The verified liquid implementation uses completed liquid chunk meshes and a
@@ -351,7 +351,7 @@ the product scope when the atlas itself is correct.
 ## Build and in-game test workflow
 
 - For every rendering change, build `ModernAtlas.csproj` in Release mode,
-  create `Releases/modernatlas_0.6.2.zip`, validate the ZIP, and copy that exact
+  create `Releases/modernatlas_0.6.3.zip`, validate the ZIP, and copy that exact
   archive to the active Vintage Story `Mods` directory. Compare SHA-256 hashes
   so the release and active archives are demonstrably identical.
 - Close the running game cleanly before replacing or retesting the active mod.
