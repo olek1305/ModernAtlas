@@ -25,6 +25,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     private const float MaximumZoomIn = 8;
     private const float MaximumZoomScreenshotSettleSeconds = 2;
     private const int FogTextureDownsample = 4;
+    private const int MovingAtlasRefreshMilliseconds = 16;
+    private const int IdleAtlasRefreshMilliseconds = 83;
     private const string SmokeScreenshotEnvironmentVariable =
         "MODERNATLAS_SMOKE_SCREENSHOT";
     private const string SmokeFixedSunHourEnvironmentVariable =
@@ -65,6 +67,10 @@ public sealed class ModernAtlasDialog : GuiDialog
     private LoadedTexture? searchMarkerTexture;
     private LoadedTexture? normalWorldSnapshotTexture;
     private bool normalWorldSnapshotCaptured;
+    private LoadedTexture? atlasFrameCacheTexture;
+    private LoadedTexture? primaryAtlasSourceTexture;
+    private int primaryAtlasSourceTextureId;
+    private long lastAtlasWorldRenderMilliseconds;
     private MeshRef? opacityQuad;
     private bool leftDragging;
     private bool rightDragging;
@@ -95,6 +101,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private long lastAtlasFrameMilliseconds;
     private float atlasRealDeltaTime;
     private bool loggedEntityModels;
+    private bool loggedAtlasRefreshThrottle;
     private int preparedGameViewDistance = -1;
     private bool cheatModeEnabled;
     private bool preparingSurfaceFilter;
@@ -333,6 +340,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         loggedEntityModels = false;
         CaptureAnimationFrame();
         lastAtlasFrameMilliseconds = capi.ElapsedMilliseconds;
+        lastAtlasWorldRenderMilliseconds = 0;
+        ReleaseAtlasFrameCache();
         EnsureExactChunkRenderer();
         centerX = capi.World.Player.Entity.Pos.X;
         centerZ = capi.World.Player.Entity.Pos.Z;
@@ -390,12 +399,19 @@ public sealed class ModernAtlasDialog : GuiDialog
             capi.Logger.Notification("[ModernAtlas] First 3D atlas GUI frame rendered.");
         }
         CaptureNormalWorldSnapshot();
-        bool rendered = RenderLiveWorld(deltaTime);
+        bool freshAtlasFrame = ShouldRenderFreshAtlasFrame();
+        bool rendered = freshAtlasFrame
+            ? RenderLiveWorld(deltaTime)
+            : atlasFrameCacheTexture?.TextureId > 0;
+        if (freshAtlasFrame && rendered)
+        {
+            lastAtlasWorldRenderMilliseconds = capi.ElapsedMilliseconds;
+        }
         if (SearchModeActive)
         {
             AdvanceSearch();
         }
-        if (rendered && automatedSmokeTestActive)
+        if (freshAtlasFrame && rendered && automatedSmokeTestActive)
         {
             bool safeSurfaceFrameWasAlreadyRendered =
                 automatedSmokeTestSafeSurfaceFrameRendered;
@@ -477,16 +493,30 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
         if (config.RenderOnScroll)
         {
-            RenderFogMask(true);
+            if (freshAtlasFrame && rendered)
+            {
+                RenderFogMask(true);
+                CaptureAtlasFrameCache();
+            }
             RestoreNormalWorldSnapshot();
             capi.Render.CurrentFrameBuffer = null;
             scrollViewportRenderer.Render(
-                exactChunkRenderer?.PrimaryColorTextureId ?? 0,
+                atlasFrameCacheTexture?.TextureId
+                    ?? exactChunkRenderer?.PrimaryColorTextureId
+                    ?? 0,
                 AtlasViewport
             );
         }
         else
         {
+            if (freshAtlasFrame && rendered)
+            {
+                CaptureAtlasFrameCache();
+            }
+            else if (rendered)
+            {
+                RenderCachedAtlasFullscreen();
+            }
             RenderFogMask(false);
         }
         capi.Render.GetEngineShader(EnumShaderProgram.Gui).Use();
@@ -992,6 +1022,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         // leave still releases all of this non-persistent data.
         ResetPointerDrag();
         ReleaseNormalWorldSnapshot();
+        ReleaseAtlasFrameCache();
         ScheduleNormalWorldShaderRestore();
         base.OnGuiClosed();
     }
@@ -1095,6 +1126,140 @@ public sealed class ModernAtlasDialog : GuiDialog
         normalWorldSnapshotTexture?.Dispose();
         normalWorldSnapshotTexture = null;
         normalWorldSnapshotCaptured = false;
+    }
+
+    private bool ShouldRenderFreshAtlasFrame()
+    {
+        if (atlasFrameCacheTexture?.TextureId <= 0) return true;
+
+        int interval = IsAtlasCameraMoving()
+            ? MovingAtlasRefreshMilliseconds
+            : IdleAtlasRefreshMilliseconds;
+        return capi.ElapsedMilliseconds - lastAtlasWorldRenderMilliseconds >= interval;
+    }
+
+    private bool IsAtlasCameraMoving() =>
+        leftDragging
+        || rightDragging
+        || Math.Abs(targetCenterX - centerX) > 0.001
+        || Math.Abs(targetCenterZ - centerZ) > 0.001
+        || Math.Abs(NormalizeSignedDegrees(targetYawDegrees - yawDegrees)) > 0.001f
+        || Math.Abs(targetPitchDegrees - pitchDegrees) > 0.001f
+        || Math.Abs(targetZoom - zoom) > 0.001f;
+
+    private void CaptureAtlasFrameCache()
+    {
+        int textureId = exactChunkRenderer?.PrimaryColorTextureId ?? 0;
+        if (textureId <= 0) return;
+
+        IRenderAPI render = capi.Render;
+        FrameBufferRef primary = render.FrameBuffers[(int)EnumFrameBuffer.Primary];
+        int width = Math.Max(1, primary.Width);
+        int height = Math.Max(1, primary.Height);
+        try
+        {
+            if (atlasFrameCacheTexture == null
+                || atlasFrameCacheTexture.TextureId <= 0
+                || atlasFrameCacheTexture.Width != width
+                || atlasFrameCacheTexture.Height != height)
+            {
+                atlasFrameCacheTexture?.Dispose();
+                atlasFrameCacheTexture = new LoadedTexture(capi)
+                {
+                    Width = width,
+                    Height = height
+                };
+                int[] emptyPixels = new int[checked(width * height)];
+                render.LoadOrUpdateTextureFromBgra(
+                    emptyPixels,
+                    true,
+                    0,
+                    ref atlasFrameCacheTexture
+                );
+            }
+
+            if (primaryAtlasSourceTexture == null
+                || primaryAtlasSourceTextureId != textureId
+                || primaryAtlasSourceTexture.Width != width
+                || primaryAtlasSourceTexture.Height != height)
+            {
+                primaryAtlasSourceTexture = new LoadedTexture(
+                    capi,
+                    textureId,
+                    width,
+                    height
+                )
+                {
+                    // This wrapper references an engine-owned framebuffer
+                    // texture and must never delete it.
+                    IgnoreUndisposed = true
+                };
+                primaryAtlasSourceTextureId = textureId;
+            }
+
+            render.RenderTextureIntoTexture(
+                primaryAtlasSourceTexture,
+                0,
+                0,
+                width,
+                height,
+                atlasFrameCacheTexture,
+                0,
+                0,
+                0
+            );
+            render.CurrentFrameBuffer = null;
+            if (!loggedAtlasRefreshThrottle)
+            {
+                loggedAtlasRefreshThrottle = true;
+                capi.Logger.Notification(
+                    "[ModernAtlas] Atlas refresh throttling is active at up to 60 FPS while the camera moves and 12 FPS while idle; world ticks and client chunk streaming remain active."
+                );
+            }
+        }
+        catch (Exception exception)
+        {
+            capi.Logger.Warning(
+                "[ModernAtlas] Could not cache a throttled atlas frame; full-rate rendering remains active: {0}",
+                exception.Message
+            );
+            ReleaseAtlasFrameCache();
+        }
+    }
+
+    private void RenderCachedAtlasFullscreen()
+    {
+        LoadedTexture? cache = atlasFrameCacheTexture;
+        if (cache == null || cache.TextureId <= 0) return;
+
+        IRenderAPI render = capi.Render;
+        render.CurrentActiveShader?.Stop();
+        render.CurrentFrameBuffer = null;
+        render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
+        render.GetEngineShader(EnumShaderProgram.Gui).Use();
+        render.GLDisableDepthTest();
+        render.GLDepthMask(false);
+        render.GlToggleBlend(false, EnumBlendMode.Standard);
+        render.Render2DTexture(
+            cache.TextureId,
+            0,
+            0,
+            render.FrameWidth,
+            render.FrameHeight,
+            0,
+            ColorUtil.WhiteArgbVec
+        );
+        render.GlToggleBlend(true, EnumBlendMode.Standard);
+        render.GLDepthMask(true);
+    }
+
+    private void ReleaseAtlasFrameCache()
+    {
+        atlasFrameCacheTexture?.Dispose();
+        atlasFrameCacheTexture = null;
+        primaryAtlasSourceTexture = null;
+        primaryAtlasSourceTextureId = 0;
+        lastAtlasWorldRenderMilliseconds = 0;
     }
 
     public void ScheduleNormalWorldShaderRestore()
@@ -2342,6 +2507,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         preparedGameViewDistance = -1;
         surfaceHeightTexture.Reset();
         ReleaseNormalWorldSnapshot();
+        ReleaseAtlasFrameCache();
         InvalidateFogTexture();
         capi.Logger.Notification(
             "[ModernAtlas] Released world-specific atlas rendering resources."
@@ -2362,6 +2528,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         searchMarkerTexture?.Dispose();
         searchMarkerTexture = null;
         ReleaseNormalWorldSnapshot();
+        ReleaseAtlasFrameCache();
         opacityQuad?.Dispose();
         opacityQuad = null;
         scrollViewportRenderer.Dispose();
@@ -2882,6 +3049,11 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "Hides registered plants, bushes and leaves, including mods.",
                 AtlasUiStyle.DetailFont(11),
                 ElementBounds.Fixed(28, 405, 404, 42)
+            )
+            .AddStaticText(
+                "Atlas refresh: 60 FPS moving • 12 FPS idle.",
+                AtlasUiStyle.DetailFont(11),
+                ElementBounds.Fixed(28, 451, 404, 20)
             )
             .Compose(false);
 

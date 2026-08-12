@@ -88,6 +88,9 @@ client-side; an optional server component supplies fog and living-entity policy.
   lighting, full/half/quarter texture detail and an optional transient filter
   for registered plant and leaf materials, including correctly registered mod
   vegetation; shared terrain textures are retained to avoid holes;
+- refreshes the cached atlas world frame at up to 60 FPS while its camera is
+  moving and 12 FPS while idle; GUI input, world ticks and client chunk mesh
+  streaming continue independently at their normal rates;
 - uses compact translucent controls with white typography, a normal Settings
   switch for the default 3D-scroll presentation and map-layer controls, a
   Creative/Cheat-only panel for cave mode,

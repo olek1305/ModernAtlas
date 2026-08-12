@@ -1601,26 +1601,46 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             : "";
         string caveFilterCode = supportsBoundaryColor
             ? """
-    if (atlasHideCaves > 0
-        && modernAtlasBelowSurface(modernAtlasAbsoluteWorldPosition))
+    if (atlasHideCaves > 0)
     {
-        if (modernAtlasInCaveEntranceBand(modernAtlasAbsoluteWorldPosition))
+        float modernAtlasExteriorFloor;
+        bool modernAtlasHasExteriorFloor = modernAtlasReadExteriorFloor(
+            modernAtlasAbsoluteWorldPosition,
+            normal,
+            modernAtlasExteriorFloor
+        );
+        if (!modernAtlasHasExteriorFloor
+            || modernAtlasAbsoluteWorldPosition.y < modernAtlasExteriorFloor)
         {
-            // Keep only a thin band of real opaque faces near the exterior to
-            // quiet clipped cave mouths. Deeper cave walls are discarded so
-            // they cannot trace an underground tunnel network from the side.
-            modernAtlasOriginalMain();
-            outColor = vec4(atlasCaveConcealmentColor, 1.0);
-            return;
+            if (modernAtlasHasExteriorFloor
+                && modernAtlasAbsoluteWorldPosition.y
+                >= modernAtlasExteriorFloor - atlasCaveConcealmentDepth)
+            {
+                // Keep only a thin band of real opaque faces near the exterior to
+                // quiet clipped cave mouths. Deeper cave walls are discarded so
+                // they cannot trace an underground tunnel network from the side.
+                modernAtlasOriginalMain();
+                outColor = vec4(atlasCaveConcealmentColor, 1.0);
+                return;
+            }
+            discard;
         }
-        discard;
     }
 """
             : """
-    if (atlasHideCaves > 0
-        && modernAtlasBelowSurface(modernAtlasAbsoluteWorldPosition))
+    if (atlasHideCaves > 0)
     {
-        discard;
+        float modernAtlasExteriorFloor;
+        bool modernAtlasHasExteriorFloor = modernAtlasReadExteriorFloor(
+            modernAtlasAbsoluteWorldPosition,
+            normal,
+            modernAtlasExteriorFloor
+        );
+        if (!modernAtlasHasExteriorFloor
+            || modernAtlasAbsoluteWorldPosition.y < modernAtlasExteriorFloor)
+        {
+            discard;
+        }
     }
 """;
 
@@ -1706,26 +1726,23 @@ bool modernAtlasReadSurfaceHeight(ivec2 samplePosition, out float surfaceHeight)
     return true;
 }
 
-bool modernAtlasBelowSurface(vec3 absoluteWorldPosition)
+void modernAtlasIncludeSurfaceHeight(
+    ivec2 samplePosition,
+    inout float minimumSurfaceHeight
+)
 {
-    ivec2 samplePosition = ivec2(floor(
-        (absoluteWorldPosition.xz - atlasSurfaceOriginXZ) / atlasSurfaceSampleSize
-    ));
-    float exteriorSurfaceHeight;
-    if (!modernAtlasReadSurfaceHeight(samplePosition, exteriorSurfaceHeight))
+    float candidateHeight;
+    if (modernAtlasReadSurfaceHeight(samplePosition, candidateHeight))
     {
-        return true;
+        minimumSurfaceHeight = min(minimumSurfaceHeight, candidateHeight);
     }
-
-    // The transient texture already contains a one-block exterior envelope.
-    // Every face of the same cliff step therefore uses the same threshold:
-    // top floors and both visible sides remain a complete solid block, while
-    // terrain-covered cave faces still remain below the envelope.
-    return absoluteWorldPosition.y
-        < exteriorSurfaceHeight - atlasVisibleSubsurfaceDepth;
 }
 
-bool modernAtlasInCaveEntranceBand(vec3 absoluteWorldPosition)
+bool modernAtlasReadExteriorFloor(
+    vec3 absoluteWorldPosition,
+    vec3 surfaceNormal,
+    out float exteriorFloor
+)
 {
     ivec2 samplePosition = ivec2(floor(
         (absoluteWorldPosition.xz - atlasSurfaceOriginXZ) / atlasSurfaceSampleSize
@@ -1736,9 +1753,45 @@ bool modernAtlasInCaveEntranceBand(vec3 absoluteWorldPosition)
         return false;
     }
 
-    float safeSurfaceFloor = exteriorSurfaceHeight - atlasVisibleSubsurfaceDepth;
-    return absoluteWorldPosition.y
-        >= safeSurfaceFloor - atlasCaveConcealmentDepth;
+    // A height map alone classifies the underside of a natural overhang as a
+    // deep cave. For vertical faces, follow the face axis toward nearby lower
+    // terrain. For downward faces, inspect a sparse ring around the column.
+    // This keeps only real completed mesh faces on an exterior silhouette; it
+    // does not add a terrain shell, and genuinely deep interiors still remain
+    // below every nearby surface sample.
+    if (abs(surfaceNormal.y) < 0.75)
+    {
+        ivec2 faceAxis = abs(surfaceNormal.x) >= abs(surfaceNormal.z)
+            ? ivec2(1, 0)
+            : ivec2(0, 1);
+        modernAtlasIncludeSurfaceHeight(samplePosition + faceAxis, exteriorSurfaceHeight);
+        modernAtlasIncludeSurfaceHeight(samplePosition - faceAxis, exteriorSurfaceHeight);
+        modernAtlasIncludeSurfaceHeight(samplePosition + faceAxis * 4, exteriorSurfaceHeight);
+        modernAtlasIncludeSurfaceHeight(samplePosition - faceAxis * 4, exteriorSurfaceHeight);
+        modernAtlasIncludeSurfaceHeight(samplePosition + faceAxis * 8, exteriorSurfaceHeight);
+        modernAtlasIncludeSurfaceHeight(samplePosition - faceAxis * 8, exteriorSurfaceHeight);
+        modernAtlasIncludeSurfaceHeight(samplePosition + faceAxis * 16, exteriorSurfaceHeight);
+        modernAtlasIncludeSurfaceHeight(samplePosition - faceAxis * 16, exteriorSurfaceHeight);
+    }
+
+    if (surfaceNormal.y < -0.25)
+    {
+        modernAtlasIncludeSurfaceHeight(samplePosition + ivec2( 4,  0), exteriorSurfaceHeight);
+        modernAtlasIncludeSurfaceHeight(samplePosition + ivec2(-4,  0), exteriorSurfaceHeight);
+        modernAtlasIncludeSurfaceHeight(samplePosition + ivec2( 0,  4), exteriorSurfaceHeight);
+        modernAtlasIncludeSurfaceHeight(samplePosition + ivec2( 0, -4), exteriorSurfaceHeight);
+        modernAtlasIncludeSurfaceHeight(samplePosition + ivec2( 8,  8), exteriorSurfaceHeight);
+        modernAtlasIncludeSurfaceHeight(samplePosition + ivec2(-8,  8), exteriorSurfaceHeight);
+        modernAtlasIncludeSurfaceHeight(samplePosition + ivec2( 8, -8), exteriorSurfaceHeight);
+        modernAtlasIncludeSurfaceHeight(samplePosition + ivec2(-8, -8), exteriorSurfaceHeight);
+        modernAtlasIncludeSurfaceHeight(samplePosition + ivec2(16,  0), exteriorSurfaceHeight);
+        modernAtlasIncludeSurfaceHeight(samplePosition + ivec2(-16,  0), exteriorSurfaceHeight);
+        modernAtlasIncludeSurfaceHeight(samplePosition + ivec2( 0, 16), exteriorSurfaceHeight);
+        modernAtlasIncludeSurfaceHeight(samplePosition + ivec2( 0,-16), exteriorSurfaceHeight);
+    }
+
+    exteriorFloor = exteriorSurfaceHeight - atlasVisibleSubsurfaceDepth;
+    return true;
 }
 
 void main()
