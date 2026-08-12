@@ -22,6 +22,7 @@ uniform float atlasLayerOpacity;
 uniform vec3 atlasSunDirection;
 uniform vec3 atlasSunColor;
 uniform float atlasExposure;
+uniform float atlasTextureMipBias;
 
 in vec2 uv;
 in vec2 uvSize;
@@ -106,7 +107,11 @@ void main(void)
             vec2(1.0) / textureAtlasSize,
             blockTextureSize - vec2(1.0) / textureAtlasSize
         );
-        color = texture(terrainTex, uvBase + offset);
+        color = texture(
+            terrainTex,
+            uvBase + offset,
+            atlasTextureMipBias
+        );
     }
     else
     {
@@ -116,8 +121,12 @@ void main(void)
             blockTextureSize - vec2(1.0) / textureAtlasSize
         );
         color = mix(
-            texture(terrainTex, uvBase + alternateOffset),
-            texture(terrainTex, uv),
+            texture(
+                terrainTex,
+                uvBase + alternateOffset,
+                atlasTextureMipBias
+            ),
+            texture(terrainTex, uv, atlasTextureMipBias),
             stillFrameWeight
         );
     }

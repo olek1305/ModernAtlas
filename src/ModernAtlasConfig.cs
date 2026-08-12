@@ -12,6 +12,7 @@ public sealed class ModernAtlasConfig
     public bool RenderOnScroll { get; set; } = true;
     public bool SkipOpeningAnimation { get; set; }
     public bool CloudsEnabled { get; set; } = true;
+    public int TextureDetailReduction { get; set; }
     public bool LiveLightingEnabled { get; set; } = true;
     public int FixedSunHour { get; set; } = 12;
     public bool LivingEntitiesEnabled { get; set; } = true;

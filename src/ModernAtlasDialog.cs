@@ -16,6 +16,10 @@ namespace ModernAtlas;
 /// </summary>
 public sealed class ModernAtlasDialog : GuiDialog
 {
+    private static readonly string[] PerformanceModeValues =
+        { "full", "half", "quarter" };
+    private static readonly string[] PerformanceModeNames =
+        { "Off — Full textures", "Half texture detail", "Quarter texture detail" };
     private const float StandardMinimumPitchDegrees = 20;
     private const float UnlockedMinimumPitchDegrees = 0;
     private const int DefaultViewDistance = 500;
@@ -127,6 +131,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     private double automatedLanternBlockZ;
     private int automatedSmokeTestMapLayerPhase;
     private bool automatedSmokeTestMapLayerPassed;
+    private bool automatedSmokeTestPerformanceModeSelected;
+    private bool automatedSmokeTestPerformanceModeRendered;
     private bool automatedSmokeTestPreferencesCaptured;
     private int automatedSmokeScreenshotPhase;
     private bool automatedOriginalMapLayersEnabled;
@@ -137,9 +143,11 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool automatedOriginalFogEnabled;
     private bool automatedOriginalLiveLightingEnabled;
     private int automatedOriginalFixedSunHour;
+    private int automatedOriginalTextureDetailReduction;
     private bool pendingInterfaceRecompose;
     private AtlasMapLayer activeMapLayer = AtlasMapLayer.TexturedTerrain;
     private bool synchronizingMapLayerDropdown;
+    private bool synchronizingPerformanceModeDropdown;
 
     internal bool AutomatedSmokeTestRenderedExactWorld { get; private set; }
     internal bool CheatModeEnabledForAutomation => cheatModeEnabled;
@@ -412,6 +420,23 @@ public sealed class ModernAtlasDialog : GuiDialog
                 automatedSmokeTestCreativeOreRevealFrameRendered = true;
                 capi.Logger.Notification(
                     "[ModernAtlas] Automated Creative/Cheat ore-visibility frame rendered with Survival concealment disabled."
+                );
+            }
+            if (automatedSmokeTestPerformanceModeSelected
+                && !automatedSmokeTestPerformanceModeRendered
+                && exactChunkRenderer?.LastRenderedTextureDetailReduction == 2)
+            {
+                automatedSmokeTestPerformanceModeRendered = true;
+                OnPerformanceModeChanged(
+                    PerformanceModeValues[Math.Clamp(
+                        automatedOriginalTextureDetailReduction,
+                        0,
+                        2
+                    )],
+                    true
+                );
+                capi.Logger.Notification(
+                    "[ModernAtlas] Automated performance-mode check rendered exact terrain and stable liquids at quarter texture detail, then restored the original setting."
                 );
             }
             if (safeSurfaceFrameWasAlreadyRendered
@@ -1144,6 +1169,11 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedOriginalFogEnabled = config.FogEnabled;
         automatedOriginalLiveLightingEnabled = config.LiveLightingEnabled;
         automatedOriginalFixedSunHour = config.FixedSunHour;
+        automatedOriginalTextureDetailReduction = Math.Clamp(
+            config.TextureDetailReduction,
+            0,
+            2
+        );
         automatedSmokeTestPreferencesCaptured = true;
         config.MapLayersEnabled = true;
         config.CaveModeEnabled = false;
@@ -1212,6 +1242,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedLanternBlockZ = 0;
         automatedSmokeTestMapLayerPhase = 0;
         automatedSmokeTestMapLayerPassed = false;
+        automatedSmokeTestPerformanceModeSelected = false;
+        automatedSmokeTestPerformanceModeRendered = false;
         automatedSmokeScreenshotPhase = 0;
         AutomatedSmokeTestRenderedExactWorld = false;
     }
@@ -1235,7 +1267,8 @@ public sealed class ModernAtlasDialog : GuiDialog
             && automatedSmokeTestPartialZoomFrameRendered
             && automatedSmokeTestMaximumZoomFrameRendered
             && automatedSmokeTestSearchPassed
-            && automatedSmokeTestMapLayerPassed;
+            && automatedSmokeTestMapLayerPassed
+            && automatedSmokeTestPerformanceModeRendered;
         if (passed && automatedSmokeTestElapsedSeconds < 3f) return;
         if (!passed && automatedSmokeTestElapsedSeconds < 60f) return;
 
@@ -1277,6 +1310,14 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "skip-opening-animation"
             )
             && config.SkipOpeningAnimation == skipOpeningBeforeClick;
+        if (config.TextureDetailReduction == 2)
+        {
+            OnPerformanceModeChanged(PerformanceModeValues[0], true);
+        }
+        OnPerformanceModeChanged(PerformanceModeValues[2], true);
+        automatedSmokeTestPerformanceModeSelected =
+            config.TextureDetailReduction == 2
+            && settingsModal?.GetElement("performance-mode") is GuiElementDropDown;
         bool renderOnScrollBeforeClick = config.RenderOnScroll;
         bool presentationSwitchClicked = settingsOpenedByClick
             && ClickAtlasControlForAutomatedTest(
@@ -1369,6 +1410,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             && settingsSwitchRestored
             && skipOpeningClicked
             && skipOpeningRestored
+            && automatedSmokeTestPerformanceModeSelected
             && presentationSwitchClicked
             && presentationSwitchRestored
             && fixedLightingPrepared
@@ -1736,6 +1778,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         config.FogEnabled = automatedOriginalFogEnabled;
         config.LiveLightingEnabled = automatedOriginalLiveLightingEnabled;
         config.FixedSunHour = automatedOriginalFixedSunHour;
+        config.TextureDetailReduction = automatedOriginalTextureDetailReduction;
         if (config.RenderOnScroll != automatedOriginalRenderOnScroll)
         {
             config.RenderOnScroll = automatedOriginalRenderOnScroll;
@@ -2428,10 +2471,10 @@ public sealed class ModernAtlasDialog : GuiDialog
             )
             .Compose();
 
-        ElementBounds modalRoot = ElementBounds.Fixed(0, 0, 430, 674)
+        ElementBounds modalRoot = ElementBounds.Fixed(0, 0, 430, 710)
             .WithAlignment(EnumDialogArea.CenterMiddle);
         settingsModal = capi.Gui.CreateCompo("modernatlas-settings", modalRoot)
-            .AddStaticCustomDraw(ElementBounds.Fixed(0, 0, 430, 674), AtlasUiStyle.DrawCard)
+            .AddStaticCustomDraw(ElementBounds.Fixed(0, 0, 430, 710), AtlasUiStyle.DrawCard)
             .AddStaticText(
                 "SETTINGS",
                 AtlasUiStyle.TitleFont(20),
@@ -2480,122 +2523,135 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "animations"
             )
             .AddStaticText(
+                "Performance mode",
+                AtlasUiStyle.DetailFont(13),
+                ElementBounds.Fixed(28, 202, 170, 26)
+            )
+            .AddDropDown(
+                PerformanceModeValues,
+                PerformanceModeNames,
+                Math.Clamp(config.TextureDetailReduction, 0, 2),
+                OnPerformanceModeChanged,
+                ElementBounds.Fixed(198, 194, 214, 40),
+                "performance-mode"
+            )
+            .AddStaticText(
                 "Skip scroll transitions",
                 AtlasUiStyle.DetailFont(13),
-                ElementBounds.Fixed(28, 202, 260, 26)
+                ElementBounds.Fixed(28, 238, 260, 26)
             )
             .AddAtlasSwitch(
                 OnSkipOpeningAnimationToggled,
-                ElementBounds.Fixed(350, 196, 62, 38),
+                ElementBounds.Fixed(350, 232, 62, 38),
                 "skip-opening-animation"
             )
             .AddStaticText(
                 "Live clouds",
                 AtlasUiStyle.DetailFont(13),
-                ElementBounds.Fixed(28, 238, 240, 26)
+                ElementBounds.Fixed(28, 274, 240, 26)
             )
             .AddAtlasSwitch(
                 OnCloudsToggled,
-                ElementBounds.Fixed(350, 232, 62, 38),
+                ElementBounds.Fixed(350, 268, 62, 38),
                 "clouds"
             )
             .AddStaticCustomDraw(
-                ElementBounds.Fixed(26, 275, 378, 2),
+                ElementBounds.Fixed(26, 311, 378, 2),
                 AtlasUiStyle.DrawSeparator
             )
             .AddStaticText(
                 "LIVING MODELS",
                 AtlasUiStyle.LabelFont(11),
-                ElementBounds.Fixed(26, 288, 200, 22)
+                ElementBounds.Fixed(26, 324, 200, 22)
             )
             .AddStaticText(
                 "Living entities",
                 AtlasUiStyle.DetailFont(13),
-                ElementBounds.Fixed(28, 316, 240, 26)
+                ElementBounds.Fixed(28, 352, 240, 26)
             )
             .AddAtlasSwitch(
                 OnLivingEntitiesToggled,
-                ElementBounds.Fixed(350, 310, 62, 38),
+                ElementBounds.Fixed(350, 346, 62, 38),
                 "entities"
             )
             .AddStaticText(
                 "Players",
                 AtlasUiStyle.DetailFont(12),
-                ElementBounds.Fixed(48, 352, 200, 24)
+                ElementBounds.Fixed(48, 388, 200, 24)
             )
             .AddAtlasSwitch(
                 OnPlayersToggled,
-                ElementBounds.Fixed(350, 346, 62, 38),
+                ElementBounds.Fixed(350, 382, 62, 38),
                 "players"
             )
             .AddStaticText(
                 "Animals",
                 AtlasUiStyle.DetailFont(12),
-                ElementBounds.Fixed(48, 386, 200, 24)
+                ElementBounds.Fixed(48, 422, 200, 24)
             )
             .AddAtlasSwitch(
                 OnAnimalsToggled,
-                ElementBounds.Fixed(350, 380, 62, 38),
+                ElementBounds.Fixed(350, 416, 62, 38),
                 "animals"
             )
             .AddStaticText(
                 "Hostile mobs",
                 AtlasUiStyle.DetailFont(12),
-                ElementBounds.Fixed(48, 420, 200, 24)
+                ElementBounds.Fixed(48, 456, 200, 24)
             )
             .AddAtlasSwitch(
                 OnMobsToggled,
-                ElementBounds.Fixed(350, 414, 62, 38),
+                ElementBounds.Fixed(350, 450, 62, 38),
                 "mobs"
             )
             .AddStaticText(
                 "NPCs",
                 AtlasUiStyle.DetailFont(12),
-                ElementBounds.Fixed(48, 454, 200, 24)
+                ElementBounds.Fixed(48, 490, 200, 24)
             )
             .AddAtlasSwitch(
                 OnNpcsToggled,
-                ElementBounds.Fixed(350, 448, 62, 38),
+                ElementBounds.Fixed(350, 484, 62, 38),
                 "npcs"
             )
             .AddStaticCustomDraw(
-                ElementBounds.Fixed(26, 490, 378, 2),
+                ElementBounds.Fixed(26, 526, 378, 2),
                 AtlasUiStyle.DrawSeparator
             )
             .AddStaticText(
                 "Use live world sun",
                 AtlasUiStyle.DetailFont(12),
-                ElementBounds.Fixed(28, 504, 200, 24)
+                ElementBounds.Fixed(28, 540, 200, 24)
             )
             .AddAtlasSwitch(
                 OnLiveLightingToggled,
-                ElementBounds.Fixed(350, 496, 62, 38),
+                ElementBounds.Fixed(350, 532, 62, 38),
                 "live-lighting"
             )
             .AddStaticText(
                 "Atlas sun hour (fixed)",
                 AtlasUiStyle.DetailFont(12),
-                ElementBounds.Fixed(28, 541, 180, 24)
+                ElementBounds.Fixed(28, 577, 180, 24)
             )
             .AddAtlasSlider(
                 OnFixedSunHourChanged,
-                ElementBounds.Fixed(212, 532, 200, 42),
+                ElementBounds.Fixed(212, 568, 200, 42),
                 "fixed-sun-hour"
             )
             .AddStaticText(
                 "Render on 3D scroll",
                 AtlasUiStyle.DetailFont(12),
-                ElementBounds.Fixed(28, 583, 250, 24)
+                ElementBounds.Fixed(28, 619, 250, 24)
             )
             .AddAtlasSwitch(
                 OnRenderOnScrollToggled,
-                ElementBounds.Fixed(350, 574, 62, 38),
+                ElementBounds.Fixed(350, 610, 62, 38),
                 "render-on-scroll"
             )
             .AddAtlasButton(
                 "ATLAS VISUAL LAB",
                 OpenVisualLab,
-                ElementBounds.Fixed(24, 620, 382, 44),
+                ElementBounds.Fixed(24, 656, 382, 44),
                 "visual-lab-open",
                 AtlasButtonStyle.Dark
             )
@@ -3373,6 +3429,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             SurfaceSafetyEnabled ? surfaceHeightTexture : null,
             mapLayerTexture,
             EffectiveMapLayerOpacity,
+            Math.Clamp(config.TextureDetailReduction, 0, 2),
             AtlasFogColor,
             Math.Clamp(config.AtlasExposurePercent, 50, 150) / 100f,
             Math.Clamp(config.BoundarySoftnessPercent, 25, 200) / 100f,
@@ -3694,6 +3751,24 @@ public sealed class ModernAtlasDialog : GuiDialog
         SyncSettingsControls();
     }
 
+    private void OnPerformanceModeChanged(string value, bool selected)
+    {
+        if (!selected || synchronizingPerformanceModeDropdown) return;
+
+        int reduction = Array.IndexOf(PerformanceModeValues, value);
+        if (reduction < 0) reduction = 0;
+        if (config.TextureDetailReduction == reduction) return;
+
+        config.TextureDetailReduction = reduction;
+        saveConfig();
+        SyncSettingsControls();
+        capi.Logger.Notification(
+            "[ModernAtlas] Atlas performance mode changed to {0}; terrain and liquid texture detail reduction is {1}x.",
+            PerformanceModeNames[reduction],
+            1 << reduction
+        );
+    }
+
     private void OnSkipOpeningAnimationToggled(bool enabled)
     {
         config.SkipOpeningAnimation = enabled;
@@ -3779,6 +3854,23 @@ public sealed class ModernAtlasDialog : GuiDialog
     private void SyncSettingsControls()
     {
         if (settingsModal == null) return;
+        GuiElementDropDown? performanceMode = settingsModal.GetDropDown(
+            "performance-mode"
+        );
+        if (performanceMode != null)
+        {
+            synchronizingPerformanceModeDropdown = true;
+            try
+            {
+                performanceMode.SetSelectedIndex(
+                    Math.Clamp(config.TextureDetailReduction, 0, 2)
+                );
+            }
+            finally
+            {
+                synchronizingPerformanceModeDropdown = false;
+            }
+        }
         settingsModal.GetAtlasSwitch("render-on-scroll")?.SetValue(
             config.RenderOnScroll
         );

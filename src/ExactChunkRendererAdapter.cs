@@ -112,6 +112,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private Vec3f atlasSunDirection = new(-0.34f, 0.86f, -0.38f);
     private Vec3f atlasSunColor = new(1f, 0.96f, 0.86f);
     private float atlasExposure = 1f;
+    private float atlasTextureMipBias;
     private Vec3f atlasFogColor = new(0.32f, 0.38f, 0.40f);
     private float atlasBoundarySoftness = 1f;
     private float atlasCaveMaskBrightness = 1f;
@@ -132,6 +133,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         entityModelRenderer.LastRenderedEntities;
     public IReadOnlyCollection<(int X, int Z)> CompletedTerrainColumns =>
         consideredTerrainColumns;
+    public int LastRenderedTextureDetailReduction { get; private set; }
 
     private sealed class AtlasFilterShaderState
     {
@@ -455,6 +457,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         AtlasSurfaceHeightTexture? surfaceHeightTexture,
         AtlasMapLayerTexture? mapLayerTexture,
         float mapLayerOpacity,
+        int textureDetailReduction,
         Vec3f fogColor,
         float visualExposureMultiplier,
         float boundarySoftness,
@@ -520,6 +523,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         );
         atlasBoundarySoftness = Math.Clamp(boundarySoftness, 0.25f, 2f);
         atlasCaveMaskBrightness = Math.Clamp(caveMaskBrightness, 0.5f, 1.5f);
+        atlasTextureMipBias = Math.Clamp(textureDetailReduction, 0, 2);
+        LastRenderedTextureDetailReduction = (int)atlasTextureMipBias;
 
         try
         {
@@ -1237,6 +1242,10 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                     "atlasConcealOres",
                     concealSurvivalOres ? 1 : 0
                 );
+                if (shader.HasUniform("atlasTextureMipBias"))
+                {
+                    shader.Uniform("atlasTextureMipBias", atlasTextureMipBias);
+                }
                 if (shader.HasUniform("atlasCaveConcealmentColor"))
                 {
                     shader.Uniform(
@@ -1574,12 +1583,17 @@ uniform vec2 atlasLayerOriginXZ;
 uniform float atlasLayerSampleSize;
 uniform float atlasLayerOpacity;
 uniform int atlasConcealOres;
+uniform float atlasTextureMipBias;
 uniform sampler2D atlasOreMapTex;
 uniform sampler2D atlasStoneTex;
 
 vec4 modernAtlasSampleTerrain(sampler2D sourceTexture, vec2 sourceUv)
 {
-    vec4 originalColor = texture(sourceTexture, sourceUv);
+    vec4 originalColor = texture(
+        sourceTexture,
+        sourceUv,
+        atlasTextureMipBias
+    );
     if (atlasConcealOres <= 0) return originalColor;
 
     ivec2 mappingDimensions = textureSize(atlasOreMapTex, 0);
@@ -2192,6 +2206,7 @@ void main()
         activeLiquidShader.Uniform("atlasSunDirection", atlasSunDirection);
         activeLiquidShader.Uniform("atlasSunColor", atlasSunColor);
         activeLiquidShader.Uniform("atlasExposure", atlasExposure);
+        activeLiquidShader.Uniform("atlasTextureMipBias", atlasTextureMipBias);
         int blockTexturePixels = capi.Settings.Int["textureSize"];
         if (blockTexturePixels <= 0) blockTexturePixels = 32;
         float atlasPixels = capi.BlockTextureAtlas.Size.Width;
@@ -2264,13 +2279,14 @@ void main()
         {
             loggedStableLiquidDiagnostics = true;
             capi.Logger.Notification(
-                "[ModernAtlas] Stable liquid draw: shader pass {0}, {1} atlas managers, {2} rendered triangles, {3} allocated triangles; {4} completed liquid mesh locations allowed and {5} rejected.",
+                "[ModernAtlas] Stable liquid draw: shader pass {0}, {1} atlas managers, {2} rendered triangles, {3} allocated triangles; {4} completed liquid mesh locations allowed and {5} rejected; texture detail reduction={6}x.",
                 activeLiquidShader.PassId,
                 activeManagers,
                 renderedTriangles,
                 allocatedTriangles,
                 allowedLiquidLocationCount,
-                rejectedLiquidLocationCount
+                rejectedLiquidLocationCount,
+                1 << LastRenderedTextureDetailReduction
             );
         }
     }
