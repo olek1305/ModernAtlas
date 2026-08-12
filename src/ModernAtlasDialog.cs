@@ -2306,7 +2306,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
         ElementBounds mapLayerRoot = ElementBounds.Fixed(
             contentX + 18,
-            contentY + 202,
+            contentY + (CreativeCheatSettingsAvailable ? 202 : 112),
             560,
             82
         );
