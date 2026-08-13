@@ -1284,10 +1284,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 capi.Render.CurrentActiveShader?.Stop();
                 shader.Use();
                 shader.Uniform("atlasHideCaves", hideUndergroundCaves ? 1 : 0);
-                if (shader.HasUniform("atlasSeaLevel"))
-                {
-                    shader.Uniform("atlasSeaLevel", (float)capi.World.SeaLevel);
-                }
                 shader.Uniform(
                     "atlasConcealOres",
                     concealSurvivalOres ? 1 : 0
@@ -1403,7 +1399,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         {
             loggedCaveFilterReady = true;
             capi.Logger.Notification(
-                "[ModernAtlas] Opaque terrain above sea level keeps complete exact walls; below sea level it keeps its {0}-block exterior layer with a {1:0.0}-block neutral band, while transparent and liquid geometry is filtered at every height.",
+                "[ModernAtlas] Cave safety uses the local surface filter at every height: opaque terrain keeps its {0}-block exterior layer with a {1:0.0}-block neutral band, while deeper opaque, transparent and liquid geometry is discarded.",
                 VisibleSubsurfaceDepth,
                 CaveEntranceConcealmentDepth
             );
@@ -1630,12 +1626,10 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             : "";
         string caveFilterCode = supportsBoundaryColor
             ? """
-    // Keep the historical high-ground exception for opaque terrain. It is
-    // what prevents a tall exposed cliff from becoming a three-block slice
-    // when its base is below the local heightmap. Transparent materials and
-    // liquids use the all-altitude safety branch below.
-    if (atlasHideCaves > 0
-        && modernAtlasAbsoluteWorldPosition.y < atlasSeaLevel)
+    // Apply the same local surface test above and below sea level. A cave
+    // entrance in a mountain is still an interior cutout; the old sea-level
+    // exception let those walls and tunnels appear while chunks streamed in.
+    if (atlasHideCaves > 0)
     {
         float modernAtlasExteriorFloor;
         bool modernAtlasHasExteriorFloor = modernAtlasReadExteriorFloor(
@@ -1646,6 +1640,16 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         if (!modernAtlasHasExteriorFloor
             || modernAtlasAbsoluteWorldPosition.y < modernAtlasExteriorFloor)
         {
+            if (modernAtlasHasExteriorFloor && normal.y < -0.25)
+            {
+                // Completed downward-facing terrain is the visible underside
+                // of a valley, overhang or mountain when the atlas is tilted
+                // below it. Keep its authored block texture instead of making
+                // the underside transparent. The surface sample is still
+                // required, so an unloaded column cannot reveal a cave.
+                modernAtlasOriginalMain();
+                return;
+            }
             if (modernAtlasHasExteriorFloor
                 && modernAtlasAbsoluteWorldPosition.y
                 >= modernAtlasExteriorFloor - atlasCaveConcealmentDepth)
@@ -1685,7 +1689,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
 
 // MODERNATLAS_SURFACE_AND_BOUNDARY_FILTER
 uniform int atlasHideCaves;
-uniform float atlasSeaLevel;
 uniform sampler2D atlasSurfaceHeightTex;
 uniform vec2 atlasSurfaceOriginXZ;
 uniform float atlasSurfaceSampleSize;
