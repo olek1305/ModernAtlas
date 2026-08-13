@@ -10,7 +10,6 @@ uniform float disclosureRadius;
 uniform float disclosureFeather;
 uniform vec3 boundaryFogColor;
 uniform int atlasHideCaves;
-uniform float atlasSeaLevel;
 uniform sampler2D atlasSurfaceHeightTex;
 uniform vec2 atlasSurfaceOriginXZ;
 uniform float atlasSurfaceSampleSize;
@@ -78,7 +77,7 @@ void main(void)
         disclosureRadius,
         disclosureDistance
     );
-    if (atlasHideCaves > 0 && absoluteWorldPosition.y < atlasSeaLevel)
+    if (atlasHideCaves > 0)
     {
         ivec2 samplePosition = ivec2(floor(
             (absoluteWorldPosition.xz - atlasSurfaceOriginXZ) / atlasSurfaceSampleSize

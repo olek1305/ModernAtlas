@@ -36,6 +36,7 @@ public sealed class ModernAtlasSystem : ModSystem
     private string? activeWorldIdentifier;
     private int worldSessionGeneration;
     private bool automatedWorldExitRequested;
+    private bool automatedSmokeTestOpeningStarted;
 
     public override bool ShouldLoad(EnumAppSide side) => true;
 
@@ -163,6 +164,15 @@ public sealed class ModernAtlasSystem : ModSystem
 
     private bool OnOpenMap(KeyCombination keyCombination)
     {
+        // The automated path owns the complete open/close sequence. A real G
+        // event can still arrive from the desktop or a stale hotkey while the
+        // world is settling; allowing it here races the scheduled transition
+        // and opens the atlas once without animation and once with it.
+        if (AutomatedSmokeTestEnabled)
+        {
+            return true;
+        }
+
         if (cheatModeDialog?.IsOpened() == true)
         {
             cheatModeDialog.Focus();
@@ -523,6 +533,7 @@ public sealed class ModernAtlasSystem : ModSystem
 
         int sessionGeneration = ++worldSessionGeneration;
         activeWorldIdentifier = worldIdentifier;
+        automatedSmokeTestOpeningStarted = false;
         cheatModeDialog?.CancelWithoutDecision();
         cheatModeDialog?.Dispose();
         cheatModeDialog = null;
@@ -666,6 +677,15 @@ public sealed class ModernAtlasSystem : ModSystem
             return;
         }
 
+        if (automatedSmokeTestOpeningStarted) return;
+        automatedSmokeTestOpeningStarted = true;
+
+        // Recover from a direct atlas open that may have happened before the
+        // scheduled smoke callback. The test must own exactly one opening
+        // transition, never stack a second dialog over the first one.
+        if (dialog.IsOpened()) dialog.TryClose();
+        if (openingTransition.IsOpened()) openingTransition.CancelWithoutOpening();
+
         dialog.BeginAutomatedSmokeTest(
             passed => FinishAutomatedSmokeTest(
                 worldIdentifier,
@@ -707,7 +727,7 @@ public sealed class ModernAtlasSystem : ModSystem
         {
             return;
         }
-        if (!passed || !dialog.TryOpen())
+        if (!passed || (!dialog.IsOpened() && !dialog.TryOpen()))
         {
             clientApi.Logger.Error(
                 "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: the opening transition or atlas open check failed."
