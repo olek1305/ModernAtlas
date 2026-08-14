@@ -20,7 +20,7 @@ void main(void)
         // The sheet is gently bowed toward the viewer at both rollers.
         objectNormal = normalize(vec3(-vertexPositionIn.x * 0.32, 0.0, 1.0));
     }
-    else if (materialKind < 4 || materialKind == 9)
+    else if (materialKind < 4)
     {
         // Every rolled-paper, wood and metal part is a closed Y-axis cylinder.
         // Cap vertices sit just beyond the side vertices so their normal can
@@ -29,7 +29,7 @@ void main(void)
             ? vec3(0.0, sign(vertexPositionIn.y), 0.0)
             : normalize(vec3(vertexPositionIn.x, 0.0, vertexPositionIn.z));
     }
-    else if (materialKind == 10 || materialKind == 11 || materialKind == 12)
+    else if (materialKind >= 9 && materialKind <= 14)
     {
         objectNormal = vec3(0.0, 0.0, 1.0);
     }

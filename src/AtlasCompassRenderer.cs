@@ -15,6 +15,11 @@ internal sealed class AtlasCompassRenderer : IDisposable
 {
     private const float TravelSeconds = 0.28f;
     private const float TossDurationSeconds = 0.62f;
+    private const float HousingScale = 0.3825f;
+    private const float OutlineScale = 0.3435f;
+    private const float DialScale = 0.297f;
+    private const float CompassNeedleScale = 0.235f;
+    private const float SundialIndicatorScale = 0.300f;
     private readonly ICoreClientAPI capi;
     private readonly Func<IShaderProgram?> shaderProvider;
     private readonly SeraphForearmRenderer forearms;
@@ -22,7 +27,10 @@ internal sealed class AtlasCompassRenderer : IDisposable
     private MeshRef? outlineMesh;
     private MeshRef? faceMesh;
     private MeshRef? needleMesh;
-    private LoadedTexture? dialTexture;
+    private MeshRef? sundialShadowMesh;
+    private MeshRef? sundialGnomonMesh;
+    private LoadedTexture? compassDialTexture;
+    private LoadedTexture? sundialDialTexture;
     private float visibility;
     private bool targetVisible;
     private bool stowingForClose;
@@ -79,6 +87,9 @@ internal sealed class AtlasCompassRenderer : IDisposable
 
     public void Render(
         bool enabled,
+        bool timeMode,
+        float atlasHour,
+        bool sundialShowsTime,
         float atlasYawDegrees,
         AtlasViewportBounds viewport,
         float realDeltaTime
@@ -103,7 +114,18 @@ internal sealed class AtlasCompassRenderer : IDisposable
         if (!EnsureMeshes()) return;
 
         IShaderProgram? shader = shaderProvider();
-        if (shader == null || shader.Disposed || housingMesh == null || faceMesh == null || needleMesh == null || dialTexture?.TextureId <= 0)
+        LoadedTexture? selectedDialTexture = timeMode
+            ? sundialDialTexture
+            : compassDialTexture;
+        if (shader == null
+            || shader.Disposed
+            || housingMesh == null
+            || faceMesh == null
+            || needleMesh == null
+            || sundialShadowMesh == null
+            || sundialGnomonMesh == null
+            || selectedDialTexture == null
+            || selectedDialTexture.TextureId <= 0)
         {
             return;
         }
@@ -194,7 +216,7 @@ internal sealed class AtlasCompassRenderer : IDisposable
             }
             shader.Use();
             shader.UniformMatrix("projectionMatrix", projection);
-            shader.BindTexture2D("compassTex", dialTexture!.TextureId, 1);
+            shader.BindTexture2D("compassTex", selectedDialTexture.TextureId, 1);
             if (!forearmsPrepared)
             {
                 forearmsPrepared = forearms.Prepare();
@@ -205,36 +227,99 @@ internal sealed class AtlasCompassRenderer : IDisposable
                 forearms.RenderRightArm(shader, Mat4f.Create(), elbowX, elbowY, gripX, gripY, alpha);
             }
 
-            // The housing, dial and glass are a small authored model rather
-            // than a copied image. The dial rotates only its needle, with
-            // world north (positive Z) at its top when atlas yaw is zero.
-            float[] body = Mat4f.Create();
-            Mat4f.Translate(body, body, compassX, compassY, -0.18f);
-            Mat4f.RotateX(body, body, MathF.PI * 0.5f);
-            Mat4f.RotateZ(body, body, tossFlip * 0.18f);
-            RenderComponent(shader, housingMesh, body, 9, 0.19f, alpha);
-            // The cylindrical casing turns around the screen Z axis, but the
-            // dial must remain in the screen XY plane. Reusing the rotated
-            // casing matrix made the texture edge-on, leaving only its brown
-            // rim visible instead of the compass face.
-            float[] dial = Mat4f.Create();
-            Mat4f.Translate(dial, dial, compassX, compassY, -0.060f);
-            Mat4f.RotateY(dial, dial, tossFlip);
-            RenderComponent(shader, outlineMesh!, dial, 12, 0.171f, alpha);
+            // Both instrument modes use the same hand-made wooden housing.
+            // Only the simple face and its functional indicator change, so
+            // the compass and sundial read as parts of one traveller's kit.
+            // Rotate every physical layer from one shared instrument pose.
+            // The old casing used a slow Z spin while the dial flipped around
+            // Y, which separated the circular layers and looked like several
+            // ghost housings during the toss.
+            float[] instrument = Mat4f.Create();
+            Mat4f.Translate(instrument, instrument, compassX, compassY, -0.18f);
+            Mat4f.RotateY(instrument, instrument, tossFlip);
+
+            // A single flat wooden shell is intentional here. A closed
+            // cylinder has several overlapping caps and side faces, while
+            // this late GUI pass cannot reuse the world's depth buffer. Seen
+            // edge-on during the toss, those faces looked like ghost copies.
+            float[] body = Mat4f.CloneIt(instrument);
+            RenderComponent(shader, housingMesh, body, 9, HousingScale, alpha);
+
+            float[] dial = Mat4f.CloneIt(instrument);
+            // Keep the face slightly above the wooden cylinder in the
+            // instrument's own space, so that offset follows the same flip.
+            Mat4f.Translate(dial, dial, 0, 0, 0.120f);
             float dialAlpha = alpha * dialVisibility;
-            RenderComponent(shader, faceMesh, dial, 10, 0.145f, dialAlpha);
-            float[] needle = Mat4f.CloneIt(dial);
-            Mat4f.Translate(needle, needle, 0, 0, 0.008f);
-            // During the toss the needle is physically carried by the case.
-            // Fade it while the face turns edge-on so it cannot look painted
-            // above the rear of the spinning compass.
-            Mat4f.RotateZ(
-                needle,
-                needle,
-                NeedleRotationRadians(atlasYawDegrees) + tossFlip
-            );
-            float needleAlpha = dialAlpha * (1f - airborne * 0.35f);
-            RenderComponent(shader, needleMesh, needle, 11, 0.115f, needleAlpha);
+            // The charred ring belongs to the front face. Hiding it with the
+            // face on the back turn leaves exactly one visible wooden casing.
+            RenderComponent(shader, outlineMesh!, dial, 12, OutlineScale, dialAlpha);
+            RenderComponent(shader, faceMesh, dial, 10, DialScale, dialAlpha);
+            float indicatorAlpha = dialAlpha * (1f - airborne * 0.35f);
+            if (timeMode)
+            {
+                // A sundial cannot disclose a time while the sun is down.
+                // Keep the physical gnomon, but draw its hour shadow only in
+                // the explicitly supported 06:00-18:00 daylight interval.
+                if (sundialShowsTime)
+                {
+                    float[] shadow = Mat4f.CloneIt(dial);
+                    // The dial's authored hour-line origin is slightly below
+                    // its geometric center. Rotate a local ray first, then
+                    // place that pivot exactly on the gnomon foot.
+                    Mat4f.Translate(
+                        shadow,
+                        shadow,
+                        0,
+                        -0.047f * SundialIndicatorScale,
+                        0.006f
+                    );
+                    Mat4f.RotateZ(
+                        shadow,
+                        shadow,
+                        SundialShadowRotationRadians(atlasHour) + tossFlip
+                    );
+                    RenderComponent(
+                        shader,
+                        sundialShadowMesh,
+                        shadow,
+                        13,
+                        SundialIndicatorScale,
+                        indicatorAlpha * 0.88f
+                    );
+                }
+
+                float[] gnomon = Mat4f.CloneIt(dial);
+                Mat4f.Translate(gnomon, gnomon, 0, 0, 0.012f);
+                RenderComponent(
+                    shader,
+                    sundialGnomonMesh,
+                    gnomon,
+                    14,
+                    SundialIndicatorScale,
+                    indicatorAlpha
+                );
+            }
+            else
+            {
+                float[] needle = Mat4f.CloneIt(dial);
+                Mat4f.Translate(needle, needle, 0, 0, 0.008f);
+                // During the toss the needle is physically carried by the case.
+                // Fade it while the face turns edge-on so it cannot look painted
+                // above the rear of the spinning compass.
+                Mat4f.RotateZ(
+                    needle,
+                    needle,
+                    NeedleRotationRadians(atlasYawDegrees) + tossFlip
+                );
+                RenderComponent(
+                    shader,
+                    needleMesh,
+                    needle,
+                    11,
+                    CompassNeedleScale,
+                    indicatorAlpha
+                );
+            }
         }
         finally
         {
@@ -250,14 +335,26 @@ internal sealed class AtlasCompassRenderer : IDisposable
 
     private bool EnsureMeshes()
     {
-        if (housingMesh != null && outlineMesh != null && faceMesh != null && needleMesh != null && dialTexture?.TextureId > 0) return true;
+        if (housingMesh != null
+            && outlineMesh != null
+            && faceMesh != null
+            && needleMesh != null
+            && sundialShadowMesh != null
+            && sundialGnomonMesh != null
+            && compassDialTexture?.TextureId > 0
+            && sundialDialTexture?.TextureId > 0)
+        {
+            return true;
+        }
         try
         {
-            housingMesh ??= capi.Render.UploadMesh(CreateCylinderMesh(18));
+            housingMesh ??= capi.Render.UploadMesh(CreateDiscMesh(48));
             outlineMesh ??= capi.Render.UploadMesh(CreateDiscMesh(32));
             faceMesh ??= capi.Render.UploadMesh(CreateQuadMesh());
             needleMesh ??= capi.Render.UploadMesh(CreateNeedleMesh());
-            EnsureDialTexture();
+            sundialShadowMesh ??= capi.Render.UploadMesh(CreateSundialShadowMesh());
+            sundialGnomonMesh ??= capi.Render.UploadMesh(CreateSundialGnomonMesh());
+            EnsureDialTextures();
             return true;
         }
         catch (Exception exception)
@@ -310,7 +407,10 @@ internal sealed class AtlasCompassRenderer : IDisposable
         outlineMesh?.Dispose(); outlineMesh = null;
         faceMesh?.Dispose(); faceMesh = null;
         needleMesh?.Dispose(); needleMesh = null;
-        dialTexture?.Dispose(); dialTexture = null;
+        sundialShadowMesh?.Dispose(); sundialShadowMesh = null;
+        sundialGnomonMesh?.Dispose(); sundialGnomonMesh = null;
+        compassDialTexture?.Dispose(); compassDialTexture = null;
+        sundialDialTexture?.Dispose(); sundialDialTexture = null;
     }
 
     public void Dispose()
@@ -369,15 +469,21 @@ internal sealed class AtlasCompassRenderer : IDisposable
         return mesh;
     }
 
-    private void EnsureDialTexture()
+    private void EnsureDialTextures()
     {
-        if (dialTexture?.TextureId > 0) return;
+        EnsureCompassDialTexture();
+        EnsureSundialDialTexture();
+    }
+
+    private void EnsureCompassDialTexture()
+    {
+        if (compassDialTexture?.TextureId > 0) return;
         const int size = 256;
-        dialTexture ??= new LoadedTexture(capi);
+        compassDialTexture ??= new LoadedTexture(capi);
         using ImageSurface surface = new(Format.Argb32, size, size);
         using Context context = new(surface);
         context.Operator = Operator.Source;
-        context.SetSourceRGBA(0.12, 0.075, 0.028, 1);
+        context.SetSourceRGBA(0, 0, 0, 0);
         context.Paint();
         context.Operator = Operator.Over;
 
@@ -416,7 +522,93 @@ internal sealed class AtlasCompassRenderer : IDisposable
         context.SetSourceRGBA(0.65, 0.10, 0.055, 1);
         context.Arc(128, 128, 9, 0, Math.PI * 2);
         context.Fill();
-        capi.Gui.LoadOrUpdateCairoTexture(surface, true, ref dialTexture);
+        capi.Gui.LoadOrUpdateCairoTexture(
+            surface,
+            true,
+            ref compassDialTexture
+        );
+    }
+
+    private void EnsureSundialDialTexture()
+    {
+        if (sundialDialTexture?.TextureId > 0) return;
+        const int size = 256;
+        const double centerX = 128;
+        const double centerY = 140;
+        sundialDialTexture ??= new LoadedTexture(capi);
+        using ImageSurface surface = new(Format.Argb32, size, size);
+        using Context context = new(surface);
+        context.Operator = Operator.Source;
+        context.SetSourceRGBA(0, 0, 0, 0);
+        context.Paint();
+        context.Operator = Operator.Over;
+
+        // Warm, uneven timber replaces the sterile paper-and-ink diagram
+        // look. Sparse curved grain and burned marks keep the face legible at
+        // its small in-game size without turning it into a technical plate.
+        context.SetSourceRGBA(0.54, 0.32, 0.12, 1);
+        context.Arc(128, 128, 118, 0, Math.PI * 2);
+        context.Fill();
+        context.SetSourceRGBA(0.16, 0.075, 0.020, 1);
+        context.LineWidth = 9;
+        context.Arc(128, 128, 113, 0, Math.PI * 2);
+        context.Stroke();
+        context.SetSourceRGBA(0.30, 0.16, 0.050, 1);
+        context.LineWidth = 3;
+        context.Arc(128, 128, 96, 0, Math.PI * 2);
+        context.Stroke();
+
+        context.SetSourceRGBA(0.18, 0.080, 0.018, 0.95);
+        for (int hour = 6; hour <= 18; hour++)
+        {
+            double angle = (hour - 12) * Math.PI / 12 - Math.PI * 0.5;
+            bool labelledHour = hour % 3 == 0;
+            double inner = labelledHour ? 13 : 20;
+            double outer = labelledHour ? 70 : 82;
+            context.LineWidth = labelledHour ? 3.4 : 1.9;
+            context.MoveTo(
+                centerX + Math.Cos(angle) * inner,
+                centerY + Math.Sin(angle) * inner
+            );
+            context.LineTo(
+                centerX + Math.Cos(angle) * outer,
+                centerY + Math.Sin(angle) * outer
+            );
+            context.Stroke();
+        }
+
+        context.SelectFontFace("Sans", FontSlant.Normal, FontWeight.Bold);
+        context.SetFontSize(24);
+        context.SetSourceRGBA(0.14, 0.060, 0.014, 1);
+        DrawSundialHour(context, "6", 6, centerX, centerY);
+        DrawSundialHour(context, "9", 9, centerX, centerY);
+        DrawSundialHour(context, "12", 12, centerX, centerY);
+        DrawSundialHour(context, "15", 15, centerX, centerY);
+        DrawSundialHour(context, "18", 18, centerX, centerY);
+        context.Arc(centerX, centerY, 7, 0, Math.PI * 2);
+        context.Fill();
+        capi.Gui.LoadOrUpdateCairoTexture(
+            surface,
+            true,
+            ref sundialDialTexture
+        );
+    }
+
+    private static void DrawSundialHour(
+        Context context,
+        string label,
+        int hour,
+        double centerX,
+        double centerY
+    )
+    {
+        double angle = (hour - 12) * Math.PI / 12 - Math.PI * 0.5;
+        DrawCenteredText(
+            context,
+            label,
+            centerX + Math.Cos(angle) * 88,
+            centerY + Math.Sin(angle) * 88
+        );
     }
 
     private static void DrawCenteredText(Context context, string text, double x, double y)
@@ -430,11 +622,36 @@ internal sealed class AtlasCompassRenderer : IDisposable
     {
         MeshData mesh = new(4);
         int color = unchecked((int)0xffffffff);
-        mesh.AddVertex(-0.13f, -0.42f, 0, 0, 0, color);
-        mesh.AddVertex(0.13f, -0.42f, 0, 1, 0, color);
-        mesh.AddVertex(0.055f, 0.46f, 0, 1, 1, color);
-        mesh.AddVertex(-0.055f, 0.46f, 0, 0, 1, color);
+        mesh.AddVertex(-0.085f, -0.35f, 0, 0, 0, color);
+        mesh.AddVertex(0.085f, -0.35f, 0, 1, 0, color);
+        mesh.AddVertex(0.038f, 0.39f, 0, 1, 1, color);
+        mesh.AddVertex(-0.038f, 0.39f, 0, 0, 1, color);
         mesh.AddQuadIndices(0);
+        return mesh;
+    }
+
+    private static MeshData CreateSundialShadowMesh()
+    {
+        MeshData mesh = new(4);
+        int color = unchecked((int)0xffffffff);
+        mesh.AddVertex(-0.014f, 0, 0, 0, 0, color);
+        mesh.AddVertex(0.014f, 0, 0, 1, 0, color);
+        mesh.AddVertex(0.018f, 0.30f, 0, 1, 1, color);
+        mesh.AddVertex(-0.018f, 0.30f, 0, 0, 1, color);
+        mesh.AddQuadIndices(0);
+        return mesh;
+    }
+
+    private static MeshData CreateSundialGnomonMesh()
+    {
+        MeshData mesh = new(3);
+        int color = unchecked((int)0xffffffff);
+        mesh.AddVertex(-0.060f, -0.060f, 0, 0, 0, color);
+        mesh.AddVertex(0.060f, -0.060f, 0, 1, 0, color);
+        mesh.AddVertex(0, 0.145f, 0, 0.5f, 1, color);
+        mesh.AddIndex(0);
+        mesh.AddIndex(1);
+        mesh.AddIndex(2);
         return mesh;
     }
 
@@ -476,6 +693,21 @@ internal sealed class AtlasCompassRenderer : IDisposable
     {
         float normalizedYaw = interpolatedAtlasYawDegrees % 360f;
         return -normalizedYaw * GameMath.DEG2RAD;
+    }
+    internal static float SundialShadowRotationRadians(float atlasHour)
+    {
+        float normalizedHour = atlasHour % 24f;
+        if (normalizedHour < 0) normalizedHour += 24f;
+        // Cairo's dial texture has 06:00 on the left and 18:00 on the right.
+        // Negate the OpenGL Z rotation so the live shadow lands on the same
+        // authored hour lines instead of mirroring morning and afternoon.
+        return -(normalizedHour - 12f) / 12f * MathF.PI;
+    }
+    internal static bool IsSundialTimeVisible(float atlasHour)
+    {
+        float normalizedHour = atlasHour % 24f;
+        if (normalizedHour < 0) normalizedHour += 24f;
+        return normalizedHour >= 6f && normalizedHour <= 18f;
     }
     private static float NormalizeSignedDegrees(float degrees)
     {

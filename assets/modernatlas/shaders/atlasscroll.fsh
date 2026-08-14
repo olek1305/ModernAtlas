@@ -218,13 +218,20 @@ void main(void)
     }
     else if (materialKind == 9)
     {
-        // Atlas compass casing: a deliberately simple, authored brass body.
-        float brushed = sin(uv.y * 94.0 + uv.x * 7.0) * 0.035;
-        baseColor = vec3(0.40, 0.25, 0.075) + brushed;
+        // One rough, dark wooden casing shared by compass and sundial.
+        float growthRing = sin(uv.y * 66.0 + uv.x * 10.0) * 0.5 + 0.5;
+        float knot = hash21(floor(uv * vec2(22.0, 9.0)));
+        baseColor = mix(
+            vec3(0.20, 0.095, 0.025),
+            vec3(0.43, 0.245, 0.070),
+            growthRing * 0.72 + knot * 0.12
+        );
     }
     else if (materialKind == 10)
     {
-        baseColor = texture(compassTex, uv).rgb;
+        vec4 instrumentFace = texture(compassTex, uv);
+        baseColor = instrumentFace.rgb;
+        materialAlpha *= instrumentFace.a;
     }
     else if (materialKind == 11)
     {
@@ -234,8 +241,23 @@ void main(void)
     }
     else if (materialKind == 12)
     {
-        // Narrow dark metal outline between the compass case and its dial.
+        // Charred-looking boundary between the wooden case and either dial.
         baseColor = vec3(0.055, 0.038, 0.020);
+    }
+    else if (materialKind == 13)
+    {
+        // High-contrast, narrow sundial shadow: this is the time indicator.
+        baseColor = vec3(0.035, 0.014, 0.004);
+    }
+    else if (materialKind == 14)
+    {
+        // A small hand-cut wooden gnomon, lighter than its moving shadow.
+        float wornEdge = smoothstep(0.030, 0.060, abs(objectPosition.x));
+        baseColor = mix(
+            vec3(0.31, 0.145, 0.035),
+            vec3(0.58, 0.34, 0.105),
+            wornEdge * 0.48
+        );
     }
     else
     {

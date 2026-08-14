@@ -157,6 +157,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool automatedOriginalFogEnabled;
     private bool automatedOriginalLiveLightingEnabled;
     private int automatedOriginalFixedSunHour;
+    private bool automatedOriginalShowPlayerCompass;
+    private string automatedOriginalHandheldInstrumentMode = "compass";
     private int automatedOriginalTextureDetailReduction;
     private bool automatedOriginalPerformanceLightingEnabled;
     private bool automatedOriginalHideVegetation;
@@ -178,6 +180,43 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     internal bool AutomatedSmokeTestRenderedExactWorld { get; private set; }
     internal bool CheatModeEnabledForAutomation => cheatModeEnabled;
+
+    private string HandheldInstrumentMode => string.Equals(
+        config.HandheldInstrumentMode,
+        "time",
+        StringComparison.OrdinalIgnoreCase
+    )
+        ? "time"
+        : "compass";
+
+    private int HandheldInstrumentChoiceIndex => !config.ShowPlayerCompass
+        ? 0
+        : HandheldInstrumentMode == "time"
+            ? 2
+            : 1;
+
+    private float HandheldInstrumentHour
+    {
+        get
+        {
+            IGameCalendar? calendar = capi.World.Calendar;
+            return calendar == null
+                ? 0f
+                : (float)calendar.HourOfDay;
+        }
+    }
+
+    private bool HandheldInstrumentShowsTime
+    {
+        get
+        {
+            IGameCalendar? calendar = capi.World.Calendar;
+            return calendar != null
+                && AtlasCompassRenderer.IsSundialTimeVisible(
+                    (float)calendar.HourOfDay
+                );
+        }
+    }
 
     private int GameViewDistance
     {
@@ -644,6 +683,9 @@ public sealed class ModernAtlasDialog : GuiDialog
         // EXIT or other atlas controls, even if a driver rejects the scene.
         compassRenderer.Render(
             config.ShowPlayerCompass,
+            HandheldInstrumentMode == "time",
+            HandheldInstrumentHour,
+            HandheldInstrumentShowsTime,
             yawDegrees,
             AtlasViewport,
             atlasRealDeltaTime
@@ -1439,6 +1481,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedOriginalFogEnabled = config.FogEnabled;
         automatedOriginalLiveLightingEnabled = config.LiveLightingEnabled;
         automatedOriginalFixedSunHour = config.FixedSunHour;
+        automatedOriginalShowPlayerCompass = config.ShowPlayerCompass;
+        automatedOriginalHandheldInstrumentMode = HandheldInstrumentMode;
         automatedOriginalTextureDetailReduction = Math.Clamp(
             config.TextureDetailReduction,
             0,
@@ -1454,6 +1498,11 @@ public sealed class ModernAtlasDialog : GuiDialog
         config.CameraAngleLocked = false;
         config.RenderOnScroll = true;
         config.FogEnabled = true;
+        // Capture the resized compass in the early smoke frames. The normal
+        // interface exercise later selects Time, so one run now covers both
+        // instrument faces before restoring the player's original choice.
+        config.ShowPlayerCompass = true;
+        config.HandheldInstrumentMode = "compass";
         string? forcedSunHour = Environment.GetEnvironmentVariable(
             SmokeFixedSunHourEnvironmentVariable
         );
@@ -1674,6 +1723,13 @@ public sealed class ModernAtlasDialog : GuiDialog
                     "live-lighting"
                 )
                 && config.LiveLightingEnabled);
+        OnHandheldInstrumentChoiceChanged("compass", true);
+        bool timeInstrumentSelected = ClickAtlasControlForAutomatedTest(
+                settingsModal,
+                "handheld-instrument"
+            )
+            && config.ShowPlayerCompass
+            && HandheldInstrumentMode == "time";
         bool settingsClosedByClick = settingsOpenedByClick
             && ClickAtlasControlForAutomatedTest(settingsModal, "settings-close")
             && !settingsModalOpen;
@@ -1717,6 +1773,8 @@ public sealed class ModernAtlasDialog : GuiDialog
                 is GuiElementAtlasSwitch
             && settingsModal?.GetElement("performance-open")
                 is GuiElementAtlasButton
+            && settingsModal?.GetElement("handheld-instrument")
+                is GuiElementAtlasChoice
             && performanceModal?.GetElement("hide-vegetation")
                 is GuiElementAtlasSwitch
             && creativeSettingsModal?.GetElement("camera-angle-lock")
@@ -1739,6 +1797,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             && sliderBoundaryDragHandled
             && sliderBoundaryDragClamped
             && liveLightingRestored
+            && timeInstrumentSelected
             && settingsClosedByClick
             && creativeOpenedByClick
             && creativeClosedByClick
@@ -1755,14 +1814,14 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (automatedSmokeTestInterfaceControlsPassed)
         {
             capi.Logger.Notification(
-                "[ModernAtlas] Automated smoke test exercised the compact neumorphic controls, scroll/full-screen presentation, map-layer and skip-opening switches, Creative/Cheat cave/search/camera controls, Escape-restored hidden UI and held-item suppression for {0} living models.",
+                "[ModernAtlas] Automated smoke test exercised the compact neumorphic controls, Compass/Time instrument selector, scroll/full-screen presentation, map-layer and skip-opening switches, Creative/Cheat cave/search/camera controls, Escape-restored hidden UI and held-item suppression for {0} living models.",
                 renderedEntityCount
             );
         }
         else
         {
             capi.Logger.Error(
-                "[ModernAtlas] Automated interface-controls test failed: access={0}, settingsOpen={1}, mapLayerSwitch={2}/{3}, skipOpening={4}/{5}, presentation={6}/{7}, fixedLighting={8}/{9}, sliderBoundary={10}/{11}, settingsClose={12}, creativeOpen={13}, creativeClose={14}, layers={15}, search={16}, safeSurface={17}, cave={18}, angleLock={19}, yaw={20}, hidden={21}, restored={22}, neumorphic={23}, heldItems={24}/{25}.",
+                "[ModernAtlas] Automated interface-controls test failed: access={0}, settingsOpen={1}, mapLayerSwitch={2}/{3}, skipOpening={4}/{5}, presentation={6}/{7}, fixedLighting={8}/{9}, sliderBoundary={10}/{11}, timeInstrument={12}, settingsClose={13}, creativeOpen={14}, creativeClose={15}, layers={16}, search={17}, safeSurface={18}, cave={19}, angleLock={20}, yaw={21}, hidden={22}, restored={23}, neumorphic={24}, heldItems={25}/{26}.",
                 accessAvailable,
                 settingsOpenedByClick,
                 settingsSwitchClicked,
@@ -1775,6 +1834,7 @@ public sealed class ModernAtlasDialog : GuiDialog
                 liveLightingRestored,
                 sliderBoundaryDragHandled,
                 sliderBoundaryDragClamped,
+                timeInstrumentSelected,
                 settingsClosedByClick,
                 creativeOpenedByClick,
                 creativeClosedByClick,
@@ -2120,6 +2180,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         config.FogEnabled = automatedOriginalFogEnabled;
         config.LiveLightingEnabled = automatedOriginalLiveLightingEnabled;
         config.FixedSunHour = automatedOriginalFixedSunHour;
+        config.ShowPlayerCompass = automatedOriginalShowPlayerCompass;
+        config.HandheldInstrumentMode = automatedOriginalHandheldInstrumentMode;
         config.TextureDetailReduction = automatedOriginalTextureDetailReduction;
         config.PerformanceLightingEnabled = automatedOriginalPerformanceLightingEnabled;
         config.HideVegetation = automatedOriginalHideVegetation;
@@ -2859,7 +2921,7 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "exit-button"
             )
             .AddAtlasButton(
-                "COMPASS",
+                "INSTRUMENT",
                 ToggleCompass,
                 ElementBounds.Fixed(actionX, compassY, 214, 44),
                 "compass-button",
@@ -3154,14 +3216,17 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "render-on-scroll"
             )
             .AddStaticText(
-                "Animated compass",
+                "Handheld instrument",
                 AtlasUiStyle.DetailFont(12),
                 ElementBounds.Fixed(28, 692, 250, 24)
             )
-            .AddAtlasSwitch(
-                OnPlayerCompassToggled,
-                ElementBounds.Fixed(350, 682, 62, 38),
-                "player-compass"
+            .AddAtlasChoice(
+                new[] { "off", "compass", "time" },
+                new[] { "Off", "Compass", "Time" },
+                HandheldInstrumentChoiceIndex,
+                OnHandheldInstrumentChoiceChanged,
+                ElementBounds.Fixed(212, 682, 200, 42),
+                "handheld-instrument"
             )
             .AddAtlasButton(
                 "ATLAS VISUAL LAB",
@@ -4775,6 +4840,28 @@ public sealed class ModernAtlasDialog : GuiDialog
         return true;
     }
 
+    private void OnHandheldInstrumentChoiceChanged(string value, bool selected)
+    {
+        if (!selected) return;
+        if (string.Equals(value, "off", StringComparison.OrdinalIgnoreCase))
+        {
+            config.ShowPlayerCompass = false;
+        }
+        else
+        {
+            config.HandheldInstrumentMode = string.Equals(
+                value,
+                "time",
+                StringComparison.OrdinalIgnoreCase
+            )
+                ? "time"
+                : "compass";
+            config.ShowPlayerCompass = true;
+        }
+        saveConfig();
+        SyncSettingsControls();
+    }
+
     private void OnMapLayersToggled(bool enabled)
     {
         config.MapLayersEnabled = enabled;
@@ -4970,8 +5057,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         settingsModal.GetAtlasSwitch("render-on-scroll")?.SetValue(
             config.RenderOnScroll
         );
-        settingsModal.GetAtlasSwitch("player-compass")?.SetValue(
-            config.ShowPlayerCompass
+        settingsModal.GetAtlasChoice("handheld-instrument")?.SetSelectedIndex(
+            HandheldInstrumentChoiceIndex
         );
         settingsModal.GetAtlasSwitch("map-layers")?.SetValue(config.MapLayersEnabled);
         settingsModal.GetAtlasSwitch("search-mode")?.SetValue(

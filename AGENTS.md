@@ -330,6 +330,12 @@ the product scope when the atlas itself is correct.
   `LeftHand` and `RightHand` attachment points. Every captured camera,
   held-item and animation field is restored on cancellation, completion and
   world leave.
+- The lower-right handheld instrument is selectable as Off, Compass or Time.
+  Compass and Time share one flat wooden shell and one synchronized toss
+  transform so the casing cannot separate into overlapping or ghosted copies.
+  Compass keeps a restrained red-and-blue needle. Time uses a fixed wooden
+  gnomon and a narrow moving shadow driven by the live world calendar rather
+  than atlas fixed-hour lighting; the shadow is absent outside 06:00-18:00.
 - Survival-safe atlas rendering replaces all registered
   `EnumBlockMaterial.Ore` composite textures with their baked host-rock base
   textures through cycle-safe, incrementally built transient GPU lookups.
