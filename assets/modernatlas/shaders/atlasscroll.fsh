@@ -31,6 +31,124 @@ float paperFiber(vec2 position)
     return coarse * 0.62 + thread * 0.38;
 }
 
+float inkLine(float value, float width)
+{
+    return 1.0 - smoothstep(width, width * 1.8, abs(value));
+}
+
+float segmentInk(vec2 position, vec2 start, vec2 end, float width)
+{
+    vec2 segment = end - start;
+    float along = clamp(
+        dot(position - start, segment) / max(dot(segment, segment), 0.00001),
+        0.0,
+        1.0
+    );
+    float distanceToSegment = length(position - (start + segment * along));
+    return 1.0 - smoothstep(width, width * 1.8, distanceToSegment);
+}
+
+float compassRose(vec2 position, vec2 center, float size)
+{
+    vec2 ray = position - center;
+    float radius = length(ray);
+    float angle = atan(ray.y, ray.x);
+    float cardinal = pow(abs(cos(angle * 2.0)), 28.0)
+        * smoothstep(size * 0.10, size * 0.22, radius)
+        * (1.0 - smoothstep(size * 0.58, size, radius));
+    float diagonal = pow(abs(cos(angle * 4.0 + 0.7854)), 38.0)
+        * smoothstep(size * 0.14, size * 0.25, radius)
+        * (1.0 - smoothstep(size * 0.40, size * 0.68, radius));
+    float ring = inkLine(radius - size * 0.72, size * 0.035);
+    float hub = 1.0 - smoothstep(size * 0.055, size * 0.105, radius);
+    return max(max(cardinal, diagonal * 0.58), max(ring * 0.64, hub));
+}
+
+float mapMarker(vec2 position, vec2 center, float size)
+{
+    float radius = length(position - center);
+    float ring = inkLine(radius - size, size * 0.18);
+    float centerDot = 1.0 - smoothstep(size * 0.18, size * 0.40, radius);
+    return max(ring * 0.82, centerDot);
+}
+
+float mountainMark(vec2 position, vec2 center, float size)
+{
+    vec2 left = center + vec2(-size, -size * 0.55);
+    vec2 peak = center + vec2(0.0, size);
+    vec2 right = center + vec2(size, -size * 0.55);
+    float ridge = max(
+        segmentInk(position, left, peak, size * 0.075),
+        segmentInk(position, peak, right, size * 0.075)
+    );
+    float snow = max(
+        segmentInk(
+            position,
+            center + vec2(-size * 0.32, size * 0.48),
+            center + vec2(-size * 0.08, size * 0.20),
+            size * 0.055
+        ),
+        segmentInk(
+            position,
+            center + vec2(-size * 0.08, size * 0.20),
+            center + vec2(size * 0.18, size * 0.44),
+            size * 0.055
+        )
+    );
+    return max(ridge, snow * 0.72);
+}
+
+float cartographicInk(vec2 position)
+{
+    vec2 p = position - 0.5;
+
+    // One continuous river follows the western side of the sheet. Its two
+    // frequencies keep it hand drawn without turning it into random noise.
+    float river = inkLine(
+        p.x + 0.27 - p.y * 0.13
+            + sin(p.y * 13.0 + 0.8) * 0.030
+            + sin(p.y * 29.0) * 0.009,
+        0.0034
+    ) * smoothstep(-0.45, -0.37, p.y)
+        * (1.0 - smoothstep(0.30, 0.43, p.y));
+
+    // The main traveller's road crosses the centre, with one deliberate fork
+    // heading north-east from its marked junction.
+    float mainRoadY = 0.015 + p.x * 0.13
+        + sin((p.x + 0.36) * 9.0) * 0.017;
+    float mainRoadMask = smoothstep(-0.45, -0.37, p.x)
+        * (1.0 - smoothstep(0.35, 0.44, p.x));
+    float mainRoad = inkLine(p.y - mainRoadY, 0.0032) * mainRoadMask;
+
+    float branchY = 0.020 + (p.x + 0.035) * 0.67
+        + sin((p.x + 0.04) * 15.0) * 0.011;
+    float branchMask = smoothstep(-0.06, -0.015, p.x)
+        * (1.0 - smoothstep(0.27, 0.34, p.x));
+    float branchRoad = inkLine(p.y - branchY, 0.0028) * branchMask;
+
+    // Faint dashed bearings connect known places to a single compass rose.
+    float dash = smoothstep(0.05, 0.42, sin((p.x + p.y) * 145.0));
+    float bearings = max(
+        segmentInk(position, vec2(0.76, 0.24), vec2(0.49, 0.51), 0.0012),
+        segmentInk(position, vec2(0.76, 0.24), vec2(0.68, 0.66), 0.0012)
+    ) * dash * 0.30;
+
+    float places = max(
+        mapMarker(position, vec2(0.49, 0.51), 0.014),
+        mapMarker(position, vec2(0.68, 0.66), 0.011)
+    );
+    places = max(places, mapMarker(position, vec2(0.29, 0.46), 0.009));
+
+    float terrain = max(
+        mountainMark(position, vec2(0.33, 0.72), 0.045),
+        mountainMark(position, vec2(0.39, 0.69), 0.034)
+    ) * 0.72;
+    float rose = compassRose(position, vec2(0.79, 0.23), 0.080);
+
+    float strongInk = max(max(river, mainRoad), max(branchRoad, places));
+    return max(strongInk, max(rose * 0.88, max(terrain, bearings)));
+}
+
 vec3 frozenBackground(vec2 position)
 {
     vec2 backgroundPosition = vec2(position.x, 1.0 - position.y);
@@ -45,26 +163,28 @@ void main(void)
     {
         float fiber = paperFiber(uv * 1.7);
         float age = hash21(floor(uv * vec2(58.0, 76.0)));
-        baseColor = vec3(0.73, 0.57, 0.34)
-            * mix(0.95, 1.05, fiber)
-            * mix(0.98, 1.02, age);
+        float broadMottle = hash21(floor(uv * vec2(8.0, 11.0)));
+        baseColor = vec3(0.84, 0.68, 0.40)
+            * mix(0.91, 1.07, fiber)
+            * mix(0.93, 1.04, age)
+            * mix(0.90, 1.05, broadMottle);
 
         if (materialKind == 0)
         {
             float edgeDistance = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
-            baseColor *= mix(0.70, 1.0, smoothstep(0.0, 0.075, edgeDistance));
-
-            // Restrained contour ink makes this read as a map surface without
-            // putting branding, words or a flat screen-space logo on it.
-            vec2 mapPosition = uv - 0.5;
-            mapPosition += vec2(
-                sin(mapPosition.y * 7.0) * 0.055,
-                sin(mapPosition.x * 6.0) * 0.045
+            float edgeNoise = hash21(floor(uv * vec2(47.0, 61.0))) - 0.5;
+            float wornEdge = 1.0 - smoothstep(
+                0.018,
+                0.135,
+                edgeDistance + edgeNoise * 0.028
             );
-            float relief = length(mapPosition * vec2(1.08, 0.82));
-            float contourDistance = abs(fract(relief * 10.5) - 0.5);
-            float ink = 1.0 - smoothstep(0.0, 0.040, contourDistance);
-            baseColor = mix(baseColor, vec3(0.20, 0.24, 0.20), ink * 0.24);
+            baseColor = mix(baseColor, vec3(0.30, 0.17, 0.070), wornEdge * 0.64);
+
+            // Hand-drawn coastlines, routes and compass roses make the item
+            // read as a travel map, while remaining subordinate to the live
+            // atlas that replaces it at the end of the transition.
+            float ink = cartographicInk(uv);
+            baseColor = mix(baseColor, vec3(0.19, 0.105, 0.048), ink * 0.78);
         }
     }
     else if (materialKind == 1)

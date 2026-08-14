@@ -244,6 +244,22 @@ public sealed class ModernAtlasDialog : GuiDialog
         && !creativeSettingsModalOpen
         && !visualLabModalOpen
         && searchPanel?.GetTextInput("search-input")?.HasFocus == true;
+
+    /// <summary>
+    /// Releases UI state that belongs to the preceding physical-scroll dialog
+    /// before this dialog starts receiving keyboard and mouse events.
+    /// </summary>
+    internal void PrepareForTransitionHandoff()
+    {
+        ResetPointerDrag();
+        overlay?.UnfocusOwnElements();
+        searchPanel?.UnfocusOwnElements();
+        mapLayerPanel?.UnfocusOwnElements();
+        settingsModal?.UnfocusOwnElements();
+        performanceModal?.UnfocusOwnElements();
+        creativeSettingsModal?.UnfocusOwnElements();
+        visualLabModal?.UnfocusOwnElements();
+    }
     private float EffectiveMapLayerOpacity
     {
         get

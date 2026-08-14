@@ -17,12 +17,18 @@ namespace ModernAtlas;
 /// </summary>
 internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
 {
-    private const float ScrollAppearsSeconds = 0.34f;
-    private const float HandoffStartSeconds = 0.96f;
-    private const float UnrollStartSeconds = 1.22f;
-    private const float UnrollEndSeconds = 2.30f;
-    private const float LightPhaseStartSeconds = 2.58f;
-    private const float TotalDurationSeconds = 3.34f;
+    // All local and remote scroll choreography runs against this shared scene
+    // clock. Phase values remain deliberately unchanged so their sequencing
+    // stays synchronized while the real-time transition is 1 / 1.2 shorter.
+    internal const float TransitionSpeed = 1.2f;
+    // Values are expressed on the shared 1.2x scene clock. The player sees
+    // the complete retrieve-and-unroll motion in about 1.7 seconds.
+    private const float ScrollAppearsSeconds = 0.48f;
+    private const float HandoffStartSeconds = 0.90f;
+    private const float UnrollStartSeconds = 1.08f;
+    private const float UnrollEndSeconds = 1.68f;
+    private const float LightPhaseStartSeconds = 1.98f;
+    private const float TotalDurationSeconds = 2.08f;
     private const float ClosingDurationSeconds =
         LightPhaseStartSeconds - ScrollAppearsSeconds;
     private const float ClosingReleaseRightSeconds =
@@ -235,13 +241,6 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         return TryOpen();
     }
 
-    public void SkipToAtlas()
-    {
-        if (!IsOpened() || finishing || closing) return;
-        resourcesReady = prepareAtlasResources();
-        QueueFinish(!automatedTest || ValidateAutomatedScene());
-    }
-
     public void CancelWithoutOpening()
     {
         completion = null;
@@ -303,7 +302,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             return;
         }
 
-        float elapsed = (float)Stopwatch.GetElapsedTime(startedTimestamp).TotalSeconds;
+        float elapsed = TransitionElapsedSeconds(startedTimestamp);
         if (!closing) resourcesReady = prepareAtlasResources();
         MaintainHeldItemSuppression();
         UpdatePlayerPresentation(elapsed);
@@ -356,7 +355,10 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         }
         else if (args.KeyCode == (int)GlKeys.G)
         {
-            if (!closing) SkipToAtlas();
+            // The global HelpAndOverlays handler and dialog key handler can
+            // both receive G. During either transition it is intentionally a
+            // consumed no-op: only the explicit skip setting may bypass this
+            // scene.
         }
         args.Handled = true;
     }
@@ -376,7 +378,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         localPerspectiveProjection = Mat4f.CloneIt(capi.Render.CurrentProjectionMatrix);
         if (!finishing && IsOpened() && (closing || normalWorldBackgroundCaptured))
         {
-            float elapsed = (float)Stopwatch.GetElapsedTime(startedTimestamp).TotalSeconds;
+            float elapsed = TransitionElapsedSeconds(startedTimestamp);
             UpdatePlayerPresentation(elapsed);
             thirdPersonHandAnchorsReady |= ValidateCurrentThirdPersonHandAnchors();
         }
@@ -586,9 +588,9 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             return false;
         }
 
-        // The mesh becomes visible only after the left hand has moved below
-        // frame. It then enters together with that hand; there is no detached
-        // fade or mid-screen appearance.
+        // The mesh stays absent while the right hand reaches for the pocket.
+        // It enters at that hand only after the grab, never as a detached
+        // object already floating in front of the player.
         float visible = elapsed >= ScrollAppearsSeconds ? 1f : 0f;
         float reach = SmoothStep(elapsed / ScrollAppearsSeconds);
         float lift = EaseOutCubic(
@@ -605,27 +607,28 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         );
 
         IRenderAPI render = capi.Render;
-        // View-space placement makes the rolled scroll share the fixed
-        // first-person left-hand path: below-left, then centered. Once the
-        // right hand arrives, the two roller endpoints separate together.
+        // The closed roll follows the retrieving right hand from the belt,
+        // then settles below centre while the two endpoints separate.
         float pocketX = elapsed < ScrollAppearsSeconds
-            ? Lerp(-0.38f, -0.68f, reach)
-            : -0.68f;
+            ? Lerp(0.34f, 0.62f, reach)
+            : 0.62f;
         float pocketY = elapsed < ScrollAppearsSeconds
-            ? Lerp(-0.48f, -0.82f, reach)
-            : -0.82f;
+            ? Lerp(-0.46f, -0.76f, reach)
+            : -0.76f;
         float anchoredX = Lerp(pocketX, 0f, lift);
-        float anchoredY = Lerp(pocketY, -0.04f, lift);
-        float anchoredZ = Lerp(-1.36f, -1.18f, lift);
+        float anchoredY = Lerp(pocketY, -0.10f, lift);
+        float anchoredZ = Lerp(-1.34f, -1.14f, lift);
         float centerX = Lerp(anchoredX, 0.02f, dive);
         float centerY = Lerp(anchoredY, 0.02f, dive);
         float centerZ = Lerp(anchoredZ, -0.34f, dive);
         float parentScale = 1f + dive * 4.25f;
-        float rotationX = Lerp(0.24f, -0.08f, lift) * (1f - dive);
-        float rotationY = Lerp(-0.20f, 0.03f, lift) * (1f - dive);
-        float rotationZ = Lerp(-0.34f, -0.025f, lift) * (1f - dive);
-        float scrollWidth = Lerp(0.11f, 0.82f, unroll);
-        float scrollHeight = Lerp(0.42f, 0.52f, lift);
+        float rotationX = Lerp(0.26f, -0.06f, lift) * (1f - dive);
+        float rotationY = Lerp(0.16f, -0.02f, lift) * (1f - dive);
+        float rotationZ = Lerp(0.26f, -0.018f, lift) * (1f - dive);
+        // Keep the opened landscape parchment large enough to read, while
+        // leaving the upper world view clear instead of filling the window.
+        float scrollWidth = Lerp(0.07f, 0.72f, unroll);
+        float scrollHeight = Lerp(0.30f, 0.40f, lift);
         float sweep = SmoothStep(
             (elapsed - LightPhaseStartSeconds)
                 / (TotalDurationSeconds - LightPhaseStartSeconds)
@@ -639,7 +642,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             float handDistance = Distance(pose.LeftHand, pose.RightHand);
             scrollWidth = Lerp(
                 0.11f,
-                Math.Clamp(handDistance, 0.30f, 1.15f),
+                Math.Clamp(handDistance, 0.30f, 1.25f),
                 unroll
             );
             scrollHeight = 0.42f;
@@ -673,9 +676,14 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             render.GLDisableDepthTest();
         }
         render.GlDisableCullFace();
-        render.GlToggleBlend(true, EnumBlendMode.Standard);
+        // The local parchment is a physical, opaque first-person overlay.
+        // Explicitly disabling blending prevents leaked engine blend state
+        // from making the sheet or rollers transparent. Remote scrolls retain
+        // their short world-space fade while entering the scene.
+        render.GlToggleBlend(remoteWorldScroll, EnumBlendMode.Standard);
         try
         {
+            float rollerOffset = scrollWidth * 0.5f;
             float sheetAlpha = visible * SmoothStep(unroll / 0.18f);
             if (sheetAlpha > 0.001f)
             {
@@ -684,7 +692,10 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
                     0,
                     0,
                     0,
-                    Math.Max(0.035f, scrollWidth - 0.06f),
+                    // Both attachment edges terminate beneath the paper
+                    // sleeves. The small hidden overlap prevents a light gap
+                    // without letting the sheet protrude past either roller.
+                    Math.Max(0.075f, scrollWidth + 0.022f),
                     scrollHeight,
                     1f
                 );
@@ -698,65 +709,77 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
                 );
             }
 
-            float rollerOffset = scrollWidth * 0.5f;
             float remainingRoll = 1f - unroll;
-            if (remainingRoll > 0.015f)
-            {
-                float rollRadius = 0.055f + remainingRoll * 0.060f;
-                float[] paperRollModel = CreateComponentModel(
-                    parent,
-                    rollerOffset,
-                    0,
-                    0,
-                    rollRadius * 2f,
-                    scrollHeight,
-                    rollRadius * 2f
-                );
-                RenderComponent(
-                    shader,
-                    scrollCylinderMesh,
-                    paperRollModel,
-                    3,
-                    remoteWorldScroll ? visible : 1f,
-                    sweep
-                );
-            }
+            float rollerRotation = unroll * MathF.PI * 3.5f;
+            float componentAlpha = remoteWorldScroll ? visible : 1f;
 
+            // Both wooden cores and their permanent paper sleeves exist from
+            // the closed bundle onward. Moving their centres apart therefore
+            // opens one connected object instead of spawning a second rod or
+            // an independent sheet midway through the motion.
             RenderRoller(
                 shader,
                 parent,
                 rollerOffset,
                 scrollHeight,
-                remoteWorldScroll ? visible : 1f,
-                sweep
+                componentAlpha,
+                sweep,
+                includePaperSleeve: true,
+                rotationRadians: rollerRotation
             );
-            if (unroll > 0.025f)
+            RenderRoller(
+                shader,
+                parent,
+                -rollerOffset,
+                scrollHeight,
+                componentAlpha,
+                sweep,
+                includePaperSleeve: true,
+                rotationRadians: -rollerRotation * 0.82f
+            );
+
+            if (remainingRoll > 0.015f)
             {
-                RenderRoller(
+                // Symmetric windings visibly shrink while paper is paid out
+                // between the rods. Their radius always covers the sheet's
+                // hidden attachment overlap, so neither edge can detach.
+                float windingRadius = 0.017f + remainingRoll * 0.030f;
+                RenderPaperWinding(
+                    shader,
+                    parent,
+                    rollerOffset,
+                    scrollHeight,
+                    windingRadius,
+                    componentAlpha,
+                    sweep,
+                    -rollerRotation
+                );
+                RenderPaperWinding(
                     shader,
                     parent,
                     -rollerOffset,
                     scrollHeight,
-                    remoteWorldScroll
-                        ? visible * SmoothStep(unroll / 0.20f)
-                        : 1f,
-                    sweep
+                    windingRadius,
+                    componentAlpha,
+                    sweep,
+                    rollerRotation * 0.82f
                 );
             }
 
-            // Opening shows the empty left hand reaching below frame. During
-            // closing, once that hand and the scroll are already below frame,
-            // do not draw an extra return sweep back across the camera.
+            // Draw the arms after the lower rod ends. Their hands then overlap
+            // the wooden grips instead of stopping beside them, while the
+            // parchment remains safely behind the complete held assembly.
             if (remotePose == null && (!closing || visible > 0))
             {
                 RenderFirstPersonArms(
                     shader,
                     parent,
                     rollerOffset,
-                    unroll,
+                    scrollHeight,
                     elapsed
                 );
             }
+
         }
         finally
         {
@@ -782,36 +805,56 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         IShaderProgram shader,
         float[] parent,
         float rollerOffset,
-        float unroll,
+        float scrollHeight,
         float elapsed
     )
     {
         if (!seraphForearms.IsReady) return;
         seraphForearms.BindSkin(shader);
 
-        float leftGripX = unroll > 0.025f ? -rollerOffset : rollerOffset;
-        float leftGripY = -0.12f;
-        float leftReach = elapsed < ScrollAppearsSeconds
-            ? SmoothStep(elapsed / ScrollAppearsSeconds)
-            : 1f;
-        float leftReturn = SmoothStep(
+        // The right hand alone reaches the belt, grasps the invisible roll,
+        // then carries it upward. The left hand joins only for the second end
+        // after the handoff phase begins.
+        float gripY = -scrollHeight * 0.5f - 0.022f;
+        float gripInset = 0.004f;
+        float rightReach = SmoothStep(elapsed / ScrollAppearsSeconds);
+        float rightSettle = SmoothStep(
             (elapsed - ScrollAppearsSeconds)
                 / (HandoffStartSeconds - ScrollAppearsSeconds)
         );
-        float leftStartX = Lerp(
-            Lerp(-0.58f, -0.78f, leftReach),
-            -0.64f,
-            leftReturn
+        float rightStartX = Lerp(0.48f, 0.20f, rightReach);
+        float rightStartY = Lerp(-0.48f, -0.72f, rightReach);
+        rightStartX = Lerp(rightStartX, 0.62f, rightSettle);
+        rightStartY = Lerp(rightStartY, -0.62f, rightSettle);
+        seraphForearms.RenderRightArm(
+            shader,
+            parent,
+            rightStartX,
+            rightStartY,
+            rollerOffset - gripInset,
+            gripY,
+            1f
         );
-        float leftStartY = Lerp(
-            Lerp(-0.60f, -0.76f, leftReach),
-            -0.62f,
-            leftReturn
-        );
-        seraphForearms.RenderLeftArm(shader, parent, leftStartX, leftStartY, leftGripX, leftGripY, 1f);
 
-        float rightAlpha = SmoothStep((unroll - 0.04f) / 0.24f);
-        seraphForearms.RenderRightArm(shader, parent, 0.64f, -0.62f, rollerOffset, -0.12f, rightAlpha);
+        float leftAlpha = SmoothStep(
+            (elapsed - HandoffStartSeconds)
+                / (UnrollStartSeconds - HandoffStartSeconds)
+        );
+        float leftReach = SmoothStep(
+            (elapsed - HandoffStartSeconds)
+                / (UnrollEndSeconds - HandoffStartSeconds)
+        );
+        float leftStartX = Lerp(-0.72f, -0.60f, leftReach);
+        float leftStartY = Lerp(-0.66f, -0.62f, leftReach);
+        seraphForearms.RenderLeftArm(
+            shader,
+            parent,
+            leftStartX,
+            leftStartY,
+            -rollerOffset + gripInset,
+            gripY,
+            leftAlpha
+        );
     }
 
     private void RenderRemoteScrolls()
@@ -833,9 +876,9 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             }
             if (remotePlayer == null) continue;
 
-            float phaseElapsed = (float)Stopwatch.GetElapsedTime(
+            float phaseElapsed = TransitionElapsedSeconds(
                 entry.Value.StartedTimestamp
-            ).TotalSeconds;
+            );
             float scrollTime = RemoteScrollTime(entry.Value.Phase, phaseElapsed);
             float stowDuration = ClosingDurationSeconds - ClosingStowStartSeconds;
             if (entry.Value.Phase == AtlasScrollPhase.Stow
@@ -894,6 +937,10 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             _ => 0
         };
     }
+
+    private static float TransitionElapsedSeconds(long timestamp) =>
+        (float)Stopwatch.GetElapsedTime(timestamp).TotalSeconds
+        * TransitionSpeed;
 
     private bool TryGetRemoteScrollPose(
         EntityPlayer player,
@@ -1069,37 +1116,114 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         float x,
         float sheetHeight,
         float alpha,
-        float sweep
+        float sweep,
+        bool includePaperSleeve,
+        float rotationRadians
     )
     {
         if (scrollCylinderMesh == null || alpha <= 0.001f) return;
 
-        float rodHeight = sheetHeight + 0.18f;
+        // A scroll needs a fine, dark wooden spine rather than a pillar. The
+        // paper sleeve is only slightly wider and shorter than the map, so it
+        // reads as the parchment curling around the roller.
+        float sleeveHeight = sheetHeight * 0.95f;
+        float rodHeight = sheetHeight + 0.065f;
         float[] rodModel = CreateComponentModel(
             parent,
             x,
             0,
             0.004f,
-            0.046f,
+            0.025f,
             rodHeight,
-            0.046f
+            0.025f,
+            rotationY: rotationRadians
         );
         RenderComponent(shader, scrollCylinderMesh, rodModel, 1, alpha, sweep);
+        if (includePaperSleeve)
+        {
+            RenderComponent(
+                shader,
+                scrollCylinderMesh,
+                CreateComponentModel(
+                    parent,
+                    x,
+                    0,
+                    0.008f,
+                    0.032f,
+                    sleeveHeight,
+                    0.032f,
+                    rotationY: rotationRadians
+                ),
+                3,
+                alpha,
+                sweep
+            );
+        }
 
-        float knobY = rodHeight * 0.5f + 0.035f;
+        float knobY = rodHeight * 0.5f + 0.026f;
         RenderComponent(
             shader,
             scrollCylinderMesh,
-            CreateComponentModel(parent, x, knobY, 0.004f, 0.095f, 0.060f, 0.095f),
-            2,
+            CreateComponentModel(
+                parent,
+                x,
+                knobY,
+                0.004f,
+                0.052f,
+                0.036f,
+                0.052f,
+                rotationY: rotationRadians
+            ),
+            1,
             alpha,
             sweep
         );
         RenderComponent(
             shader,
             scrollCylinderMesh,
-            CreateComponentModel(parent, x, -knobY, 0.004f, 0.095f, 0.060f, 0.095f),
-            2,
+            CreateComponentModel(
+                parent,
+                x,
+                -knobY,
+                0.004f,
+                0.052f,
+                0.036f,
+                0.052f,
+                rotationY: rotationRadians
+            ),
+            1,
+            alpha,
+            sweep
+        );
+    }
+
+    private void RenderPaperWinding(
+        IShaderProgram shader,
+        float[] parent,
+        float x,
+        float sheetHeight,
+        float radius,
+        float alpha,
+        float sweep,
+        float rotationRadians
+    )
+    {
+        if (scrollCylinderMesh == null || alpha <= 0.001f) return;
+
+        RenderComponent(
+            shader,
+            scrollCylinderMesh,
+            CreateComponentModel(
+                parent,
+                x,
+                0,
+                0.008f,
+                radius * 2f,
+                sheetHeight * 0.95f,
+                radius * 2f,
+                rotationY: rotationRadians
+            ),
+            3,
             alpha,
             sweep
         );
@@ -1128,11 +1252,13 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         float z,
         float scaleX,
         float scaleY,
-        float scaleZ
+        float scaleZ,
+        float rotationY = 0f
     )
     {
         float[] model = Mat4f.CloneIt(parent);
         Mat4f.Translate(model, model, x, y, z);
+        if (rotationY != 0f) Mat4f.RotateY(model, model, rotationY);
         Mat4f.Scale(model, model, scaleX, scaleY, scaleZ);
         return model;
     }
@@ -1401,8 +1527,8 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
 
     private static MeshData CreateScrollSheetMesh()
     {
-        const int horizontalSegments = 18;
-        const int verticalSegments = 5;
+        const int horizontalSegments = 28;
+        const int verticalSegments = 12;
         MeshData mesh = new(horizontalSegments * verticalSegments * 4);
         int color = unchecked((int)0xffffffff);
 
@@ -1410,19 +1536,19 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         {
             float v0 = yIndex / (float)verticalSegments;
             float v1 = (yIndex + 1) / (float)verticalSegments;
-            float y0 = v0 - 0.5f;
-            float y1 = v1 - 0.5f;
             for (int xIndex = 0; xIndex < horizontalSegments; xIndex++)
             {
                 float u0 = xIndex / (float)horizontalSegments;
                 float u1 = (xIndex + 1) / (float)horizontalSegments;
-                float x0 = u0 - 0.5f;
-                float x1 = u1 - 0.5f;
+                Vec3f p00 = SheetPoint(u0, v0);
+                Vec3f p10 = SheetPoint(u1, v0);
+                Vec3f p11 = SheetPoint(u1, v1);
+                Vec3f p01 = SheetPoint(u0, v1);
                 int first = mesh.VerticesCount;
-                mesh.AddVertex(x0, y0, SheetDepth(x0, y0), u0, v0, color);
-                mesh.AddVertex(x1, y0, SheetDepth(x1, y0), u1, v0, color);
-                mesh.AddVertex(x1, y1, SheetDepth(x1, y1), u1, v1, color);
-                mesh.AddVertex(x0, y1, SheetDepth(x0, y1), u0, v1, color);
+                mesh.AddVertex(p00.X, p00.Y, p00.Z, u0, v0, color);
+                mesh.AddVertex(p10.X, p10.Y, p10.Z, u1, v0, color);
+                mesh.AddVertex(p11.X, p11.Y, p11.Z, u1, v1, color);
+                mesh.AddVertex(p01.X, p01.Y, p01.Z, u0, v1, color);
                 mesh.AddQuadIndices(first);
             }
         }
@@ -1430,10 +1556,31 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         return mesh;
     }
 
+    private static Vec3f SheetPoint(float u, float v)
+    {
+        float x = u - 0.5f;
+        float y = v - 0.5f;
+        // Side edges are the physical attachment seams. Keep them straight
+        // and inside the roller sleeves; ragged outward vertices made the
+        // parchment visibly protrude beyond its rods during unrolling.
+        if (v <= 0.0001f || v >= 0.9999f)
+        {
+            float side = v < 0.5f ? -1f : 1f;
+            float tear = 0.008f
+                + MathF.Sin(u * 37.0f + 0.3f) * 0.007f
+                + MathF.Sin(u * 13.0f + 2.1f) * 0.005f;
+            y += side * Math.Max(0.002f, tear);
+        }
+        return new Vec3f(x, y, SheetDepth(x, y));
+    }
+
     private static float SheetDepth(float x, float y)
     {
-        float edgeCurl = MathF.Pow(MathF.Abs(x) * 2f, 3f) * 0.075f;
-        float centerSag = (1f - MathF.Abs(x) * 2f) * (0.5f - MathF.Abs(y)) * -0.018f;
+        // At each attachment seam the paper reaches the front tangent of the
+        // sleeve (z ~= 0.024). A shallow centre sag keeps the sheet physical
+        // without lifting its ends in front of, or away from, the rollers.
+        float edgeCurl = MathF.Pow(MathF.Abs(x) * 2f, 3f) * 0.024f;
+        float centerSag = (1f - MathF.Abs(x) * 2f) * (0.5f - MathF.Abs(y)) * -0.014f;
         return edgeCurl + centerSag;
     }
 
@@ -1622,7 +1769,14 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         capi.Event.EnqueueMainThreadTask(
             () =>
             {
-                if (IsOpened()) TryClose();
+                bool closed = !IsOpened() || TryClose();
+                if (!closed || IsOpened())
+                {
+                    capi.Logger.Error(
+                        "[ModernAtlas] Transition input capture remained active after its finish request; the atlas will not open over the transition."
+                    );
+                    passed = false;
+                }
                 callback?.Invoke(passed);
             },
             "modernatlas-opening-transition-finish"
@@ -1764,21 +1918,21 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             StringComparison.OrdinalIgnoreCase
         ) ? configuredPath[..^4] : configuredPath;
         string phaseName = closing ? "closing" : "opening";
-        if (!automatedPocketScreenshotHandled && elapsed >= 0.72f)
+        if (!automatedPocketScreenshotHandled && elapsed >= 0.66f)
         {
             automatedPocketScreenshotHandled = true;
             automatedPocketScreenshotPassed = TryCaptureAutomatedScreenshot(
                 $"{prefix}-{phaseName}-pocket.png"
             );
         }
-        if (!automatedHandoffScreenshotHandled && elapsed >= 1.48f)
+        if (!automatedHandoffScreenshotHandled && elapsed >= 1.20f)
         {
             automatedHandoffScreenshotHandled = true;
             automatedHandoffScreenshotPassed = TryCaptureAutomatedScreenshot(
                 $"{prefix}-{phaseName}-handoff.png"
             );
         }
-        if (!automatedScreenshotHandled && elapsed >= 2.12f)
+        if (!automatedScreenshotHandled && elapsed >= 1.60f)
         {
             automatedScreenshotHandled = true;
             automatedScreenshotPassed = TryCaptureAutomatedScreenshot(

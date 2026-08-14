@@ -181,7 +181,8 @@ public sealed class ModernAtlasSystem : ModSystem
 
         if (openingTransition?.IsOpened() == true)
         {
-            if (!openingTransition.IsClosing) openingTransition.SkipToAtlas();
+            // A second G must never skip an opening scene or restart a closing
+            // scene. The transition owns the key until it has released input.
             return true;
         }
 
@@ -252,8 +253,23 @@ public sealed class ModernAtlasSystem : ModSystem
 
         bool started = openingTransition.Begin(
             false,
-            _ =>
+            passed =>
             {
+                if (!passed)
+                {
+                    clientApi?.Logger.Error(
+                        "[ModernAtlas] The atlas transition did not release its input layer; atlas activation was cancelled."
+                    );
+                    return;
+                }
+                if (openingTransition?.IsOpened() == true)
+                {
+                    clientApi?.Logger.Error(
+                        "[ModernAtlas] Refusing to open the atlas while the completed transition dialog is still active."
+                    );
+                    return;
+                }
+                dialog.PrepareForTransitionHandoff();
                 if (dialog.TryOpen()) return;
                 clientApi?.Logger.Error(
                     "[ModernAtlas] The atlas could not be opened after its transition."
@@ -474,6 +490,7 @@ public sealed class ModernAtlasSystem : ModSystem
                 AnimationMetaData animation = source.Clone();
                 animation.Code = $"modernatlas-remote-{message.Phase}";
                 animation.ClientSide = true;
+                animation.AnimationSpeed *= AtlasOpeningTransitionDialog.TransitionSpeed;
                 animation.EaseInSpeed = Math.Max(animation.EaseInSpeed, 8f);
                 float easeOutSpeed = message.Phase == AtlasScrollPhase.Stow
                     ? 1000f
