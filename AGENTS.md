@@ -324,12 +324,19 @@ the product scope when the atlas itself is correct.
   scroll from below-left, the right hand takes the other end and both hands
   unroll it before the existing light enters the atlas. Closing the atlas rolls
   and stows the scroll in reverse. Creative skips both transitions. The local
-  player's native first- and third-person gesture layers remain untouched so
-  only the two scroll-owned arms can appear in first person. Remote players'
-  third-person scroll uses the same phase timings and follows the animated
-  `LeftHand` and `RightHand` attachment points. Every captured camera,
-  held-item and animation field is restored on cancellation, completion and
-  world leave.
+  opening hotkey first cancels attack, block breaking, eating and other held
+  hand use through the public hand-action API, clears both in-world mouse
+  controls and removes any remaining local first- or third-person action clip.
+  Maintain that suppression throughout the opening scene and open atlas, and
+  keep it latched after close until the physical mouse buttons are released.
+  The atlas entity renderer also removes a late queued local hand-action clip
+  immediately before pose preparation. A cancelled action is not restored
+  when the atlas closes; a new mouse press is required. Only the two
+  scroll-owned arms can appear in first person.
+  Remote players' third-person scroll uses the same phase timings and follows
+  the animated `LeftHand` and `RightHand` attachment points. Every captured
+  camera and held-item field is restored on cancellation, completion and world
+  leave without reviving the cancelled hand action.
 - The lower-right handheld instrument is selectable as Off, Compass or Time.
   Compass and Time share one flat wooden shell and one synchronized toss
   transform so the casing cannot separate into overlapping or ghosted copies.

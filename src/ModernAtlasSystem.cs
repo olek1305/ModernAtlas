@@ -2,6 +2,7 @@ using System;
 using System.Reflection;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
+using Vintagestory.API.Common.Entities;
 using Vintagestory.API.Config;
 using Vintagestory.API.Server;
 
@@ -37,6 +38,22 @@ public sealed class ModernAtlasSystem : ModSystem
     private int worldSessionGeneration;
     private bool automatedWorldExitRequested;
     private bool automatedSmokeTestOpeningStarted;
+    private bool suppressLocalHandActions;
+    private long handActionSuppressionListenerId = -1;
+
+    private static readonly string[] LocalHandActionAnimationCodes =
+    {
+        "breakhand",
+        "breakhand-fp",
+        "breaktool",
+        "breaktool-fp",
+        "helditemattack",
+        "helditeminteract",
+        "eat",
+        "eat-fp",
+        "drink",
+        "drink-fp"
+    };
 
     public override bool ShouldLoad(EnumAppSide side) => true;
 
@@ -104,6 +121,10 @@ public sealed class ModernAtlasSystem : ModSystem
             .SetMessageHandler<AtlasCheatModeMessage>(OnCheatModeMessage);
         api.Event.LeaveWorld += OnLeaveWorld;
         api.Event.LevelFinalize += OnLevelFinalize;
+        handActionSuppressionListenerId = api.Event.RegisterGameTickListener(
+            MaintainLocalHandActionSuppression,
+            10
+        );
 
         if (GetStableLiquidShader() == null)
         {
@@ -200,7 +221,150 @@ public sealed class ModernAtlasSystem : ModSystem
             return true;
         }
 
+        suppressLocalHandActions = true;
+        CancelLocalPlayerHandActions(true);
         StartOpeningTransition();
+        return true;
+    }
+
+    private bool CancelLocalPlayerHandActions(bool resetAllAnimations)
+    {
+        if (clientApi?.World.Player?.Entity is not EntityPlayer player)
+        {
+            return false;
+        }
+
+        try
+        {
+            ReleaseInWorldMouseButtons();
+
+            EntityControls controls = player.Controls;
+            bool actionWasActive = controls.LeftMouseDown
+                || controls.RightMouseDown
+                || controls.HandUse != EnumHandInteract.None;
+
+            // Release the world controls before asking the held item or block
+            // to cancel. Otherwise a physically held or rapidly clicked mouse
+            // button can restart the same action on the following client tick.
+            controls.LeftMouseDown = false;
+            controls.RightMouseDown = false;
+            player.TryStopHandAction(
+                true,
+                EnumItemUseCancelReason.ReleasedMouse
+            );
+            controls.HandUse = EnumHandInteract.None;
+            controls.HandUsingBlockSel = null;
+            controls.Dirty = true;
+
+            // Cancellation stops gameplay use, while a strike or eating clip
+            // may still have time left. Remove those captured arm poses before
+            // the atlas renders the local player's third-person model.
+            if (resetAllAnimations)
+            {
+                player.SelfFpAnimManager.StopAllAnimations();
+                player.TpAnimManager.StopAllAnimations();
+            }
+            else
+            {
+                StopLocalHandActionAnimations(player);
+            }
+
+            if (actionWasActive)
+            {
+                clientApi.Logger.Debug(
+                    "[ModernAtlas] Cancelled the local player's active hand action before opening the atlas."
+                );
+            }
+            return !controls.LeftMouseDown
+                && !controls.RightMouseDown
+                && controls.HandUse == EnumHandInteract.None;
+        }
+        catch (Exception exception)
+        {
+            clientApi.Logger.Warning(
+                "[ModernAtlas] Could not cancel the local player's hand action before opening the atlas: {0}",
+                exception.Message
+            );
+            return false;
+        }
+    }
+
+    private void MaintainLocalHandActionSuppression(float deltaTime)
+    {
+        _ = deltaTime;
+        if (!suppressLocalHandActions || clientApi == null) return;
+
+        bool atlasOwnsInput = dialog?.IsOpened() == true
+            || openingTransition?.IsOpened() == true;
+        bool physicalMouseHeld = IsPhysicalMouseButtonDown();
+        if (!atlasOwnsInput && !physicalMouseHeld)
+        {
+            suppressLocalHandActions = false;
+            return;
+        }
+
+        CancelLocalPlayerHandActions(false);
+    }
+
+    private void ReleaseInWorldMouseButtons()
+    {
+        MouseButtonState? states = clientApi?.Input.InWorldMouseButton;
+        if (states == null) return;
+        states.Left = false;
+        states.Right = false;
+    }
+
+    private bool IsPhysicalMouseButtonDown()
+    {
+        MouseButtonState? states = clientApi?.Input.MouseButton;
+        return states?.Left == true || states?.Right == true;
+    }
+
+    internal static void StopLocalHandActionAnimations(EntityPlayer player)
+    {
+        foreach (string code in LocalHandActionAnimationCodes)
+        {
+            player.SelfFpAnimManager.StopAnimation(code);
+            player.TpAnimManager.StopAnimation(code);
+        }
+    }
+
+    private bool BeginAutomatedHandActionFixture()
+    {
+        if (clientApi?.World.Player?.Entity is not EntityPlayer player)
+        {
+            return false;
+        }
+
+        MouseButtonState? inWorldMouse = clientApi.Input.InWorldMouseButton;
+        if (inWorldMouse == null) return false;
+
+        inWorldMouse.Left = true;
+        player.Controls.LeftMouseDown = true;
+        player.Controls.HandUse = EnumHandInteract.HeldItemAttack;
+        bool thirdPersonStarted = player.TpAnimManager.StartAnimation(
+            "breakhand"
+        );
+        bool firstPersonStarted = player.SelfFpAnimManager.StartAnimation(
+            "breakhand-fp"
+        );
+        return thirdPersonStarted && firstPersonStarted;
+    }
+
+    private static bool LocalHandActionAnimationsStopped(EntityPlayer player)
+    {
+        foreach (string code in LocalHandActionAnimationCodes)
+        {
+            if (player.SelfFpAnimManager.ActiveAnimationsByAnimCode.ContainsKey(
+                    code
+                )
+                || player.TpAnimManager.ActiveAnimationsByAnimCode.ContainsKey(
+                    code
+                ))
+            {
+                return false;
+            }
+        }
         return true;
     }
 
@@ -306,6 +470,12 @@ public sealed class ModernAtlasSystem : ModSystem
         {
             clientApi.Event.LeaveWorld -= OnLeaveWorld;
             clientApi.Event.LevelFinalize -= OnLevelFinalize;
+            if (handActionSuppressionListenerId >= 0)
+            {
+                clientApi.Event.UnregisterGameTickListener(
+                    handActionSuppressionListenerId
+                );
+            }
         }
         if (serverApi != null)
         {
@@ -339,6 +509,8 @@ public sealed class ModernAtlasSystem : ModSystem
         serverPolicyChannel = null;
         clientPolicyChannel = null;
         activeWorldIdentifier = null;
+        suppressLocalHandActions = false;
+        handActionSuppressionListenerId = -1;
         base.Dispose();
     }
 
@@ -531,6 +703,7 @@ public sealed class ModernAtlasSystem : ModSystem
         openingTransition?.ClearRemoteAnimations();
         soundController?.StopAll();
         activeWorldIdentifier = null;
+        suppressLocalHandActions = false;
         dialog?.OnWorldLeave();
         serverPolicy.ResetToSafeDefaults();
         if (completeAutomatedWorldExit)
@@ -702,6 +875,25 @@ public sealed class ModernAtlasSystem : ModSystem
         // transition, never stack a second dialog over the first one.
         if (dialog.IsOpened()) dialog.TryClose();
         if (openingTransition.IsOpened()) openingTransition.CancelWithoutOpening();
+
+        bool handActionFixtureStarted = BeginAutomatedHandActionFixture();
+        suppressLocalHandActions = true;
+        bool handActionsCancelled = CancelLocalPlayerHandActions(true);
+        EntityPlayer? localPlayer = clientApi.World.Player?.Entity;
+        if (!handActionFixtureStarted
+            || !handActionsCancelled
+            || localPlayer == null
+            || !LocalHandActionAnimationsStopped(localPlayer))
+        {
+            clientApi.Logger.Error(
+                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: a synthetic breakhand action was not fully cancelled before the atlas transition."
+            );
+            FinishAutomatedSmokeTest(worldIdentifier, sessionGeneration, false);
+            return;
+        }
+        clientApi.Logger.Notification(
+            "[ModernAtlas] AUTOMATED HAND-ACTION CANCELLATION CHECK PASSED: an active breakhand clip, attack use and block-interaction controls were neutralized before atlas capture."
+        );
 
         dialog.BeginAutomatedSmokeTest(
             passed => FinishAutomatedSmokeTest(

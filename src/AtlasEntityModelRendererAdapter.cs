@@ -61,6 +61,18 @@ internal sealed class AtlasEntityModelRendererAdapter
             foreach (RenderEntry entry in entries)
             {
                 if (entry.HideHeldItems()) suppressedHeldItemCount++;
+                if (entry.Entity == capi.World.Player.Entity
+                    && entry.Entity is EntityPlayer localPlayer)
+                {
+                    // The normal-world animation stream can deliver one last
+                    // queued strike after G has already cancelled the action.
+                    // Remove hand-use clips immediately before atlas pose
+                    // preparation so that queued breakhand frames never leak
+                    // into the independent map camera.
+                    ModernAtlasSystem.StopLocalHandActionAnimations(
+                        localPlayer
+                    );
+                }
                 entry.Renderer.BeforeRender(deltaTime);
                 // EntityPlayerShapeRenderer.BeforeRender determines the render
                 // mode again from the normal first-person camera. Override it

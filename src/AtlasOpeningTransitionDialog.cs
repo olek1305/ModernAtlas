@@ -11,9 +11,9 @@ namespace ModernAtlas;
 /// <summary>
 /// A first-person atlas transition over the live world. The camera remains
 /// fixed while first-person forearms built from the loaded Seraph model
-/// retrieve, hold and unroll a physical scroll. The local player's native
-/// first- and third-person gesture layers stay untouched so no extra hand is
-/// drawn alongside the two transition-owned arms.
+/// retrieve, hold and unroll a physical scroll. The opening hotkey cancels the
+/// local player's native hand action first, then this scene draws only its two
+/// transition-owned arms.
 /// </summary>
 internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
 {
