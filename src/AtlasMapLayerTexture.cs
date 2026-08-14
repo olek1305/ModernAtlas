@@ -20,6 +20,8 @@ internal sealed class AtlasMapLayerTexture : IDisposable
 
     private const double WorkBudgetMilliseconds = 4;
     private const int MaximumSamplesPerFrame = 2048;
+    private const int MaximumRetrySamplesPerFrame = 512;
+    private const int RetryIntervalMilliseconds = 250;
 
     private readonly ICoreClientAPI capi;
     private readonly HashSet<(int X, int Z)> sampledOreRegions = new();
@@ -27,9 +29,12 @@ internal sealed class AtlasMapLayerTexture : IDisposable
     private readonly Dictionary<int, string> oreCodeByBlockId = new();
     private readonly HashSet<string> discoveredOreCodeSet = new(StringComparer.Ordinal);
     private readonly List<string> discoveredOreCodes = new();
+    private readonly List<int> pendingSampleIndices = new();
     private LoadedTexture? texture;
     private int[]? pixels;
     private int nextSampleIndex;
+    private int nextPendingSampleIndex;
+    private long nextPendingRetryMilliseconds;
     private double disclosureCenterX;
     private double disclosureCenterZ;
     private int disclosureRadius;
@@ -40,6 +45,7 @@ internal sealed class AtlasMapLayerTexture : IDisposable
     private int oreBlockHitCount;
     private bool failed;
     private bool loggedSamplingFailure;
+    private bool loggedStreamingRefresh;
 
     public AtlasMapLayer Layer { get; private set; } = AtlasMapLayer.TexturedTerrain;
     public bool Ready { get; private set; }
@@ -119,6 +125,9 @@ internal sealed class AtlasMapLayerTexture : IDisposable
         Ready = layer == AtlasMapLayer.TexturedTerrain;
         pixels = null;
         nextSampleIndex = 0;
+        nextPendingSampleIndex = 0;
+        nextPendingRetryMilliseconds = 0;
+        pendingSampleIndices.Clear();
         validSampleCount = 0;
         oreRegionCount = 0;
         oreMapCount = 0;
@@ -132,6 +141,7 @@ internal sealed class AtlasMapLayerTexture : IDisposable
         OreCodeRevision++;
         failed = false;
         loggedSamplingFailure = false;
+        loggedStreamingRefresh = false;
         if (Ready) return;
 
         if (Layer == AtlasMapLayer.OreDensity)
@@ -185,7 +195,11 @@ internal sealed class AtlasMapLayerTexture : IDisposable
 
     public bool Advance()
     {
-        if (Ready) return true;
+        if (Ready)
+        {
+            AdvancePendingSamples();
+            return true;
+        }
         if (pixels == null || texture == null) return false;
 
         long started = Stopwatch.GetTimestamp();
@@ -198,10 +212,14 @@ internal sealed class AtlasMapLayerTexture : IDisposable
         {
             try
             {
-                FillSample(nextSampleIndex);
+                if (!FillSample(nextSampleIndex))
+                {
+                    pendingSampleIndices.Add(nextSampleIndex);
+                }
             }
             catch (Exception exception)
             {
+                pendingSampleIndices.Add(nextSampleIndex);
                 if (!loggedSamplingFailure)
                 {
                     loggedSamplingFailure = true;
@@ -243,12 +261,98 @@ internal sealed class AtlasMapLayerTexture : IDisposable
         return Ready;
     }
 
+    private void AdvancePendingSamples()
+    {
+        if (failed
+            || pixels == null
+            || texture == null
+            || pendingSampleIndices.Count == 0
+            || capi.ElapsedMilliseconds < nextPendingRetryMilliseconds)
+        {
+            return;
+        }
+
+        nextPendingRetryMilliseconds = capi.ElapsedMilliseconds
+            + RetryIntervalMilliseconds;
+        long started = Stopwatch.GetTimestamp();
+        int processed = 0;
+        bool pixelsChanged = false;
+        while (pendingSampleIndices.Count > 0
+            && processed < MaximumRetrySamplesPerFrame
+            && (processed == 0
+                || Stopwatch.GetElapsedTime(started).TotalMilliseconds
+                    < WorkBudgetMilliseconds))
+        {
+            if (nextPendingSampleIndex >= pendingSampleIndices.Count)
+            {
+                nextPendingSampleIndex = 0;
+            }
+
+            int listIndex = nextPendingSampleIndex;
+            int sampleIndex = pendingSampleIndices[listIndex];
+            int previousPixel = pixels[sampleIndex];
+            bool completed = false;
+            try
+            {
+                completed = FillSample(sampleIndex);
+            }
+            catch (Exception exception)
+            {
+                if (!loggedSamplingFailure)
+                {
+                    loggedSamplingFailure = true;
+                    capi.Logger.Warning(
+                        "[ModernAtlas] A streaming map-layer sample could not be read and will be retried: {0}",
+                        exception.Message
+                    );
+                }
+            }
+
+            pixelsChanged |= pixels[sampleIndex] != previousPixel;
+            if (completed)
+            {
+                int lastIndex = pendingSampleIndices.Count - 1;
+                pendingSampleIndices[listIndex] = pendingSampleIndices[lastIndex];
+                pendingSampleIndices.RemoveAt(lastIndex);
+            }
+            else
+            {
+                nextPendingSampleIndex++;
+            }
+            processed++;
+        }
+
+        if (!pixelsChanged) return;
+        try
+        {
+            capi.Render.LoadOrUpdateTextureFromBgra(pixels, true, 0, ref texture);
+            if (!loggedStreamingRefresh)
+            {
+                loggedStreamingRefresh = true;
+                capi.Logger.Notification(
+                    "[ModernAtlas] The active atlas layer now fills newly loaded client chunks automatically."
+                );
+            }
+        }
+        catch (Exception exception)
+        {
+            capi.Logger.Warning(
+                "[ModernAtlas] Could not refresh the atlas-only {0} layer after client chunks streamed in: {1}",
+                Layer.DisplayName(),
+                exception.Message
+            );
+        }
+    }
+
     public void Reset()
     {
         Layer = AtlasMapLayer.TexturedTerrain;
         Ready = true;
         pixels = null;
         nextSampleIndex = 0;
+        nextPendingSampleIndex = 0;
+        nextPendingRetryMilliseconds = 0;
+        pendingSampleIndices.Clear();
         validSampleCount = 0;
         oreRegionCount = 0;
         oreMapCount = 0;
@@ -263,6 +367,7 @@ internal sealed class AtlasMapLayerTexture : IDisposable
         OreCodeRevision++;
         failed = false;
         loggedSamplingFailure = false;
+        loggedStreamingRefresh = false;
     }
 
     public void Dispose()
@@ -270,6 +375,7 @@ internal sealed class AtlasMapLayerTexture : IDisposable
         texture?.Dispose();
         texture = null;
         pixels = null;
+        pendingSampleIndices.Clear();
         discoveredOreCodeSet.Clear();
         discoveredOreCodes.Clear();
         SelectedOreCode = null;
@@ -277,9 +383,9 @@ internal sealed class AtlasMapLayerTexture : IDisposable
         Ready = false;
     }
 
-    private void FillSample(int index)
+    private bool FillSample(int index)
     {
-        if (pixels == null || texture == null) return;
+        if (pixels == null || texture == null) return false;
 
         int sampleX = index % texture.Width;
         int sampleZ = index / texture.Width;
@@ -291,13 +397,13 @@ internal sealed class AtlasMapLayerTexture : IDisposable
         double dz = worldZ - disclosureCenterZ;
         if (dx * dx + dz * dz > (double)disclosureRadius * disclosureRadius)
         {
-            return;
+            return true;
         }
         if (worldX < 0 || worldZ < 0
             || worldX >= capi.World.BlockAccessor.MapSizeX
             || worldZ >= capi.World.BlockAccessor.MapSizeZ)
         {
-            return;
+            return true;
         }
 
         float value;
@@ -317,7 +423,7 @@ internal sealed class AtlasMapLayerTexture : IDisposable
                 // unknown state instead of leaking its normal material color;
                 // do not count it as a valid zero-ore result.
                 pixels[index] = UnavailableOreColor();
-                return;
+                return false;
             }
         }
         else
@@ -327,7 +433,7 @@ internal sealed class AtlasMapLayerTexture : IDisposable
             int chunkZ = worldZ / chunkSize;
             IMapChunk? mapChunk = capi.World.BlockAccessor.GetMapChunk(chunkX, chunkZ);
             ushort[]? heightMap = mapChunk?.WorldGenTerrainHeightMap;
-            if (heightMap == null || heightMap.Length < chunkSize * chunkSize) return;
+            if (heightMap == null || heightMap.Length < chunkSize * chunkSize) return false;
 
             int localX = worldX - chunkX * chunkSize;
             int localZ = worldZ - chunkZ * chunkSize;
@@ -336,7 +442,7 @@ internal sealed class AtlasMapLayerTexture : IDisposable
                 new BlockPos(worldX, surfaceY, worldZ),
                 EnumGetClimateMode.WorldGenValues
             );
-            if (climate == null) return;
+            if (climate == null) return false;
             value = Layer switch
             {
                 AtlasMapLayer.SoilFertility => climate.Fertility,
@@ -349,6 +455,7 @@ internal sealed class AtlasMapLayerTexture : IDisposable
 
         pixels[index] = ColorForLayer(Layer, Math.Clamp(value, 0f, 1f));
         validSampleCount++;
+        return true;
     }
 
     private bool TryReadOreDensity(int worldX, int worldZ, out float density)
