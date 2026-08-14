@@ -12,6 +12,8 @@ uniform int backgroundAvailable;
 uniform int weatherType;
 uniform float weatherIntensity;
 uniform float weatherFog;
+uniform float weatherWindOffset;
+uniform float weatherLightning;
 uniform float weatherTime;
 uniform int weatherSurface;
 uniform float weatherLayerScale;
@@ -61,7 +63,7 @@ vec4 scrollWeather(vec2 position)
         // Sparse diagonal streaks and tiny wet marks remain below the visual
         // weight of map symbols and controls.
         vec2 moving = position;
-        moving.x += weatherTime * 0.18;
+        moving.x += weatherWindOffset * 0.72;
         moving.y += weatherTime * 1.35;
         vec2 grid = moving * vec2(24.0, 10.0);
         vec2 cell = floor(grid);
@@ -79,7 +81,8 @@ vec4 scrollWeather(vec2 position)
     else if (weatherType == 2)
     {
         vec2 moving = position + vec2(
-            sin(weatherTime * 0.7 + position.y * 8.0) * 0.035,
+            sin(weatherTime * 0.7 + position.y * 8.0) * 0.035
+                + weatherWindOffset * 0.24,
             weatherTime * 0.16
         );
         float flakes = weatherParticle(moving, vec2(13.0, 10.0), 2.1, 0.095);
@@ -94,7 +97,10 @@ vec4 scrollWeather(vec2 position)
     }
     else if (weatherType == 3)
     {
-        vec2 moving = position + vec2(weatherTime * 0.07, weatherTime * 0.72);
+        vec2 moving = position + vec2(
+            weatherWindOffset * 0.34,
+            weatherTime * 0.72
+        );
         float hail = weatherParticle(moving, vec2(20.0, 15.0), 6.3, 0.075);
         coverage = hail * 0.16 * intensity;
         color = vec3(0.88, 0.94, 0.97);
@@ -104,12 +110,15 @@ vec4 scrollWeather(vec2 position)
         (position + vec2(weatherTime * 0.006, 0.0)) * vec2(7.0, 5.0)
     ));
     float haze = fogAmount * mix(0.025, 0.075, hazeNoise);
+    float lightning = clamp(weatherLightning, 0.0, 1.0)
+        * (weatherSurface > 0 ? 0.10 : 0.055);
     float alphaOut = clamp(
-        (coverage + haze) * clamp(weatherLayerScale, 0.0, 1.0),
+        (coverage + haze + lightning) * clamp(weatherLayerScale, 0.0, 1.0),
         0.0,
         0.22
     );
     color = mix(color, vec3(0.72, 0.76, 0.76), haze * 4.0);
+    color = mix(color, vec3(0.94, 0.97, 1.0), lightning * 7.0);
     return vec4(color, alphaOut);
 }
 

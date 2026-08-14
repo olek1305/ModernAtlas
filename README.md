@@ -2,9 +2,9 @@
 
 ModernAtlas is a 3D map enhancement for Vintage Story 1.22.6. Its public name
 is deliberately independent from Google trademarks. The renderer remains
-client-side; an optional server component supplies fog and living-entity policy.
+client-side; an optional server component supplies living-entity policy.
 
-## Current 0.6.5 prototype
+## Current 0.6.6 prototype
 
 - keeps the vanilla map, discovered areas and waypoints intact;
 - opens a separate interactive 3D atlas with `G` (rebindable in Controls),
@@ -53,8 +53,6 @@ client-side; an optional server component supplies fog and living-entity policy.
 - does not generate unexplored chunks and does not write to a save file;
 - fits the atlas to Vintage Story's current view-distance setting and never
   pretends that a second radius control can load more or fewer exact chunks;
-- provides an optional unexplored-area fog mask (`M`) and fog-off defaults on
-  `Home`; its reduced-resolution texture avoids a full-screen Cairo upload;
 - suppresses the normal camera-distance haze while rendering the atlas, then
   restores the world's fog values before returning to the game;
 - removes player-local underwater, lava, fog-sphere, night-vision, perception
@@ -84,8 +82,8 @@ client-side; an optional server component supplies fog and living-entity policy.
   exact 3D geometry already present in the atlas while retaining its relief;
   ore density uses loaded regional data when available and otherwise samples
   registered ore blocks from already loaded chunk columns;
-- includes an atlas-only visual lab under Settings for exposure, layer opacity,
-  boundary softness, cave-mask brightness and neutral fog palettes;
+- includes an atlas-only visual lab under Settings for exposure, layer opacity
+  and cave-mask brightness;
 - includes a dedicated Settings > Performance panel with neutral flat atlas
   lighting, full/half/quarter texture detail and an optional transient filter
   for registered plant and leaf materials, including correctly registered mod
@@ -98,11 +96,10 @@ client-side; an optional server component supplies fog and living-entity policy.
   Creative/Cheat-only panel for cave mode,
   loaded-map search and camera-angle locking, plus a `Hide UI` view that
   `Escape` restores;
-- forces the unexplored-area mask in multiplayer while using only exact chunk
-  data that the server has already sent to the client;
+- uses only exact chunk data that the server has already sent to the client;
 - can render the game's live animated 3D models for already client-loaded
   players, animals, hostile mobs and NPCs only when the server enables them;
-- keeps multiplayer living models off and fog on when the server has no
+- keeps multiplayer living models off when the server has no
   ModernAtlas policy channel, so a vanilla multiplayer server remains safe.
 
 Dropped items, particles, labels and unrelated transient objects are never
@@ -110,7 +107,7 @@ drawn by the ordinary atlas render. Creative/Cheat search may inspect already
 loaded dropped-item entities and represent matches with lightweight markers.
 Optional living models iterate only `LoadedEntities`, so the atlas
 does not request or receive hidden entity positions. Models use the same world
-depth buffer as terrain and fluids, so walls and fog conceal them. In paused
+depth buffer as terrain and fluids, so walls and the disclosure boundary conceal them. In paused
 singleplayer they hold the pose captured when the atlas opens instead of
 continuing run, walk or gesture animation. Held items are omitted from every
 atlas living model so camera-sensitive shields, tools and modded accessories
@@ -118,7 +115,7 @@ cannot float separately from their owner. The renderer is an
 isolated 1.22.6 integration. If it is unavailable, ModernAtlas reports the
 failure instead of displaying substitute block models or invented materials.
 There is no persistent ModernAtlas terrain cache; unavailable exact terrain is
-concealed by the player-anchored fog boundary.
+not drawn and remains behind the opaque atlas background.
 
 The atlas settings include a `Living entities` master switch and separate
 `Players`, `Animals`, `Hostile mobs`, and `NPCs` switches. These are normal
@@ -135,11 +132,10 @@ available to the client and keeps its rendering independent from that database.
 
 When ModernAtlas is installed on a server it creates
 `VintagestoryData/ModConfig/ModernAtlasServer.json`. Defaults are deliberately
-safe: fog is enabled and all living models are disabled by the master switch.
+safe: all living models are disabled by the master switch.
 
 ```json
 {
-  "FogEnabled": true,
   "CheatModeAllowed": false,
   "LivingEntitiesEnabled": false,
   "ShowPlayers": true,
@@ -159,7 +155,7 @@ Set `LivingEntitiesEnabled` to `true` to opt in. Category flags are then applied
 independently; for example, `ShowNpcs: false` hides only NPCs while the other
 enabled categories remain visible. Restart the server after editing the file.
 Clients cannot override this policy. A server without ModernAtlas is treated as
-fog on and every entity category off.
+having every entity category off.
 
 ## Run on Linux
 
@@ -201,7 +197,7 @@ not bundle any Vintage Story binaries or assets.
 ## Planned architecture
 
 1. Continue rendering exact client-loaded block meshes without a terrain cache.
-2. Refine the player-anchored fog transition and loaded-data analysis layers.
+2. Refine loaded-data analysis layers and the hard disclosure boundary.
 3. Add atlas quality and compatibility polish within strict frame budgets.
 4. Continue optional cloud and presentation polish matching the concept image.
 

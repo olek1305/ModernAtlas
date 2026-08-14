@@ -11,10 +11,17 @@ namespace ModernAtlas;
 /// Reads the already blended weather at the local player. This class never
 /// advances weather, creates particles, scans chunks or requests world data.
 /// </summary>
-internal sealed class AtlasScrollRealtimeWeather
+internal sealed class AtlasScrollRealtimeWeather : IDisposable
 {
+    private const long LightningFlashDurationMilliseconds = 550;
+
     private readonly ICoreClientAPI capi;
     private WeatherSystemClient? weatherSystem;
+    private long lightningStartedMilliseconds = long.MinValue;
+    private long lastWindSampleMilliseconds;
+    private float smoothedWindDrift;
+    private float accumulatedWindOffset;
+    private bool lightningListenerRegistered;
     public string LastDiagnostic { get; private set; } = "not sampled";
 
     public AtlasScrollRealtimeWeather(ICoreClientAPI capi)
@@ -48,6 +55,7 @@ internal sealed class AtlasScrollRealtimeWeather
             LastDiagnostic = "skipped: native blended weather is unavailable";
             return false;
         }
+        EnsureLightningListener();
 
         // Keep the public precipitation state as an intensity fallback. The
         // native particle renderer selects the final type from the blended
@@ -102,24 +110,79 @@ internal sealed class AtlasScrollRealtimeWeather
         // rise above that baseline.
         float weatherFogDensity = weather.Ambient?.FogDensity?.Value ?? 0f;
         float fog = Math.Clamp((weatherFogDensity - 1.5f) / 18f, 0f, 1f);
-        if (precipitationKind == 0 && fog < 0.015f)
+        long lightningAge = capi.ElapsedMilliseconds - lightningStartedMilliseconds;
+        float lightning = lightningAge >= 0
+            && lightningAge < LightningFlashDurationMilliseconds
+                ? 1f - lightningAge / (float)LightningFlashDurationMilliseconds
+                : 0f;
+        if (precipitationKind == 0 && fog < 0.015f && lightning <= 0f)
         {
             LastDiagnostic = $"skipped: sourceType={precipitationState.Type}, resolvedType={resolvedType}, level={precipitation:0.###}, blendedType={weather.BlendedPrecType}, temperature={currentTemperature:0.###}, snowThreshold={weather.snowThresholdTemp:0.###}, distanceToRainfall={distanceToRainfall:0.###}, weatherFog={weatherFogDensity:0.###}";
             return false;
         }
 
+        Vec3d wind = capi.World.BlockAccessor.GetWindSpeedAt(
+            capi.World.Player.Entity.Pos.XYZ
+        );
+        float cameraYaw = capi.World.Player.CameraYaw;
+        float windAcrossView = (float)(
+            wind.X * Math.Cos(cameraYaw) - wind.Z * Math.Sin(cameraYaw)
+        );
+        float windDrift = Math.Clamp(windAcrossView, -1f, 1f);
+        long nowMilliseconds = capi.ElapsedMilliseconds;
+        float windDeltaSeconds = lastWindSampleMilliseconds > 0
+            ? Math.Clamp(
+                (nowMilliseconds - lastWindSampleMilliseconds) / 1000f,
+                0f,
+                0.1f
+            )
+            : 0f;
+        lastWindSampleMilliseconds = nowMilliseconds;
+        float windBlend = Math.Clamp(windDeltaSeconds * 2.5f, 0f, 1f);
+        smoothedWindDrift += (windDrift - smoothedWindDrift) * windBlend;
+        accumulatedWindOffset += smoothedWindDrift * windDeltaSeconds;
+
         state = new AtlasScrollWeatherState(
             precipitationKind,
             precipitation,
-            fog
+            fog,
+            accumulatedWindOffset,
+            lightning
         );
-        LastDiagnostic = $"active: sourceType={precipitationState.Type}, resolvedType={resolvedType}, level={precipitation:0.###}, blendedType={weather.BlendedPrecType}, temperature={currentTemperature:0.###}, snowThreshold={weather.snowThresholdTemp:0.###}, distanceToRainfall={distanceToRainfall:0.###}, weatherFog={weatherFogDensity:0.###}, overlayFog={fog:0.###}";
+        LastDiagnostic = $"active: sourceType={precipitationState.Type}, resolvedType={resolvedType}, level={precipitation:0.###}, blendedType={weather.BlendedPrecType}, temperature={currentTemperature:0.###}, snowThreshold={weather.snowThresholdTemp:0.###}, distanceToRainfall={distanceToRainfall:0.###}, weatherFog={weatherFogDensity:0.###}, overlayFog={fog:0.###}, windDrift={windDrift:0.###}, lightning={lightning:0.###}";
         return true;
+    }
+
+    private void EnsureLightningListener()
+    {
+        if (lightningListenerRegistered || weatherSystem == null) return;
+
+        weatherSystem.OnLightningImpactBegin += OnLightningImpactBegin;
+        lightningListenerRegistered = true;
+    }
+
+    private void OnLightningImpactBegin(ref Vec3d position, ref EnumHandling handling)
+    {
+        // This event is emitted by the native weather simulation. Recording a
+        // render timestamp does not affect the strike or its handling.
+        lightningStartedMilliseconds = capi.ElapsedMilliseconds;
+    }
+
+    public void Dispose()
+    {
+        if (lightningListenerRegistered && weatherSystem != null)
+        {
+            weatherSystem.OnLightningImpactBegin -= OnLightningImpactBegin;
+        }
+        lightningListenerRegistered = false;
+        weatherSystem = null;
     }
 }
 
 internal readonly record struct AtlasScrollWeatherState(
     int PrecipitationKind,
     float PrecipitationIntensity,
-    float FogIntensity
+    float FogIntensity,
+    float WindOffset,
+    float LightningIntensity
 );

@@ -9,9 +9,6 @@ namespace ModernAtlas;
 [ProtoContract]
 public sealed class ModernAtlasServerPolicy
 {
-    [ProtoMember(1)]
-    public bool FogEnabled { get; set; } = true;
-
     [ProtoMember(2)]
     public bool ShowPlayers { get; set; }
 
@@ -31,7 +28,6 @@ public sealed class ModernAtlasServerPolicy
 
     public void CopyFrom(ModernAtlasServerPolicy policy)
     {
-        FogEnabled = policy.FogEnabled;
         ShowPlayers = policy.ShowPlayers;
         ShowAnimals = policy.ShowAnimals;
         ShowMobs = policy.ShowMobs;
@@ -41,7 +37,6 @@ public sealed class ModernAtlasServerPolicy
 
     public void ResetToSafeDefaults()
     {
-        FogEnabled = true;
         ShowPlayers = false;
         ShowAnimals = false;
         ShowMobs = false;

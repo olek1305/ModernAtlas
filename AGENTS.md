@@ -5,7 +5,7 @@
 ModernAtlas is a Vintage Story 1.22.6 mod that should turn the world map into a
 readable, Google-Earth-like 3D atlas while remaining an independent product
 with its own name and visual identity. Rendering is client-side; the optional
-server side owns multiplayer fog and living-entity disclosure policy.
+server side owns multiplayer living-entity disclosure policy.
 
 The target view contains terrain relief, mountains, water, block-built
 structures, ruins and trees. It should resemble the approved ModernAtlas
@@ -86,21 +86,24 @@ the product scope when the atlas itself is correct.
   generate unexplored terrain solely for the atlas.
 - Existing vanilla exploration, waypoints and maps must remain usable.
 - Exact block geometry is available only while chunks are client-loaded. Draw
-  those completed meshes directly and conceal unavailable terrain with fog.
+  those completed meshes directly and leave unavailable terrain absent against
+  the opaque atlas background.
 - Do not create, load, render or maintain a persistent ModernAtlas terrain
   cache. The former colored-relief cache and its Clear Cache UI were removed
   because stale or incomplete tiles produced black terrain and excessive work.
   Existing old ModernAtlas cache files are inert and must not be deleted
   automatically.
 - Do not generate an artificial textured surface, stone shell or boundary wall
-  around the atlas radius. Draw only client-loaded world geometry; conceal
-  unavailable terrain with the existing fog rather than invented blocks.
-- Fog must conceal terrain that the client is not allowed to know. The clear
-  radius is anchored to the player's actual world position; panning or rotating
-  the atlas camera must never move or enlarge that revealed area.
+  around the atlas radius. Draw only client-loaded world geometry; leave
+  unavailable terrain absent against the opaque atlas background rather than
+  inventing blocks.
+- The hard disclosure boundary must exclude terrain that the client is not
+  allowed to know. Its radius is anchored to the player's actual world
+  position; panning or rotating the atlas camera must never move or enlarge the
+  revealed area.
 - Living models must iterate only the client's `LoadedEntities`; never send,
   request, cache or infer hidden entity positions for the atlas. Render them
-  into the same depth buffer as terrain before fluids and fog so blocks and the
+  into the same depth buffer as terrain before fluids so blocks and the
   disclosure boundary conceal them correctly.
 
 ## Camera and controls
@@ -116,8 +119,7 @@ the product scope when the atlas itself is correct.
   horizontal zero-degree floor. Never let the camera rotate below the atlas
   ground plane or invert through negative pitch; clamp or collide at the floor.
 - Smoothly interpolate pan, rotation, tilt and wheel zoom using real render
-  time so controls continue to animate while singleplayer is paused. Keep fog
-  texture uploads throttled while the camera is moving.
+  time so controls continue to animate while singleplayer is paused.
 - Opening `G` must not pause singleplayer. World ticks, client chunk streaming
   and completion of GPU chunk meshes continue while the atlas is open, and
   newly completed exact meshes must appear without closing and reopening it.
@@ -178,21 +180,21 @@ the product scope when the atlas itself is correct.
   columns from already loaded chunks and recognizes registered blocks through
   `EnumBlockMaterial.Ore`; it must not request, unpack or generate a chunk.
 - `Atlas visual lab` is the supported replacement for relying on the engine's
-  `~` ambient editor while `G` owns input. Its exposure, layer opacity,
-  boundary softness, cave-mask brightness and fog palette controls affect only
-  the atlas framebuffer. Keep their defaults neutral and their ranges bounded.
+  `~` ambient editor while `G` owns input. Its exposure, layer opacity and
+  cave-mask brightness controls affect only the atlas framebuffer. Keep their
+  defaults neutral and their ranges bounded.
 
 ## View distance and multiplayer rules
 
 - Do not expose a separate atlas radius. Fit and cull the atlas from Vintage
   Story's current `viewDistance` graphics setting because that setting controls
   which exact chunk meshes the client has loaded.
-- Fog may be configurable in singleplayer. Rendering performance, view distance
-  and waving vegetation remain controlled by Vintage Story's graphics settings.
+- Rendering performance, view distance and waving vegetation remain controlled
+  by Vintage Story's graphics settings.
   Multiplayer must not request distant chunks or disclose activity outside data
   already sent by the server.
-- `ModernAtlasServer.json` is authoritative in multiplayer. Its defaults are
-  `FogEnabled: true` and `LivingEntitiesEnabled: false`. Players, animals,
+- `ModernAtlasServer.json` is authoritative in multiplayer. Its default is
+  `LivingEntitiesEnabled: false`. Players, animals,
   hostile mobs and NPCs have independent allow flags after the master entity
   switch is enabled. A missing server policy channel must use the same safe
   defaults, and clients must not override them. Client settings may hide all
@@ -260,7 +262,7 @@ the product scope when the atlas itself is correct.
 
 ## Current verified baseline
 
-- The working public version is `0.6.5`. Do not change the version number
+- The working public version is `0.6.6`. Do not change the version number
   unless the project owner explicitly requests it. Package-content changes may
   continue under this version during the current test cycle.
 - The verified liquid implementation uses completed liquid chunk meshes and a
@@ -364,7 +366,7 @@ the product scope when the atlas itself is correct.
 ## Build and in-game test workflow
 
 - For every rendering change, build `ModernAtlas.csproj` in Release mode,
-  create `Releases/modernatlas_0.6.5.zip`, validate the ZIP, and copy that exact
+  create `Releases/modernatlas_0.6.6.zip`, validate the ZIP, and copy that exact
   archive to the active Vintage Story `Mods` directory. Compare SHA-256 hashes
   so the release and active archives are demonstrably identical.
 - Close the running game cleanly before replacing or retesting the active mod.
@@ -440,7 +442,7 @@ the product scope when the atlas itself is correct.
   streaming queue when configured with an extreme full-LOD range.
 - Test both the safe server defaults and a policy with living models enabled.
   Confirm the generated server JSON, received policy log, per-category filter,
-  fog lock and fallback behavior when the server has no policy channel.
+  fallback behavior when the server has no policy channel.
 
 ## Legal and repository rules
 
@@ -459,7 +461,8 @@ the product scope when the atlas itself is correct.
 1. Preserve the vanilla map and add terrain relief (prototype complete).
 2. Render a tilted, navigable 3D block atlas from client-loaded exact meshes
    with mod texture support (current baseline).
-3. Keep unavailable terrain fogged without persistent fallback tiles.
+3. Keep unavailable terrain absent behind an opaque background without
+   persistent fallback tiles.
 4. Fix cave-opening concealment, Creative/Cheat camera pitch and world-leave
    lifecycle stability.
 5. Add atlas unit inspection, loaded-data search and safe result highlighting.

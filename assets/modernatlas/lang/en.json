@@ -1,6 +1,3 @@
 {
-  "hotkey-open-map": "Open ModernAtlas 3D atlas",
-  "controls-help": "Drag: pan / rotate • wheel: zoom • middle: reset • G/Esc: exit • Esc restores hidden UI",
-  "status-building": "Building scene: {0}% • {1} blocks",
-  "status-ready": "Scene ready • {0} blocks • exact geometry uses only client-available chunks"
+  "hotkey-open-map": "Open ModernAtlas 3D atlas"
 }

@@ -92,8 +92,7 @@ public sealed class ModernAtlasSystem : ModSystem
 
         ModernAtlasServerPolicy policy = serverConfig.ToPolicy();
         api.Logger.Notification(
-            "[ModernAtlas] Server policy loaded: fog {0}; Cheat Mode allowed={1}; live 3D models players={2}, animals={3}, mobs={4}, npcs={5}.",
-            policy.FogEnabled,
+            "[ModernAtlas] Server policy loaded: Cheat Mode allowed={0}; live 3D models players={1}, animals={2}, mobs={3}, npcs={4}.",
             policy.CheatModeAllowed,
             policy.ShowPlayers,
             policy.ShowAnimals,
@@ -527,8 +526,7 @@ public sealed class ModernAtlasSystem : ModSystem
         serverPolicy.CopyFrom(policy);
         dialog?.OnServerPolicyChanged();
         clientApi?.Logger.Notification(
-            "[ModernAtlas] Applied server policy: fog {0}; Cheat Mode allowed={1}; live 3D models players={2}, animals={3}, mobs={4}, npcs={5}.",
-            policy.FogEnabled,
+            "[ModernAtlas] Applied server policy: Cheat Mode allowed={0}; live 3D models players={1}, animals={2}, mobs={3}, npcs={4}.",
             policy.CheatModeAllowed,
             policy.ShowPlayers,
             policy.ShowAnimals,

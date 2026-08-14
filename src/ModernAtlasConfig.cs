@@ -7,7 +7,6 @@ public sealed class ModernAtlasConfig
 {
     private Dictionary<string, bool> cheatModeByWorld = new();
 
-    public bool FogEnabled { get; set; }
     public bool AnimationsEnabled { get; set; } = true;
     public bool ShowPlayerCompass { get; set; }
     public string HandheldInstrumentMode { get; set; } = "compass";
@@ -25,15 +24,13 @@ public sealed class ModernAtlasConfig
     public bool ShowAnimals { get; set; } = true;
     public bool ShowMobs { get; set; } = true;
     public bool ShowNpcs { get; set; } = true;
-    public bool MapLayersEnabled { get; set; }
+    public bool MapLayersEnabled { get; set; } = false;
     public bool CaveModeEnabled { get; set; } = true;
     public bool SearchModeEnabled { get; set; }
     public bool CameraAngleLocked { get; set; }
     public int AtlasExposurePercent { get; set; } = 100;
     public int MapLayerOpacityPercent { get; set; } = 75;
-    public int BoundarySoftnessPercent { get; set; } = 100;
     public int CaveMaskBrightnessPercent { get; set; } = 100;
-    public string FogPalette { get; set; } = "neutral";
 
     /// <summary>
     /// Stores the player's explicit spoiler decision per save without writing

@@ -543,28 +543,27 @@ internal sealed class AtlasCompassRenderer : IDisposable
         context.Paint();
         context.Operator = Operator.Over;
 
-        // Warm, uneven timber replaces the sterile paper-and-ink diagram
-        // look. Sparse curved grain and burned marks keep the face legible at
-        // its small in-game size without turning it into a technical plate.
-        context.SetSourceRGBA(0.54, 0.32, 0.12, 1);
+        // Use the same light parchment insert as the compass so switching the
+        // instrument changes its function without replacing its visual kit.
+        context.SetSourceRGBA(0.82, 0.72, 0.50, 1);
         context.Arc(128, 128, 118, 0, Math.PI * 2);
         context.Fill();
-        context.SetSourceRGBA(0.16, 0.075, 0.020, 1);
-        context.LineWidth = 9;
-        context.Arc(128, 128, 113, 0, Math.PI * 2);
+        context.SetSourceRGBA(0.22, 0.13, 0.045, 1);
+        context.LineWidth = 8;
+        context.Arc(128, 128, 114, 0, Math.PI * 2);
         context.Stroke();
-        context.SetSourceRGBA(0.30, 0.16, 0.050, 1);
+        context.SetSourceRGBA(0.34, 0.21, 0.075, 0.92);
         context.LineWidth = 3;
         context.Arc(128, 128, 96, 0, Math.PI * 2);
         context.Stroke();
 
-        context.SetSourceRGBA(0.18, 0.080, 0.018, 0.95);
+        context.SetSourceRGBA(0.22, 0.13, 0.045, 0.95);
         for (int hour = 6; hour <= 18; hour++)
         {
             double angle = (hour - 12) * Math.PI / 12 - Math.PI * 0.5;
             bool labelledHour = hour % 3 == 0;
             double inner = labelledHour ? 13 : 20;
-            double outer = labelledHour ? 70 : 82;
+            double outer = labelledHour ? 57 : 66;
             context.LineWidth = labelledHour ? 3.4 : 1.9;
             context.MoveTo(
                 centerX + Math.Cos(angle) * inner,
@@ -578,8 +577,8 @@ internal sealed class AtlasCompassRenderer : IDisposable
         }
 
         context.SelectFontFace("Sans", FontSlant.Normal, FontWeight.Bold);
-        context.SetFontSize(24);
-        context.SetSourceRGBA(0.14, 0.060, 0.014, 1);
+        context.SetFontSize(22);
+        context.SetSourceRGBA(0.20, 0.11, 0.035, 1);
         DrawSundialHour(context, "6", 6, centerX, centerY);
         DrawSundialHour(context, "9", 9, centerX, centerY);
         DrawSundialHour(context, "12", 12, centerX, centerY);
@@ -606,8 +605,8 @@ internal sealed class AtlasCompassRenderer : IDisposable
         DrawCenteredText(
             context,
             label,
-            centerX + Math.Cos(angle) * 88,
-            centerY + Math.Sin(angle) * 88
+            centerX + Math.Cos(angle) * 74,
+            centerY + Math.Sin(angle) * 74
         );
     }
 

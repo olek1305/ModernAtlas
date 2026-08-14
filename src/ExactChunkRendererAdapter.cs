@@ -118,8 +118,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private Vec3f atlasSunColor = new(1f, 0.96f, 0.86f);
     private float atlasExposure = 1f;
     private float atlasTextureMipBias;
-    private Vec3f atlasFogColor = new(0.32f, 0.38f, 0.40f);
-    private float atlasBoundarySoftness = 1f;
     private float atlasCaveMaskBrightness = 1f;
     private readonly Dictionary<EnumShaderProgram, AtlasFilterShaderState> atlasFilterShaders = new();
     private readonly HashSet<EnumShaderProgram> atlasFilterInjectionFailures = new();
@@ -459,7 +457,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         float yawRadians,
         float pitchRadians,
         int viewDistanceBlocks,
-        bool fogEnabled,
         bool hideUndergroundCaves,
         bool concealSurvivalOres,
         AtlasSurfaceHeightTexture? surfaceHeightTexture,
@@ -468,9 +465,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         int textureDetailReduction,
         bool performanceLightingEnabled,
         bool hideVegetation,
-        Vec3f fogColor,
         float visualExposureMultiplier,
-        float boundarySoftness,
         float caveMaskBrightness,
         float windWaveCounter,
         float windWaveCounterHighFrequency,
@@ -527,12 +522,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         long transparentCompletedMilliseconds = renderStartedMilliseconds;
         bool atlasFilterConfigured = false;
 
-        atlasFogColor = new Vec3f(
-            Math.Clamp(fogColor.X, 0f, 1f),
-            Math.Clamp(fogColor.Y, 0f, 1f),
-            Math.Clamp(fogColor.Z, 0f, 1f)
-        );
-        atlasBoundarySoftness = Math.Clamp(boundarySoftness, 0.25f, 2f);
         atlasCaveMaskBrightness = Math.Clamp(caveMaskBrightness, 0.5f, 1.5f);
         atlasTextureMipBias = Math.Clamp(textureDetailReduction, 0, 2);
         LastRenderedTextureDetailReduction = (int)atlasTextureMipBias;
@@ -541,9 +530,8 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
 
         try
         {
-            // The atlas already has an explicit unexplored-area mask. World
-            // distance fog is based on the elevated atlas eye and otherwise
-            // covers most of the orthographic map with haze.
+            // World distance fog is based on the elevated atlas eye and would
+            // otherwise cover most of the orthographic map with haze.
             ambientFogDensityProperty.SetValue(ambient, 0f);
             ambient.BlendedFlatFogDensity = 0;
             ambientFogMinimumProperty.SetValue(ambient, 0f);
@@ -588,9 +576,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             // world framebuffer. Rendering them into the default GUI target
             // produces no color even though the draw call succeeds.
             FrameBufferRef primaryFramebuffer = render.FrameBuffers[(int)EnumFrameBuffer.Primary];
-            float[] atlasBackground = fogEnabled
-                ? new[] { atlasFogColor.X, atlasFogColor.Y, atlasFogColor.Z, 1f }
-                : new[] { 0.035f, 0.075f, 0.11f, 1f };
+            float[] atlasBackground = { 0.035f, 0.075f, 0.11f, 1f };
             render.ClearFrameBuffer(primaryFramebuffer, atlasBackground, true, true);
 
             // Keep the eye in front of the entire requested atlas volume.
@@ -679,9 +665,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                         true,
                         hideUndergroundCaves,
                         concealSurvivalOres,
-                        hideVegetation,
-                        fogEnabled,
-                        viewDistanceBlocks
+                        hideVegetation
                     ))
                 {
                     if (!loggedUndergroundSafetyFailure)
@@ -733,7 +717,6 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 surfaceHeightTexture,
                 mapLayerTexture,
                 mapLayerOpacity,
-                fogEnabled,
                 viewDistanceBlocks,
                 blitToDefault
             ))
@@ -798,9 +781,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                         false,
                         false,
                         false,
-                        false,
-                        false,
-                        0
+                        false
                     );
                 }
                 catch (Exception exception)
@@ -1184,11 +1165,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         }
     }
 
-    public void RenderSurfacePreparationFrame(
-        bool fogEnabled,
-        Vec3f fogColor,
-        bool blitToDefault
-    )
+    public void RenderSurfacePreparationFrame(bool blitToDefault)
     {
         if (disabled) return;
 
@@ -1197,9 +1174,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             IRenderAPI render = capi.Render;
             render.CurrentActiveShader?.Stop();
             FrameBufferRef primaryFramebuffer = render.FrameBuffers[(int)EnumFrameBuffer.Primary];
-            float[] atlasBackground = fogEnabled
-                ? new[] { fogColor.X, fogColor.Y, fogColor.Z, 1f }
-                : new[] { 0.035f, 0.075f, 0.11f, 1f };
+            float[] atlasBackground = { 0.035f, 0.075f, 0.11f, 1f };
             render.ClearFrameBuffer(primaryFramebuffer, atlasBackground, true, true);
             if (blitToDefault)
             {
@@ -1251,9 +1226,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         bool enabled,
         bool hideUndergroundCaves,
         bool concealSurvivalOres,
-        bool hideVegetation,
-        bool fogEnabled,
-        int disclosureRadius
+        bool hideVegetation
     )
     {
         if (!enabled)
@@ -2180,7 +2153,6 @@ void main()
         AtlasSurfaceHeightTexture? surfaceHeightTexture,
         AtlasMapLayerTexture? mapLayerTexture,
         float mapLayerOpacity,
-        bool fogEnabled,
         int disclosureRadius,
         bool blitToDefault
     )
@@ -2211,9 +2183,7 @@ void main()
                 true,
                 hideUndergroundCaves,
                 concealSurvivalOres,
-                hideVegetation,
-                fogEnabled,
-                disclosureRadius
+                hideVegetation
             ))
             {
                 throw new InvalidOperationException(
@@ -2269,7 +2239,6 @@ void main()
                 surfaceHeightTexture,
                 mapLayerTexture,
                 mapLayerOpacity,
-                fogEnabled,
                 disclosureRadius
             );
             if (cloudsEnabled && !blitToDefault)
@@ -2374,7 +2343,6 @@ void main()
         AtlasSurfaceHeightTexture? surfaceHeightTexture,
         AtlasMapLayerTexture? mapLayerTexture,
         float mapLayerOpacity,
-        bool fogEnabled,
         int disclosureRadius
     )
     {
@@ -2419,27 +2387,6 @@ void main()
         activeLiquidShader.Uniform(
             "disclosureRadius",
             (float)Math.Max(GlobalConstants.ChunkSize, disclosureRadius)
-        );
-        float radius = Math.Max(GlobalConstants.ChunkSize, disclosureRadius);
-        float baseBoundaryFeather = fogEnabled
-            ? Math.Min(
-                radius * 0.25f,
-                Math.Max(GlobalConstants.ChunkSize * 2f, radius * 0.10f)
-            )
-            : Math.Min(
-                radius * 0.25f,
-                Math.Max(GlobalConstants.ChunkSize * 0.5f, radius * 0.03f)
-            );
-        float boundaryFeather = Math.Min(
-            radius * 0.40f,
-            baseBoundaryFeather * atlasBoundarySoftness
-        );
-        activeLiquidShader.Uniform("disclosureFeather", boundaryFeather);
-        activeLiquidShader.Uniform(
-            "boundaryFogColor",
-            fogEnabled
-                ? atlasFogColor
-                : new Vec3f(0.035f, 0.075f, 0.11f)
         );
         bool applySurfaceFilter = hideUndergroundCaves
             && surfaceHeightTexture?.Ready == true

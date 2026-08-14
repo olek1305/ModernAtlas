@@ -7,8 +7,6 @@ uniform vec2 textureAtlasSize;
 uniform float waterFlowCounter;
 uniform vec2 disclosureCenterXZ;
 uniform float disclosureRadius;
-uniform float disclosureFeather;
-uniform vec3 boundaryFogColor;
 uniform int atlasHideCaves;
 uniform sampler2D atlasSurfaceHeightTex;
 uniform vec2 atlasSurfaceOriginXZ;
@@ -73,11 +71,6 @@ void main(void)
     vec2 disclosureDelta = absoluteWorldPosition.xz - disclosureCenterXZ;
     float disclosureDistance = length(disclosureDelta);
     if (disclosureDistance >= disclosureRadius) discard;
-    float boundaryFade = smoothstep(
-        max(0.0, disclosureRadius - disclosureFeather),
-        disclosureRadius,
-        disclosureDistance
-    );
     if (atlasHideCaves > 0)
     {
         ivec2 samplePosition = ivec2(floor(
@@ -186,9 +179,8 @@ void main(void)
     // opaque. Geometry remains stable because no camera-dependent vertex warp
     // or depth reconstruction is used by this atlas shader.
     if (isLava) color.a = 1.0;
-    color.rgb = mix(color.rgb, boundaryFogColor, boundaryFade);
-    // Keep the authored liquid alpha throughout the visible terrain range.
-    // The GUI fog performs the single final boundary fade; attenuating alpha
-    // here as well made water disappear well before opaque terrain.
+    // Keep the authored liquid alpha throughout the disclosed terrain range.
+    // The hard disclosure cutoff prevents completed liquid meshes from
+    // extending beyond data the atlas may show.
     outColor = color;
 }

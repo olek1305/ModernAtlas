@@ -228,6 +228,8 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
         shader.Uniform("weatherType", weather.PrecipitationKind);
         shader.Uniform("weatherIntensity", weather.PrecipitationIntensity);
         shader.Uniform("weatherFog", weather.FogIntensity);
+        shader.Uniform("weatherWindOffset", weather.WindOffset);
+        shader.Uniform("weatherLightning", weather.LightningIntensity);
         shader.Uniform("weatherTime", realTimeSeconds);
         try
         {
