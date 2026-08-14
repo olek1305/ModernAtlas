@@ -43,6 +43,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private readonly Func<IShaderProgram?> atlasCloudShaderProvider;
     private readonly Func<IShaderProgram?> atlasOpacityShaderProvider;
     private readonly AtlasScrollViewportRenderer scrollViewportRenderer;
+    private readonly AtlasCompassRenderer compassRenderer;
     private readonly AtlasSurfaceHeightTexture surfaceHeightTexture;
     private readonly AtlasMapLayerTexture mapLayerTexture;
     private readonly AtlasSearchController searchController;
@@ -309,6 +310,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             capi,
             atlasScrollShaderProvider
         );
+        compassRenderer = new AtlasCompassRenderer(capi, atlasScrollShaderProvider);
         surfaceHeightTexture = new AtlasSurfaceHeightTexture(capi);
         mapLayerTexture = new AtlasMapLayerTexture(capi);
         searchController = new AtlasSearchController(capi);
@@ -332,6 +334,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         creativeSettingsModalOpen = false;
         visualLabModalOpen = false;
         interfaceHidden = false;
+        compassRenderer.ResetForAtlasOpen(config.ShowPlayerCompass);
         lastInterfaceRestoreMilliseconds = -10000;
         selectedEntityId = null;
         ClearSearch();
@@ -529,6 +532,12 @@ public sealed class ModernAtlasDialog : GuiDialog
         {
             RenderSearchMarkers();
         }
+        compassRenderer.Render(
+            config.ShowPlayerCompass,
+            yawDegrees,
+            AtlasViewport,
+            atlasRealDeltaTime
+        );
         string rendererStatus = rendered
             ? "exact loaded terrain"
             : "renderer unavailable";
@@ -915,7 +924,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
         if (args.KeyCode == (int)GlKeys.G)
         {
-            requestClose();
+            CloseAtlas();
             args.Handled = true;
             return;
         }
@@ -1022,6 +1031,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         // unknown when the resized filter is rebuilt on the next open. World
         // leave still releases all of this non-persistent data.
         ResetPointerDrag();
+        compassRenderer.Dispose();
         ReleaseNormalWorldSnapshot();
         ReleaseAtlasFrameCache();
         ScheduleNormalWorldShaderRestore();
@@ -2509,6 +2519,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         fogTexture = null;
         searchMarkerTexture?.Dispose();
         searchMarkerTexture = null;
+        compassRenderer.Dispose();
         ReleaseNormalWorldSnapshot();
         ReleaseAtlasFrameCache();
         opacityQuad?.Dispose();
@@ -2571,8 +2582,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         double contentY = config.RenderOnScroll ? viewport.Y / guiScale : 0;
         double guiWidth = viewport.Width / guiScale;
         double actionX = contentX + Math.Max(18, guiWidth - 232);
-        double hideUiY = contentY
-            + (CreativeCheatSettingsAvailable ? 102 : 56);
+        double compassY = contentY + 56;
+        double hideUiY = contentY + (CreativeCheatSettingsAvailable ? 148 : 102);
         double headerWidth = Math.Min(
             820,
             Math.Max(430, actionX - contentX - 34)
@@ -2612,6 +2623,13 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "exit-button"
             )
             .AddAtlasButton(
+                "COMPASS",
+                ToggleCompass,
+                ElementBounds.Fixed(actionX, compassY, 214, 44),
+                "compass-button",
+                AtlasButtonStyle.Dark
+            )
+            .AddAtlasButton(
                 "HIDE UI",
                 HideInterface,
                 ElementBounds.Fixed(actionX, hideUiY, 214, 44),
@@ -2627,7 +2645,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             .AddAtlasButton(
                 "CREATIVE / CHEAT SETTINGS",
                 OpenCreativeSettingsModal,
-                ElementBounds.Fixed(actionX, contentY + 56, 214, 44),
+                ElementBounds.Fixed(actionX, contentY + 102, 214, 44),
                 "creative-settings-button"
             )
             .Compose(false);
@@ -2736,10 +2754,10 @@ public sealed class ModernAtlasDialog : GuiDialog
             )
             .Compose();
 
-        ElementBounds modalRoot = ElementBounds.Fixed(0, 0, 430, 746)
+        ElementBounds modalRoot = ElementBounds.Fixed(0, 0, 430, 790)
             .WithAlignment(EnumDialogArea.CenterMiddle);
         settingsModal = capi.Gui.CreateCompo("modernatlas-settings", modalRoot)
-            .AddStaticCustomDraw(ElementBounds.Fixed(0, 0, 430, 746), AtlasUiStyle.DrawCard)
+            .AddStaticCustomDraw(ElementBounds.Fixed(0, 0, 430, 790), AtlasUiStyle.DrawCard)
             .AddStaticText(
                 "SETTINGS",
                 AtlasUiStyle.TitleFont(20),
@@ -2922,10 +2940,20 @@ public sealed class ModernAtlasDialog : GuiDialog
                 ElementBounds.Fixed(350, 646, 62, 38),
                 "render-on-scroll"
             )
+            .AddStaticText(
+                "Animated compass",
+                AtlasUiStyle.DetailFont(12),
+                ElementBounds.Fixed(28, 692, 250, 24)
+            )
+            .AddAtlasSwitch(
+                OnPlayerCompassToggled,
+                ElementBounds.Fixed(350, 682, 62, 38),
+                "player-compass"
+            )
             .AddAtlasButton(
                 "ATLAS VISUAL LAB",
                 OpenVisualLab,
-                ElementBounds.Fixed(24, 692, 382, 44),
+                ElementBounds.Fixed(24, 736, 382, 44),
                 "visual-lab-open",
                 AtlasButtonStyle.Dark
             )
@@ -3501,7 +3529,11 @@ public sealed class ModernAtlasDialog : GuiDialog
         return true;
     }
 
-    private bool CloseAtlas() => requestClose();
+    private bool CloseAtlas()
+    {
+        return compassRenderer.BeginStowingForClose(() => { requestClose(); })
+            || requestClose();
+    }
 
     private bool HideInterface()
     {
@@ -3532,7 +3564,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             // that same Escape press.
             return true;
         }
-        return requestClose();
+        return CloseAtlas();
     }
 
     private void OnMapLayerChanged(string value, bool selected)
@@ -4046,6 +4078,19 @@ public sealed class ModernAtlasDialog : GuiDialog
         );
     }
 
+    private void OnPlayerCompassToggled(bool enabled)
+    {
+        config.ShowPlayerCompass = enabled;
+        saveConfig();
+        SyncSettingsControls();
+    }
+
+    private bool ToggleCompass()
+    {
+        OnPlayerCompassToggled(!config.ShowPlayerCompass);
+        return true;
+    }
+
     private void OnMapLayersToggled(bool enabled)
     {
         config.MapLayersEnabled = enabled;
@@ -4240,6 +4285,9 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (settingsModal == null) return;
         settingsModal.GetAtlasSwitch("render-on-scroll")?.SetValue(
             config.RenderOnScroll
+        );
+        settingsModal.GetAtlasSwitch("player-compass")?.SetValue(
+            config.ShowPlayerCompass
         );
         settingsModal.GetAtlasSwitch("map-layers")?.SetValue(config.MapLayersEnabled);
         settingsModal.GetAtlasSwitch("search-mode")?.SetValue(

@@ -9,6 +9,7 @@ public sealed class ModernAtlasConfig
 
     public bool FogEnabled { get; set; }
     public bool AnimationsEnabled { get; set; } = true;
+    public bool ShowPlayerCompass { get; set; }
     public bool RenderOnScroll { get; set; } = true;
     public bool SkipOpeningAnimation { get; set; }
     public bool CloudsEnabled { get; set; } = true;

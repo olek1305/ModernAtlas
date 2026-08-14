@@ -95,6 +95,27 @@ void main(void)
             ? frozenBackground(uv) * vec3(0.62, 0.66, 0.64)
             : vec3(0.012, 0.020, 0.027);
     }
+    else if (materialKind == 9)
+    {
+        // Atlas compass casing: a deliberately simple, authored brass body.
+        float brushed = sin(uv.y * 94.0 + uv.x * 7.0) * 0.035;
+        baseColor = vec3(0.40, 0.25, 0.075) + brushed;
+    }
+    else if (materialKind == 10)
+    {
+        vec2 dial = uv - 0.5;
+        float radius = length(dial);
+        float angle = atan(dial.y, dial.x);
+        float ticks = smoothstep(0.82, 0.96, sin(angle * 16.0) * 0.5 + 0.5);
+        float rim = smoothstep(0.38, 0.48, radius);
+        baseColor = mix(vec3(0.74, 0.66, 0.48), vec3(0.20, 0.15, 0.08), max(rim, ticks * step(0.34, radius)));
+    }
+    else if (materialKind == 11)
+    {
+        baseColor = objectPosition.y >= 0.0
+            ? vec3(0.78, 0.12, 0.075)
+            : vec3(0.10, 0.16, 0.20);
+    }
     else
     {
         vec4 atlasColor = texture(atlasTex, uv);

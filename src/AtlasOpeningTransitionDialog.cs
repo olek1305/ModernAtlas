@@ -43,10 +43,13 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     private LoadedTexture solidTexture;
     private MeshRef? scrollSheetMesh;
     private MeshRef? scrollCylinderMesh;
+    // Retained only by the legacy conversion helper below. All active scroll
+    // rendering uses the shared SeraphForearmRenderer.
     private MeshRef? leftSeraphForearmMesh;
     private MeshRef? rightSeraphForearmMesh;
     private int seraphSkinTextureId;
     private Vec4f seraphSkinColor = new(1f, 1f, 1f, 1f);
+    private readonly SeraphForearmRenderer seraphForearms;
     private readonly Dictionary<string, RemoteScrollState> remoteScrolls = new();
 
     private Action<bool>? completion;
@@ -146,6 +149,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         this.publishAnimationPhase = publishAnimationPhase;
         this.soundController = soundController;
         solidTexture = new LoadedTexture(capi);
+        seraphForearms = new SeraphForearmRenderer(capi);
     }
 
     public bool Begin(bool automated, Action<bool> onCompleted)
@@ -388,10 +392,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         scrollSheetMesh = null;
         scrollCylinderMesh?.Dispose();
         scrollCylinderMesh = null;
-        leftSeraphForearmMesh?.Dispose();
-        leftSeraphForearmMesh = null;
-        rightSeraphForearmMesh?.Dispose();
-        rightSeraphForearmMesh = null;
+        seraphForearms.Dispose();
         solidTexture.Dispose();
         base.Dispose();
     }
@@ -785,14 +786,8 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         float elapsed
     )
     {
-        if (leftSeraphForearmMesh == null || rightSeraphForearmMesh == null) return;
-
-        shader.BindTexture2D(
-            "entityTex",
-            seraphSkinTextureId,
-            0
-        );
-        shader.Uniform("entityColor", seraphSkinColor);
+        if (!seraphForearms.IsReady) return;
+        seraphForearms.BindSkin(shader);
 
         float leftGripX = unroll > 0.025f ? -rollerOffset : rollerOffset;
         float leftGripY = -0.12f;
@@ -813,86 +808,10 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             -0.62f,
             leftReturn
         );
-        RenderArm(
-            shader,
-            leftSeraphForearmMesh,
-            parent,
-            leftStartX,
-            leftStartY,
-            leftGripX,
-            leftGripY,
-            1f
-        );
+        seraphForearms.RenderLeftArm(shader, parent, leftStartX, leftStartY, leftGripX, leftGripY, 1f);
 
         float rightAlpha = SmoothStep((unroll - 0.04f) / 0.24f);
-        RenderArm(
-            shader,
-            rightSeraphForearmMesh,
-            parent,
-            0.64f,
-            -0.62f,
-            rollerOffset,
-            -0.12f,
-            rightAlpha
-        );
-    }
-
-    private void RenderArm(
-        IShaderProgram shader,
-        MeshRef forearmMesh,
-        float[] parent,
-        float startX,
-        float startY,
-        float gripX,
-        float gripY,
-        float alpha
-    )
-    {
-        if (alpha <= 0.001f) return;
-
-        RenderArmSegment(
-            shader,
-            forearmMesh,
-            parent,
-            startX,
-            startY,
-            gripX,
-            gripY,
-            alpha
-        );
-    }
-
-    private void RenderArmSegment(
-        IShaderProgram shader,
-        MeshRef forearmMesh,
-        float[] parent,
-        float startX,
-        float startY,
-        float endX,
-        float endY,
-        float alpha
-    )
-    {
-        float dx = endX - startX;
-        float dy = endY - startY;
-        float length = MathF.Sqrt(dx * dx + dy * dy);
-        float[] model = Mat4f.CloneIt(parent);
-        Mat4f.Translate(
-            model,
-            model,
-            (startX + endX) * 0.5f,
-            (startY + endY) * 0.5f,
-            -0.035f
-        );
-        // LowerArmL/R extend from their elbow at positive local Y toward the
-        // hand at negative local Y. Point that authored hand end at the scroll
-        // grip instead of attaching a second synthetic hand mesh.
-        Mat4f.RotateZ(model, model, MathF.PI - MathF.Atan2(dx, dy));
-        // Preserve the authored rectangular Seraph proportions and emphasize
-        // their blocky cross-section in first person. Y remains exactly the
-        // required reach length while X/Z stay visibly thick.
-        Mat4f.Scale(model, model, length * 1.35f, length, length * 1.35f);
-        RenderComponent(shader, forearmMesh, model, 6, alpha, 0);
+        seraphForearms.RenderRightArm(shader, parent, 0.64f, -0.62f, rollerOffset, -0.12f, rightAlpha);
     }
 
     private void RenderRemoteScrolls()
@@ -1242,6 +1161,15 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     }
 
     private void RefreshSeraphForearmMeshes()
+    {
+        seraphForearms.Dispose();
+        seraphForearmMeshesReady = seraphForearms.Prepare();
+    }
+
+    // Kept temporarily to make old save-session hot reloads harmless. New
+    // atlas scenes use SeraphForearmRenderer, so this duplicate path is never
+    // entered by ModernAtlas itself.
+    private void RefreshSeraphForearmMeshesLegacy()
     {
         leftSeraphForearmMesh?.Dispose();
         leftSeraphForearmMesh = null;
