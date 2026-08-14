@@ -1545,6 +1545,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         {
             config.LiveLightingEnabled = false;
             config.FixedSunHour = Math.Clamp(parsedSunHour, 0, 23);
+            config.PerformanceLightingEnabled = true;
             capi.Logger.Notification(
                 "[ModernAtlas] Automated smoke test forced the atlas sun to {0}:00 for lighting inspection.",
                 config.FixedSunHour
@@ -3304,9 +3305,9 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "handheld-instrument"
             )
             .AddStaticText(
-                "Use live world sun",
+                "Live world sun direction",
                 AtlasUiStyle.DetailFont(12),
-                ElementBounds.Fixed(28, 672, 200, 24)
+                ElementBounds.Fixed(28, 672, 260, 24)
             )
             .AddAtlasSwitch(
                 OnLiveLightingToggled,
@@ -3314,7 +3315,7 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "live-lighting"
             )
             .AddStaticText(
-                "Atlas sun hour (fixed)",
+                "Sun hour (fixed)",
                 AtlasUiStyle.DetailFont(12),
                 ElementBounds.Fixed(28, 709, 180, 24)
             )
@@ -5112,14 +5113,23 @@ public sealed class ModernAtlasDialog : GuiDialog
     private void OnLiveLightingToggled(bool enabled)
     {
         config.LiveLightingEnabled = enabled;
+        // Live and fixed solar controls are meaningful only with directional
+        // atlas lighting enabled. Selecting either mode must not silently
+        // leave the old performance override on neutral flat daylight.
+        config.PerformanceLightingEnabled = true;
         saveConfig();
         SyncSettingsControls();
+        SyncPerformanceControls();
     }
 
     private bool OnFixedSunHourChanged(int hour)
     {
         config.FixedSunHour = Math.Clamp(hour, 0, 23);
+        config.LiveLightingEnabled = false;
+        config.PerformanceLightingEnabled = true;
         saveConfig();
+        SyncSettingsControls();
+        SyncPerformanceControls();
         return true;
     }
 
@@ -5170,8 +5180,15 @@ public sealed class ModernAtlasDialog : GuiDialog
             config.SkipOpeningAnimation
         );
         settingsModal.GetAtlasSwitch("clouds")?.SetValue(config.CloudsEnabled);
-        settingsModal.GetAtlasSwitch("live-lighting")?.SetValue(config.LiveLightingEnabled);
-        settingsModal.GetAtlasSlider("fixed-sun-hour")!.Enabled = !config.LiveLightingEnabled;
+        bool solarLightingActive = config.PerformanceLightingEnabled;
+        settingsModal.GetAtlasSwitch("live-lighting")?.SetValue(
+            solarLightingActive && config.LiveLightingEnabled
+        );
+        // When neutral flat lighting is active, allow either solar control to
+        // opt back into directional lighting. Do not show a live switch as on
+        // while the performance override is silently suppressing it.
+        settingsModal.GetAtlasSlider("fixed-sun-hour")!.Enabled =
+            !solarLightingActive || !config.LiveLightingEnabled;
         bool serverAllowsAny = capi.IsSinglePlayer || serverPolicy.AnyEntityModels;
         settingsModal.GetAtlasSwitch("entities")?.SetValue(config.LivingEntitiesEnabled && serverAllowsAny);
         settingsModal.GetAtlasSwitch("entities")!.Enabled = serverAllowsAny;

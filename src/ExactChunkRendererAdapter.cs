@@ -128,6 +128,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private bool loggedPreparationClearFailure;
     private bool loggedNormalWorldShaderRestore;
     private bool loggedTerrainCoverage;
+    private bool loggedLightingDiagnostics;
     private bool disposed;
 
     public int LastRenderedEntityCount { get; private set; }
@@ -447,6 +448,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     {
         loggedTerrainCoverage = false;
         loggedStableLiquidDiagnostics = false;
+        loggedLightingDiagnostics = false;
     }
 
     public bool Render(
@@ -512,6 +514,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         int savedPointLightsCount = shaderUniforms.PointLightsCount;
         float savedDropShadowIntensity = shaderUniforms.DropShadowIntensity;
         Vec3f savedLightPosition = shaderUniforms.LightPosition3D;
+        Vec3f savedSunPosition = shaderUniforms.SunPosition3D;
         float savedSkyDaylight = (float)(skyDaylightUniformField.GetValue(shaderUniforms) ?? 0f);
         float savedSunsetMod = shaderUniforms.SunsetMod;
         float savedWindWaveCounter = shaderUniforms.WindWaveCounter;
@@ -548,6 +551,25 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 savedSkyDaylight,
                 visualExposureMultiplier
             );
+            if (!loggedLightingDiagnostics)
+            {
+                loggedLightingDiagnostics = true;
+                capi.Logger.Notification(
+                    "[ModernAtlas] Solar lighting: mode={0}, direction=({1:0.000}, {2:0.000}, {3:0.000}), color=({4:0.000}, {5:0.000}, {6:0.000}), exposure={7:0.000}.",
+                    !performanceLightingEnabled
+                        ? "neutral"
+                        : liveLightingEnabled
+                            ? "live"
+                            : $"fixed-{Math.Clamp(fixedSunHour, 0, 23):00}:00",
+                    atlasSunDirection.X,
+                    atlasSunDirection.Y,
+                    atlasSunDirection.Z,
+                    atlasSunColor.X,
+                    atlasSunColor.Y,
+                    atlasSunColor.Z,
+                    atlasExposure
+                );
+            }
             shaderUniforms.CameraUnderwater = 0;
             shaderUniforms.FogSphereQuantity = 0;
             shaderUniforms.FlagFogDensity = 0;
@@ -817,6 +839,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             shaderUniforms.PointLightsCount = savedPointLightsCount;
             shaderUniforms.DropShadowIntensity = savedDropShadowIntensity;
             shaderUniforms.LightPosition3D = savedLightPosition;
+            shaderUniforms.SunPosition3D = savedSunPosition;
             skyDaylightUniformField.SetValue(shaderUniforms, savedSkyDaylight);
             shaderUniforms.SunsetMod = savedSunsetMod;
             shaderUniforms.WindWaveCounter = savedWindWaveCounter;
@@ -853,7 +876,9 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 Math.Clamp(visualExposure, 0.5f, 1.5f)
             );
             shaderUniforms.LightPosition3D = overheadLight;
+            shaderUniforms.SunPosition3D = overheadLight;
             skyDaylightUniformField.SetValue(shaderUniforms, 1f);
+            shaderUniforms.SunsetMod = 0f;
             atlasSunDirection = overheadLight;
             atlasSunColor = neutralLight;
             atlasExposure = visualExposure;
@@ -895,7 +920,14 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 Math.Clamp(liveSceneBrightness * visualExposure, 0.02f, 1.5f)
             );
             shaderUniforms.LightPosition3D = lightDirection;
+            // Chunk programs read lightPosition for directional face shading
+            // and sunPosition for the celestial color contribution. Update
+            // both from the same live world calendar so sunrise in the east,
+            // sunset in the west and the seasonal north/south arc remain
+            // visible instead of retaining the normal camera's stale sun.
+            shaderUniforms.SunPosition3D = sunDirection;
             skyDaylightUniformField.SetValue(shaderUniforms, daylight);
+            shaderUniforms.SunsetMod = calendar.SunsetMod;
             atlasSunDirection = lightDirection;
             atlasSunColor = atmosphericColor;
             atlasExposure = Math.Clamp(
@@ -917,10 +949,12 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 Math.Clamp(liveSceneBrightness * visualExposure, 0.02f, 1.5f)
             );
             shaderUniforms.LightPosition3D = liveLightPosition;
-            atlasSunDirection = NormalizeDirection(
+            Vec3f fallbackSunDirection = NormalizeDirection(
                 liveLightPosition,
                 atlasSunDirection
             );
+            shaderUniforms.SunPosition3D = fallbackSunDirection;
+            atlasSunDirection = fallbackSunDirection;
             atlasSunColor = DayLightColor;
             atlasExposure = Math.Clamp(
                 liveSkyDaylight * Math.Max(0.2f, liveSceneBrightness)
@@ -988,7 +1022,14 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             : fixedSunDirection;
         fixedLightDirection = KeepDirectionalLightAboveTerrain(fixedLightDirection);
         shaderUniforms.LightPosition3D = fixedLightDirection;
+        // Keep the real below/above-horizon solar vector for sky color while
+        // the separate face-light vector is safely clamped above terrain.
+        // GetSunPosition evaluates the current world date and player location,
+        // so a fixed hour still has the world's real east/west and seasonal
+        // north/south direction.
+        shaderUniforms.SunPosition3D = fixedSunDirection;
         skyDaylightUniformField.SetValue(shaderUniforms, fixedDaylight);
+        shaderUniforms.SunsetMod = calendar?.SunsetMod ?? 0f;
         atlasSunDirection = fixedLightDirection;
         atlasSunColor = fixedLightColor;
         float fixedBrightness = 0.20f + fixedDaylight * 0.80f;
