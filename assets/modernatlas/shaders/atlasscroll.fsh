@@ -112,6 +112,11 @@ void main(void)
             ? vec3(0.78, 0.12, 0.075)
             : vec3(0.10, 0.16, 0.20);
     }
+    else if (materialKind == 12)
+    {
+        // Narrow dark metal outline between the compass case and its dial.
+        baseColor = vec3(0.055, 0.038, 0.020);
+    }
     else
     {
         vec4 atlasColor = texture(atlasTex, uv);

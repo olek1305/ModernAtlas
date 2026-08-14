@@ -14,10 +14,12 @@ namespace ModernAtlas;
 internal sealed class AtlasCompassRenderer : IDisposable
 {
     private const float TravelSeconds = 0.28f;
+    private const float TossDurationSeconds = 0.62f;
     private readonly ICoreClientAPI capi;
     private readonly Func<IShaderProgram?> shaderProvider;
     private readonly SeraphForearmRenderer forearms;
     private MeshRef? housingMesh;
+    private MeshRef? outlineMesh;
     private MeshRef? faceMesh;
     private MeshRef? needleMesh;
     private LoadedTexture? dialTexture;
@@ -25,6 +27,12 @@ internal sealed class AtlasCompassRenderer : IDisposable
     private bool targetVisible;
     private bool stowingForClose;
     private bool forearmsPrepared;
+    private float openingSeconds = -1f;
+    private float presentationSeconds;
+    private float cameraShakeEnergy;
+    private float lastYawDegrees;
+    private float lastYawDirection;
+    private bool yawSampled;
     private Action? stowed;
 
     public AtlasCompassRenderer(ICoreClientAPI capi, Func<IShaderProgram?> shaderProvider)
@@ -36,7 +44,15 @@ internal sealed class AtlasCompassRenderer : IDisposable
 
     public void SetEnabled(bool enabled)
     {
-        if (!stowingForClose) targetVisible = enabled;
+        if (stowingForClose) return;
+        if (enabled && !targetVisible)
+        {
+            // A short authored entrance: hand enters, flicks the compass up,
+            // then catches it at the fixed lower-right presentation pose.
+            openingSeconds = 0;
+        }
+        if (!enabled) openingSeconds = -1f;
+        targetVisible = enabled;
     }
 
     public void ResetForAtlasOpen(bool enabled)
@@ -44,6 +60,10 @@ internal sealed class AtlasCompassRenderer : IDisposable
         stowingForClose = false;
         stowed = null;
         targetVisible = enabled;
+        openingSeconds = enabled ? 0 : -1f;
+        presentationSeconds = 0;
+        cameraShakeEnergy = 0;
+        yawSampled = false;
     }
 
     public bool BeginStowingForClose(Action onStowed)
@@ -52,6 +72,7 @@ internal sealed class AtlasCompassRenderer : IDisposable
         if (visibility <= 0.002f && !targetVisible) return false;
         stowingForClose = true;
         targetVisible = false;
+        openingSeconds = -1f;
         stowed = onStowed;
         return true;
     }
@@ -64,6 +85,13 @@ internal sealed class AtlasCompassRenderer : IDisposable
     )
     {
         SetEnabled(enabled);
+        presentationSeconds += realDeltaTime;
+        UpdateCameraMotion(atlasYawDegrees, realDeltaTime);
+        if (openingSeconds >= 0)
+        {
+            openingSeconds += realDeltaTime;
+            if (openingSeconds > TossDurationSeconds) openingSeconds = -1f;
+        }
         float step = Math.Clamp(realDeltaTime / TravelSeconds, 0f, 1f);
         visibility = MoveTowards(visibility, targetVisible ? 1f : 0f, step);
         if (stowingForClose && visibility <= 0.002f)
@@ -96,8 +124,55 @@ internal sealed class AtlasCompassRenderer : IDisposable
         float hiddenGripY = ScreenToViewY(viewport.Bottom + viewport.Height * 0.18f);
         float gripX = Lerp(hiddenGripX, shownGripX, visible);
         float gripY = Lerp(hiddenGripY, shownGripY, visible);
-        float elbowX = Lerp(hiddenGripX + 0.20f, shownGripX + 0.38f, visible);
-        float elbowY = Lerp(hiddenGripY - 0.20f, shownGripY - 0.42f, visible);
+        float compassX = gripX;
+        float compassY = gripY;
+        float tossFlip = 0;
+        float airborne = 0;
+        float dialVisibility = openingSeconds >= 0 ? 0f : 1f;
+        if (openingSeconds >= 0)
+        {
+            float flickX = shownGripX - 0.15f;
+            float flickY = shownGripY + 0.14f;
+            float handReach = SmoothStep(openingSeconds / 0.21f);
+            float handCatch = SmoothStep((openingSeconds - 0.22f) / 0.30f);
+            gripX = openingSeconds < 0.22f
+                ? Lerp(hiddenGripX, flickX, handReach)
+                : Lerp(flickX, shownGripX, handCatch);
+            gripY = openingSeconds < 0.22f
+                ? Lerp(hiddenGripY, flickY, handReach)
+                : Lerp(flickY, shownGripY, handCatch);
+
+            float flight = SmoothStep((openingSeconds - 0.19f) / 0.39f);
+            if (openingSeconds >= 0.19f)
+            {
+                float arc = MathF.Sin(flight * MathF.PI);
+                airborne = arc;
+                compassX = Lerp(flickX, shownGripX, flight) - arc * 0.10f;
+                compassY = Lerp(flickY, shownGripY, flight) + arc * 0.24f;
+                // First revolution exposes only the back of the casing.
+                // The textured face is introduced as the second turn starts.
+                tossFlip = flight * MathF.PI * 4f;
+                float secondTurn = SmoothStep((flight - 0.50f) / 0.16f);
+                float frontFacing = Math.Max(0f, MathF.Cos(tossFlip));
+                dialVisibility = secondTurn * frontFacing;
+            }
+            else
+            {
+                compassX = gripX;
+                compassY = gripY;
+            }
+        }
+
+        float shakePhase = presentationSeconds * 29f;
+        float shakeAmount = cameraShakeEnergy * (openingSeconds >= 0 ? 0.35f : 1f);
+        float shakeX = MathF.Sin(shakePhase) * shakeAmount * 0.032f * lastYawDirection;
+        float shakeY = MathF.Cos(shakePhase * 0.78f) * shakeAmount * 0.020f;
+        gripX += shakeX;
+        gripY += shakeY;
+        compassX += shakeX;
+        compassY += shakeY;
+        float elbowX = Lerp(hiddenGripX + 0.20f, shownGripX + 0.38f, visible) + shakeX * 0.45f;
+        float elbowY = Lerp(hiddenGripY - 0.20f, shownGripY - 0.42f, visible) + shakeY * 0.45f;
         float alpha = Math.Clamp(visibility * 1.5f, 0f, 1f);
 
         render.CurrentActiveShader?.Stop();
@@ -134,20 +209,32 @@ internal sealed class AtlasCompassRenderer : IDisposable
             // than a copied image. The dial rotates only its needle, with
             // world north (positive Z) at its top when atlas yaw is zero.
             float[] body = Mat4f.Create();
-            Mat4f.Translate(body, body, gripX, gripY, -0.18f);
+            Mat4f.Translate(body, body, compassX, compassY, -0.18f);
             Mat4f.RotateX(body, body, MathF.PI * 0.5f);
+            Mat4f.RotateZ(body, body, tossFlip * 0.18f);
             RenderComponent(shader, housingMesh, body, 9, 0.19f, alpha);
             // The cylindrical casing turns around the screen Z axis, but the
             // dial must remain in the screen XY plane. Reusing the rotated
             // casing matrix made the texture edge-on, leaving only its brown
             // rim visible instead of the compass face.
             float[] dial = Mat4f.Create();
-            Mat4f.Translate(dial, dial, gripX, gripY, -0.060f);
-            RenderComponent(shader, faceMesh, dial, 10, 0.145f, alpha);
+            Mat4f.Translate(dial, dial, compassX, compassY, -0.060f);
+            Mat4f.RotateY(dial, dial, tossFlip);
+            RenderComponent(shader, outlineMesh!, dial, 12, 0.171f, alpha);
+            float dialAlpha = alpha * dialVisibility;
+            RenderComponent(shader, faceMesh, dial, 10, 0.145f, dialAlpha);
             float[] needle = Mat4f.CloneIt(dial);
             Mat4f.Translate(needle, needle, 0, 0, 0.008f);
-            Mat4f.RotateZ(needle, needle, NeedleRotationRadians(atlasYawDegrees));
-            RenderComponent(shader, needleMesh, needle, 11, 0.115f, alpha);
+            // During the toss the needle is physically carried by the case.
+            // Fade it while the face turns edge-on so it cannot look painted
+            // above the rear of the spinning compass.
+            Mat4f.RotateZ(
+                needle,
+                needle,
+                NeedleRotationRadians(atlasYawDegrees) + tossFlip
+            );
+            float needleAlpha = dialAlpha * (1f - airborne * 0.35f);
+            RenderComponent(shader, needleMesh, needle, 11, 0.115f, needleAlpha);
         }
         finally
         {
@@ -163,10 +250,11 @@ internal sealed class AtlasCompassRenderer : IDisposable
 
     private bool EnsureMeshes()
     {
-        if (housingMesh != null && faceMesh != null && needleMesh != null && dialTexture?.TextureId > 0) return true;
+        if (housingMesh != null && outlineMesh != null && faceMesh != null && needleMesh != null && dialTexture?.TextureId > 0) return true;
         try
         {
             housingMesh ??= capi.Render.UploadMesh(CreateCylinderMesh(18));
+            outlineMesh ??= capi.Render.UploadMesh(CreateDiscMesh(32));
             faceMesh ??= capi.Render.UploadMesh(CreateQuadMesh());
             needleMesh ??= capi.Render.UploadMesh(CreateNeedleMesh());
             EnsureDialTexture();
@@ -178,6 +266,23 @@ internal sealed class AtlasCompassRenderer : IDisposable
             DisposeMeshes();
             return false;
         }
+    }
+
+    private void UpdateCameraMotion(float yawDegrees, float realDeltaTime)
+    {
+        if (yawSampled)
+        {
+            float delta = NormalizeSignedDegrees(yawDegrees - lastYawDegrees);
+            float speed = Math.Abs(delta) / Math.Max(0.001f, realDeltaTime);
+            if (speed > 0.01f)
+            {
+                lastYawDirection = MathF.Sign(delta);
+                cameraShakeEnergy = Math.Max(cameraShakeEnergy, Math.Clamp(speed / 260f, 0f, 1f));
+            }
+        }
+        yawSampled = true;
+        lastYawDegrees = yawDegrees;
+        cameraShakeEnergy *= MathF.Exp(-7.5f * Math.Max(0, realDeltaTime));
     }
 
     private void RenderComponent(IShaderProgram shader, MeshRef mesh, float[] model, int materialKind, float scale, float alpha)
@@ -202,6 +307,7 @@ internal sealed class AtlasCompassRenderer : IDisposable
     private void DisposeMeshes()
     {
         housingMesh?.Dispose(); housingMesh = null;
+        outlineMesh?.Dispose(); outlineMesh = null;
         faceMesh?.Dispose(); faceMesh = null;
         needleMesh?.Dispose(); needleMesh = null;
         dialTexture?.Dispose(); dialTexture = null;
@@ -214,6 +320,10 @@ internal sealed class AtlasCompassRenderer : IDisposable
         forearmsPrepared = false;
         targetVisible = false;
         visibility = 0;
+        openingSeconds = -1f;
+        presentationSeconds = 0;
+        cameraShakeEnergy = 0;
+        yawSampled = false;
         DisposeMeshes();
         forearms.Dispose();
     }
@@ -230,6 +340,32 @@ internal sealed class AtlasCompassRenderer : IDisposable
         mesh.AddVertex(0.5f, 0.5f, 0, 1, 0, color);
         mesh.AddVertex(-0.5f, 0.5f, 0, 0, 0, color);
         mesh.AddQuadIndices(0);
+        return mesh;
+    }
+
+    private static MeshData CreateDiscMesh(int segments)
+    {
+        MeshData mesh = new(segments + 1);
+        int color = unchecked((int)0xffffffff);
+        mesh.AddVertex(0, 0, 0, 0.5f, 0.5f, color);
+        for (int segment = 0; segment < segments; segment++)
+        {
+            float angle = segment / (float)segments * MathF.PI * 2f;
+            mesh.AddVertex(
+                MathF.Cos(angle) * 0.5f,
+                MathF.Sin(angle) * 0.5f,
+                0,
+                MathF.Cos(angle) * 0.5f + 0.5f,
+                MathF.Sin(angle) * 0.5f + 0.5f,
+                color
+            );
+        }
+        for (int segment = 0; segment < segments; segment++)
+        {
+            mesh.AddIndex(0);
+            mesh.AddIndex(segment + 1);
+            mesh.AddIndex(segment == segments - 1 ? 1 : segment + 2);
+        }
         return mesh;
     }
 
@@ -340,6 +476,13 @@ internal sealed class AtlasCompassRenderer : IDisposable
     {
         float normalizedYaw = interpolatedAtlasYawDegrees % 360f;
         return -normalizedYaw * GameMath.DEG2RAD;
+    }
+    private static float NormalizeSignedDegrees(float degrees)
+    {
+        float normalized = degrees % 360f;
+        if (normalized > 180f) normalized -= 360f;
+        if (normalized <= -180f) normalized += 360f;
+        return normalized;
     }
     private static float Lerp(float from, float to, float amount) => from + (to - from) * Math.Clamp(amount, 0f, 1f);
     private static float MoveTowards(float from, float to, float amount) => from < to ? Math.Min(to, from + amount) : Math.Max(to, from - amount);

@@ -29,7 +29,7 @@ void main(void)
             ? vec3(0.0, sign(vertexPositionIn.y), 0.0)
             : normalize(vec3(vertexPositionIn.x, 0.0, vertexPositionIn.z));
     }
-    else if (materialKind == 10 || materialKind == 11)
+    else if (materialKind == 10 || materialKind == 11 || materialKind == 12)
     {
         objectNormal = vec3(0.0, 0.0, 1.0);
     }
