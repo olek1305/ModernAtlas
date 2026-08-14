@@ -12,6 +12,7 @@ public sealed class ModernAtlasConfig
     public bool ShowPlayerCompass { get; set; }
     public string HandheldInstrumentMode { get; set; } = "compass";
     public bool RenderOnScroll { get; set; } = true;
+    public bool ScrollRealtimeWeatherEnabled { get; set; } = true;
     public bool SkipOpeningAnimation { get; set; }
     public bool CloudsEnabled { get; set; } = true;
     public int TextureDetailReduction { get; set; }

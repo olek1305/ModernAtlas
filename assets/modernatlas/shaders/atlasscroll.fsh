@@ -9,6 +9,12 @@ uniform sampler2D atlasTex;
 uniform sampler2D backgroundTex;
 uniform sampler2D compassTex;
 uniform int backgroundAvailable;
+uniform int weatherType;
+uniform float weatherIntensity;
+uniform float weatherFog;
+uniform float weatherTime;
+uniform int weatherSurface;
+uniform float weatherLayerScale;
 
 in vec2 uv;
 in vec3 viewNormal;
@@ -29,6 +35,82 @@ float paperFiber(vec2 position)
     float coarse = hash21(cell);
     float thread = sin(position.y * 980.0 + coarse * 5.0) * 0.5 + 0.5;
     return coarse * 0.62 + thread * 0.38;
+}
+
+float weatherParticle(vec2 position, vec2 cells, float timeOffset, float radius)
+{
+    vec2 scaled = position * cells;
+    vec2 cell = floor(scaled);
+    vec2 local = fract(scaled) - 0.5;
+    float seed = hash21(cell + timeOffset);
+    local.x += (seed - 0.5) * 0.58;
+    local.y += (hash21(cell + 17.31) - 0.5) * 0.45;
+    return (1.0 - smoothstep(radius, radius * 1.8, length(local)))
+        * step(0.76, seed);
+}
+
+vec4 scrollWeather(vec2 position)
+{
+    float intensity = clamp(weatherIntensity, 0.0, 1.0);
+    float fogAmount = clamp(weatherFog, 0.0, 1.0);
+    vec3 color = vec3(0.78, 0.84, 0.86);
+    float coverage = 0.0;
+
+    if (weatherType == 1)
+    {
+        // Sparse diagonal streaks and tiny wet marks remain below the visual
+        // weight of map symbols and controls.
+        vec2 moving = position;
+        moving.x += weatherTime * 0.18;
+        moving.y += weatherTime * 1.35;
+        vec2 grid = moving * vec2(24.0, 10.0);
+        vec2 cell = floor(grid);
+        vec2 local = fract(grid) - 0.5;
+        float seed = hash21(cell);
+        float streak = (1.0 - smoothstep(0.035, 0.095, abs(local.x + local.y * 0.18)))
+            * (1.0 - smoothstep(0.12, 0.48, abs(local.y)))
+            * step(0.72, seed);
+        float wetMark = weatherSurface > 0
+            ? weatherParticle(position, vec2(17.0, 13.0), 4.7, 0.065) * 0.18
+            : 0.0;
+        coverage = (streak * 0.20 + wetMark * 0.08) * intensity;
+        color = vec3(0.60, 0.72, 0.77);
+    }
+    else if (weatherType == 2)
+    {
+        vec2 moving = position + vec2(
+            sin(weatherTime * 0.7 + position.y * 8.0) * 0.035,
+            weatherTime * 0.16
+        );
+        float flakes = weatherParticle(moving, vec2(13.0, 10.0), 2.1, 0.095);
+        float fineFlakes = weatherParticle(
+            moving + vec2(0.31, weatherTime * 0.09),
+            vec2(21.0, 16.0),
+            9.4,
+            0.070
+        );
+        coverage = (flakes * 0.18 + fineFlakes * 0.080) * intensity;
+        color = vec3(0.93, 0.96, 0.98);
+    }
+    else if (weatherType == 3)
+    {
+        vec2 moving = position + vec2(weatherTime * 0.07, weatherTime * 0.72);
+        float hail = weatherParticle(moving, vec2(20.0, 15.0), 6.3, 0.075);
+        coverage = hail * 0.16 * intensity;
+        color = vec3(0.88, 0.94, 0.97);
+    }
+
+    float hazeNoise = hash21(floor(
+        (position + vec2(weatherTime * 0.006, 0.0)) * vec2(7.0, 5.0)
+    ));
+    float haze = fogAmount * mix(0.025, 0.075, hazeNoise);
+    float alphaOut = clamp(
+        (coverage + haze) * clamp(weatherLayerScale, 0.0, 1.0),
+        0.0,
+        0.22
+    );
+    color = mix(color, vec3(0.72, 0.76, 0.76), haze * 4.0);
+    return vec4(color, alphaOut);
 }
 
 float inkLine(float value, float width)
@@ -157,6 +239,12 @@ vec3 frozenBackground(vec2 position)
 
 void main(void)
 {
+    if (materialKind == 15)
+    {
+        outColor = scrollWeather(uv);
+        return;
+    }
+
     vec3 baseColor;
     float materialAlpha = alpha;
     if (materialKind == 0 || materialKind == 3)

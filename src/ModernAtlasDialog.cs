@@ -45,6 +45,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private readonly Func<IShaderProgram?> atlasCloudShaderProvider;
     private readonly Func<IShaderProgram?> atlasOpacityShaderProvider;
     private readonly AtlasScrollViewportRenderer scrollViewportRenderer;
+    private readonly AtlasScrollRealtimeWeather scrollRealtimeWeather;
     private readonly AtlasCompassRenderer compassRenderer;
     private readonly AtlasSurfaceHeightTexture surfaceHeightTexture;
     private readonly AtlasMapLayerTexture mapLayerTexture;
@@ -106,6 +107,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private float atlasRealDeltaTime;
     private bool loggedEntityModels;
     private bool loggedAtlasRefreshThrottle;
+    private bool loggedScrollWeatherDiagnostic;
     private int preparedGameViewDistance = -1;
     private bool cheatModeEnabled;
     private bool preparingSurfaceFilter;
@@ -260,6 +262,21 @@ public sealed class ModernAtlasDialog : GuiDialog
             }
         }
     }
+    private bool IsCreativeMode
+    {
+        get
+        {
+            try
+            {
+                return capi.World.Player?.WorldData.CurrentGameMode
+                    == EnumGameMode.Creative;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+    }
     private bool SurfaceSafetyEnabled => !CreativeCheatSettingsAvailable
         || !config.CaveModeEnabled;
     private bool SurvivalOreConcealmentEnabled =>
@@ -381,6 +398,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             capi,
             atlasScrollShaderProvider
         );
+        scrollRealtimeWeather = new AtlasScrollRealtimeWeather(capi);
         compassRenderer = new AtlasCompassRenderer(capi, atlasScrollShaderProvider);
         surfaceHeightTexture = new AtlasSurfaceHeightTexture(capi);
         mapLayerTexture = new AtlasMapLayerTexture(capi);
@@ -413,6 +431,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         ResetPointerDrag();
         atlasAnimationSeconds = 0;
         loggedEntityModels = false;
+        loggedScrollWeatherDiagnostic = false;
         CaptureAnimationFrame();
         lastAtlasFrameMilliseconds = capi.ElapsedMilliseconds;
         lastAtlasWorldRenderMilliseconds = 0;
@@ -592,6 +611,41 @@ public sealed class ModernAtlasDialog : GuiDialog
                 normalWorldSnapshotTexture?.TextureId ?? 0,
                 AtlasViewport
             );
+            // Eligibility is checked before touching the weather system so
+            // Creative, Fullscreen and the disabled preference have zero
+            // scroll-weather sampling or rendering cost.
+            bool creativeMode = IsCreativeMode;
+            if (config.ScrollRealtimeWeatherEnabled && !creativeMode)
+            {
+                bool weatherActive = scrollRealtimeWeather.TryGetExposedWeather(
+                    out AtlasScrollWeatherState scrollWeather
+                );
+                if (!loggedScrollWeatherDiagnostic)
+                {
+                    loggedScrollWeatherDiagnostic = true;
+                    capi.Logger.Notification(
+                        "[ModernAtlas] Scroll realtime weather sample: {0}.",
+                        scrollRealtimeWeather.LastDiagnostic
+                    );
+                }
+                if (weatherActive)
+                {
+                    scrollViewportRenderer.RenderWeatherOverlay(
+                        AtlasViewport,
+                        scrollWeather,
+                        (capi.ElapsedMilliseconds % 3_600_000L) / 1000f
+                    );
+                }
+            }
+            else if (!loggedScrollWeatherDiagnostic)
+            {
+                loggedScrollWeatherDiagnostic = true;
+                capi.Logger.Notification(
+                    creativeMode
+                        ? "[ModernAtlas] Scroll realtime weather skipped in Creative mode."
+                        : "[ModernAtlas] Scroll realtime weather is disabled in Gameplay settings."
+                );
+            }
         }
         else
         {
@@ -1697,6 +1751,19 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "render-on-scroll"
             )
             && config.RenderOnScroll == renderOnScrollBeforeClick;
+        bool realtimeWeatherBeforeClick = config.ScrollRealtimeWeatherEnabled;
+        bool realtimeWeatherSwitchClicked = presentationSwitchRestored
+            && ClickAtlasControlForAutomatedTest(
+                settingsModal,
+                "scroll-realtime-weather"
+            )
+            && config.ScrollRealtimeWeatherEnabled != realtimeWeatherBeforeClick;
+        bool realtimeWeatherSwitchRestored = realtimeWeatherSwitchClicked
+            && ClickAtlasControlForAutomatedTest(
+                settingsModal,
+                "scroll-realtime-weather"
+            )
+            && config.ScrollRealtimeWeatherEnabled == realtimeWeatherBeforeClick;
         bool liveLightingBeforeSliderTest = config.LiveLightingEnabled;
         bool fixedLightingPrepared = !liveLightingBeforeSliderTest
             || (settingsOpenedByClick
@@ -1771,6 +1838,8 @@ public sealed class ModernAtlasDialog : GuiDialog
             && settingsModal?.GetElement("map-layers") is GuiElementAtlasSwitch
             && settingsModal?.GetElement("skip-opening-animation")
                 is GuiElementAtlasSwitch
+            && settingsModal?.GetElement("scroll-realtime-weather")
+                is GuiElementAtlasSwitch
             && settingsModal?.GetElement("performance-open")
                 is GuiElementAtlasButton
             && settingsModal?.GetElement("handheld-instrument")
@@ -1793,6 +1862,8 @@ public sealed class ModernAtlasDialog : GuiDialog
             && performanceClosedByClick
             && presentationSwitchClicked
             && presentationSwitchRestored
+            && realtimeWeatherSwitchClicked
+            && realtimeWeatherSwitchRestored
             && fixedLightingPrepared
             && sliderBoundaryDragHandled
             && sliderBoundaryDragClamped
@@ -3029,10 +3100,10 @@ public sealed class ModernAtlasDialog : GuiDialog
             )
             .Compose();
 
-        ElementBounds modalRoot = ElementBounds.Fixed(0, 0, 430, 790)
+        ElementBounds modalRoot = ElementBounds.Fixed(0, 0, 430, 836)
             .WithAlignment(EnumDialogArea.CenterMiddle);
         settingsModal = capi.Gui.CreateCompo("modernatlas-settings", modalRoot)
-            .AddStaticCustomDraw(ElementBounds.Fixed(0, 0, 430, 790), AtlasUiStyle.DrawCard)
+            .AddStaticCustomDraw(ElementBounds.Fixed(0, 0, 430, 836), AtlasUiStyle.DrawCard)
             .AddStaticText(
                 "SETTINGS",
                 AtlasUiStyle.TitleFont(20),
@@ -3186,52 +3257,67 @@ public sealed class ModernAtlasDialog : GuiDialog
                 AtlasUiStyle.DrawSeparator
             )
             .AddStaticText(
-                "Use live world sun",
-                AtlasUiStyle.DetailFont(12),
-                ElementBounds.Fixed(28, 576, 200, 24)
-            )
-            .AddAtlasSwitch(
-                OnLiveLightingToggled,
-                ElementBounds.Fixed(350, 568, 62, 38),
-                "live-lighting"
-            )
-            .AddStaticText(
-                "Atlas sun hour (fixed)",
-                AtlasUiStyle.DetailFont(12),
-                ElementBounds.Fixed(28, 613, 180, 24)
-            )
-            .AddAtlasSlider(
-                OnFixedSunHourChanged,
-                ElementBounds.Fixed(212, 604, 200, 42),
-                "fixed-sun-hour"
+                "GAMEPLAY • SCROLL",
+                AtlasUiStyle.LabelFont(11),
+                ElementBounds.Fixed(26, 574, 220, 22)
             )
             .AddStaticText(
                 "Render on 3D scroll",
                 AtlasUiStyle.DetailFont(12),
-                ElementBounds.Fixed(28, 655, 250, 24)
+                ElementBounds.Fixed(28, 600, 250, 24)
             )
             .AddAtlasSwitch(
                 OnRenderOnScrollToggled,
-                ElementBounds.Fixed(350, 646, 62, 38),
+                ElementBounds.Fixed(350, 591, 62, 38),
                 "render-on-scroll"
+            )
+            .AddStaticText(
+                "Realtime Weather on Scroll",
+                AtlasUiStyle.DetailFont(12),
+                ElementBounds.Fixed(28, 634, 270, 24)
+            )
+            .AddAtlasSwitch(
+                OnScrollRealtimeWeatherToggled,
+                ElementBounds.Fixed(350, 625, 62, 38),
+                "scroll-realtime-weather"
             )
             .AddStaticText(
                 "Handheld instrument",
                 AtlasUiStyle.DetailFont(12),
-                ElementBounds.Fixed(28, 692, 250, 24)
+                ElementBounds.Fixed(28, 668, 250, 24)
             )
             .AddAtlasChoice(
                 new[] { "off", "compass", "time" },
                 new[] { "Off", "Compass", "Time" },
                 HandheldInstrumentChoiceIndex,
                 OnHandheldInstrumentChoiceChanged,
-                ElementBounds.Fixed(212, 682, 200, 42),
+                ElementBounds.Fixed(212, 658, 200, 42),
                 "handheld-instrument"
+            )
+            .AddStaticText(
+                "Use live world sun",
+                AtlasUiStyle.DetailFont(12),
+                ElementBounds.Fixed(28, 708, 200, 24)
+            )
+            .AddAtlasSwitch(
+                OnLiveLightingToggled,
+                ElementBounds.Fixed(350, 699, 62, 38),
+                "live-lighting"
+            )
+            .AddStaticText(
+                "Atlas sun hour (fixed)",
+                AtlasUiStyle.DetailFont(12),
+                ElementBounds.Fixed(28, 745, 180, 24)
+            )
+            .AddAtlasSlider(
+                OnFixedSunHourChanged,
+                ElementBounds.Fixed(212, 736, 200, 42),
+                "fixed-sun-hour"
             )
             .AddAtlasButton(
                 "ATLAS VISUAL LAB",
                 OpenVisualLab,
-                ElementBounds.Fixed(24, 736, 382, 44),
+                ElementBounds.Fixed(24, 784, 382, 44),
                 "visual-lab-open",
                 AtlasButtonStyle.Dark
             )
@@ -4827,6 +4913,13 @@ public sealed class ModernAtlasDialog : GuiDialog
         );
     }
 
+    private void OnScrollRealtimeWeatherToggled(bool enabled)
+    {
+        config.ScrollRealtimeWeatherEnabled = enabled;
+        saveConfig();
+        SyncSettingsControls();
+    }
+
     private void OnPlayerCompassToggled(bool enabled)
     {
         config.ShowPlayerCompass = enabled;
@@ -5056,6 +5149,9 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (settingsModal == null) return;
         settingsModal.GetAtlasSwitch("render-on-scroll")?.SetValue(
             config.RenderOnScroll
+        );
+        settingsModal.GetAtlasSwitch("scroll-realtime-weather")?.SetValue(
+            config.ScrollRealtimeWeatherEnabled
         );
         settingsModal.GetAtlasChoice("handheld-instrument")?.SetSelectedIndex(
             HandheldInstrumentChoiceIndex

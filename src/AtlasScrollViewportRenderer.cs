@@ -186,6 +186,89 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
         }
     }
 
+    /// <summary>
+    /// Draws one procedural, low-opacity weather layer over the map opening.
+    /// The caller invokes this only for an exposed Survival player in physical
+    /// Scroll mode, so Fullscreen never allocates or renders weather work.
+    /// </summary>
+    public void RenderWeatherOverlay(
+        AtlasViewportBounds viewport,
+        AtlasScrollWeatherState weather,
+        float realTimeSeconds
+    )
+    {
+        if (!EnsureMeshes() || sheetMesh == null) return;
+        IShaderProgram? shader = shaderProvider();
+        if (shader == null || shader.Disposed) return;
+
+        IRenderAPI render = capi.Render;
+        float frameHeight = Math.Max(1, render.FrameHeight);
+        float aspect = render.FrameWidth / frameHeight;
+        float centerX = ((viewport.X + viewport.Width * 0.5f) / render.FrameWidth * 2f - 1f)
+            * aspect;
+        float centerY = 1f
+            - (viewport.Y + viewport.Height * 0.5f) / frameHeight * 2f;
+        float mapWidth = viewport.Width / frameHeight * 2f;
+        float mapHeight = viewport.Height / frameHeight * 2f;
+        float[] projection = Mat4f.Create();
+        Mat4f.Ortho(projection, -aspect, aspect, -1f, 1f, -4f, 4f);
+        AtlasViewportBounds clip = viewport.Inset(AtlasContentClipInsetPixels);
+
+        render.CurrentActiveShader?.Stop();
+        render.CurrentFrameBuffer = null;
+        render.GLDisableDepthTest();
+        render.GLDepthMask(false);
+        render.GlDisableCullFace();
+        render.GlToggleBlend(true, EnumBlendMode.Standard);
+        shader.Use();
+        shader.UniformMatrix("projectionMatrix", projection);
+        shader.Uniform("materialKind", 15);
+        shader.Uniform("alpha", 1f);
+        shader.Uniform("lightSweep", 0f);
+        shader.Uniform("weatherType", weather.PrecipitationKind);
+        shader.Uniform("weatherIntensity", weather.PrecipitationIntensity);
+        shader.Uniform("weatherFog", weather.FogIntensity);
+        shader.Uniform("weatherTime", realTimeSeconds);
+        try
+        {
+            // First animate the exposed air in front of the frozen world POV.
+            // Atlas UI and the handheld instrument render later and remain
+            // perfectly readable.
+            shader.Uniform("weatherSurface", 0);
+            shader.Uniform("weatherLayerScale", 0.90f);
+            shader.UniformMatrix(
+                "modelViewMatrix",
+                CreateModel(0f, 0f, -0.018f, aspect * 2f, 2f, 1f)
+            );
+            render.RenderMesh(sheetMesh);
+
+            // A second, softer pass is clipped to the parchment's live map
+            // opening and adds only the restrained surface contact marks.
+            render.GlScissor(
+                clip.X,
+                Math.Max(0, render.FrameHeight - clip.Bottom),
+                clip.Width,
+                clip.Height
+            );
+            render.GlScissorFlag(true);
+            shader.Uniform("weatherSurface", 1);
+            shader.Uniform("weatherLayerScale", 0.62f);
+            shader.UniformMatrix(
+                "modelViewMatrix",
+                CreateModel(centerX, centerY, -0.020f, mapWidth, mapHeight, 1f)
+            );
+            render.RenderMesh(sheetMesh);
+        }
+        finally
+        {
+            shader.Stop();
+            render.GlScissorFlag(false);
+            render.GLDepthMask(true);
+            render.GLEnableDepthTest();
+            render.GlToggleBlend(false, EnumBlendMode.Standard);
+        }
+    }
+
     public void RenderAtlasFullscreen(int atlasTextureId)
     {
         if (atlasTextureId <= 0 || !EnsureMeshes() || sheetMesh == null) return;
