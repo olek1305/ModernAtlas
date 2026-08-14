@@ -3,7 +3,7 @@
   "modid": "modernatlas",
   "name": "ModernAtlas",
   "authors": [
-    "arcylisz"
+    "Arcylisz"
   ],
   "description": "Interactive 3D block atlas with live clouds, animated living models and server-controlled entity policy.",
   "version": "0.6.6",
@@ -11,6 +11,6 @@
   "requiredOnServer": false,
   "requiredOnClient": false,
   "dependencies": {
-    "game": "1.22.6"
+    "game": "1.22.3"
   }
 }

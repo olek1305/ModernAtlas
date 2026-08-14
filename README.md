@@ -1,6 +1,6 @@
 # ModernAtlas
 
-ModernAtlas is an independent 3D world-map mod for **Vintage Story 1.22.6**.
+ModernAtlas is an independent 3D world-map mod for **Vintage Story 1.22.3 or newer**.
 Press `G` to open an interactive parchment atlas with terrain relief, water,
 buildings, ruins, trees, climate layers, search tools and optional live-looking
 clouds.
@@ -28,11 +28,11 @@ ModernAtlas can also be used on the client when a server does not install it.
 ## Installation
 
 Place the ModernAtlas release ZIP in the Vintage Story `Mods` directory. Keep
-the ZIP packed, start Vintage Story 1.22.6 and press `G` in a loaded world.
+the ZIP packed, start Vintage Story 1.22.3 or newer and press `G` in a loaded world.
 
 ## AI disclosure
 
-ModernAtlas is a project by **arcylisz**, created with code and documentation
+ModernAtlas is a project by **Arcylisz**, created with code and documentation
 assistance from **ChatGPT**, an AI system by OpenAI. The project remains under
 human direction and review.
 

@@ -12,7 +12,7 @@ namespace ModernAtlas;
 
 /// <summary>
 /// Vintage Story does not expose its completed terrain GPU meshes through the
-/// public API. This small, version-checked adapter reuses the 1.22.6 terrain
+/// public API. This small, version-checked adapter reuses the 1.22.x terrain
 /// renderer so connected models, mod blocks, biome colors and engine lighting
 /// remain identical to the normal world view. The global entity and particle
 /// stages are never invoked; a separate adapter draws only selected living
@@ -20,7 +20,8 @@ namespace ModernAtlas;
 /// </summary>
 internal sealed class ExactChunkRendererAdapter : IDisposable
 {
-    private const string SupportedVersion = "1.22.6";
+    private const string SupportedVersionSeries = "1.22.";
+    private const string MinimumSupportedVersion = "1.22.3";
     private const string VisibilityPatchId = "modernatlas.exactchunkvisibility";
     private const string AtlasFilterMarker = "// MODERNATLAS_SURFACE_AND_BOUNDARY_FILTER";
     private const int CaveFilterTextureUnit = 12;
@@ -228,11 +229,11 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         Func<IShaderProgram?> atlasCloudShaderProvider
     )
     {
-        if (!GameVersion.ShortGameVersion.StartsWith(SupportedVersion, StringComparison.Ordinal))
+        if (!GameVersion.ShortGameVersion.StartsWith(SupportedVersionSeries, StringComparison.Ordinal))
         {
             capi.Logger.Warning(
-                "[ModernAtlas] Exact chunk rendering supports Vintage Story {0}; using the compatible atlas renderer on {1}.",
-                SupportedVersion,
+                "[ModernAtlas] Exact chunk rendering supports Vintage Story {0} or newer in the 1.22 series; using the compatible atlas renderer on {1}.",
+                MinimumSupportedVersion,
                 GameVersion.ShortGameVersion
             );
             return null;
@@ -388,7 +389,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 postfix: new HarmonyMethod(atlasOreTexturePostfix)
             );
             capi.Logger.Notification(
-                "[ModernAtlas] Vintage Story 1.22.6 exact chunk renderer is available."
+                "[ModernAtlas] Vintage Story 1.22.x exact chunk renderer is available."
             );
             return new ExactChunkRendererAdapter(
                 capi,
