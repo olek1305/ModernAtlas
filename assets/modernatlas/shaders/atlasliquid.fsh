@@ -19,6 +19,7 @@ uniform sampler2D atlasLayerTex;
 uniform vec2 atlasLayerOriginXZ;
 uniform float atlasLayerSampleSize;
 uniform float atlasLayerOpacity;
+uniform int atlasLayerContours;
 uniform vec3 atlasSunDirection;
 uniform vec3 atlasSunColor;
 uniform float atlasExposure;
@@ -159,15 +160,25 @@ void main(void)
         {
             vec2 layerUv = layerPosition / vec2(layerDimensions);
             vec4 layerColor = texture(atlasLayerTex, layerUv);
+            float layerValidity = smoothstep(0.04, 0.22, layerColor.a);
+            float layerScalar = clamp((layerColor.a - 0.25) / 0.75, 0.0, 1.0);
             float baseLuminance = dot(
                 clamp(color.rgb, vec3(0.0), vec3(1.0)),
                 vec3(0.2126, 0.7152, 0.0722)
             );
             vec3 reliefColor = layerColor.rgb * mix(0.68, 1.18, baseLuminance);
+            if (atlasLayerContours > 0)
+            {
+                float bands = layerScalar * 6.0;
+                float distanceToLine = abs(fract(bands + 0.5) - 0.5);
+                float lineWidth = max(fwidth(bands) * 0.55, 0.025);
+                float contour = 1.0 - smoothstep(lineWidth, lineWidth * 2.2, distanceToLine);
+                reliefColor *= mix(1.0, 0.86, contour * layerValidity);
+            }
             color.rgb = mix(
                 color.rgb,
                 reliefColor,
-                clamp(layerColor.a * atlasLayerOpacity, 0.0, 1.0)
+                clamp(layerValidity * atlasLayerOpacity, 0.0, 1.0)
             );
         }
     }

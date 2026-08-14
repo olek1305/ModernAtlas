@@ -24,6 +24,9 @@ internal sealed class AtlasMapLayerTexture : IDisposable
     private readonly ICoreClientAPI capi;
     private readonly HashSet<(int X, int Z)> sampledOreRegions = new();
     private readonly HashSet<int> oreBlockIds = new();
+    private readonly Dictionary<int, string> oreCodeByBlockId = new();
+    private readonly HashSet<string> discoveredOreCodeSet = new(StringComparer.Ordinal);
+    private readonly List<string> discoveredOreCodes = new();
     private LoadedTexture? texture;
     private int[]? pixels;
     private int nextSampleIndex;
@@ -45,6 +48,12 @@ internal sealed class AtlasMapLayerTexture : IDisposable
     public int OriginZ { get; private set; }
     public int Width => texture?.Width ?? 0;
     public int Height => texture?.Height ?? 0;
+    public string? SelectedOreCode { get; private set; }
+    public IReadOnlyList<string> DiscoveredOreCodes => discoveredOreCodes;
+    public int OreCodeRevision { get; private set; }
+    public bool ContoursEnabled => Layer is AtlasMapLayer.SoilFertility
+        or AtlasMapLayer.Moisture
+        or AtlasMapLayer.Temperature;
     public int ProgressPercent => pixels == null || pixels.Length == 0
         ? Layer == AtlasMapLayer.TexturedTerrain ? 100 : 0
         : Ready
@@ -76,7 +85,10 @@ internal sealed class AtlasMapLayerTexture : IDisposable
                     ? $"{oreMapCount} ore maps in {oreRegionCount} loaded regions"
                     : $"{oreColumnSampleCount} loaded block-column samples; {oreBlockHitCount} ore blocks"
                 : $"{validSampleCount} loaded samples";
-            return $"Layer: {Layer.DisplayName()} • {Layer.Legend()} • {source}";
+            string filter = Layer == AtlasMapLayer.OreDensity
+                ? SelectedOreCode == null ? " • all ores" : $" • {SelectedOreCode}"
+                : "";
+            return $"Layer: {Layer.DisplayName()}{filter} • {source}";
         }
     }
 
@@ -90,7 +102,8 @@ internal sealed class AtlasMapLayerTexture : IDisposable
         double centerX,
         double centerZ,
         int radius,
-        bool spoilerAccess
+        bool spoilerAccess,
+        string? selectedOreCode = null
     )
     {
         if (layer.RequiresSpoilerAccess() && !spoilerAccess)
@@ -99,6 +112,10 @@ internal sealed class AtlasMapLayerTexture : IDisposable
         }
 
         Layer = layer;
+        SelectedOreCode = layer == AtlasMapLayer.OreDensity
+            && !string.IsNullOrWhiteSpace(selectedOreCode)
+                ? selectedOreCode.Trim()
+                : null;
         Ready = layer == AtlasMapLayer.TexturedTerrain;
         pixels = null;
         nextSampleIndex = 0;
@@ -109,6 +126,10 @@ internal sealed class AtlasMapLayerTexture : IDisposable
         oreBlockHitCount = 0;
         sampledOreRegions.Clear();
         oreBlockIds.Clear();
+        oreCodeByBlockId.Clear();
+        discoveredOreCodeSet.Clear();
+        discoveredOreCodes.Clear();
+        OreCodeRevision++;
         failed = false;
         loggedSamplingFailure = false;
         if (Ready) return;
@@ -120,6 +141,7 @@ internal sealed class AtlasMapLayerTexture : IDisposable
                 if (block?.Id > 0 && block.BlockMaterial == EnumBlockMaterial.Ore)
                 {
                     oreBlockIds.Add(block.Id);
+                    oreCodeByBlockId[block.Id] = ResolveOreBlockCode(block);
                 }
             }
         }
@@ -234,6 +256,11 @@ internal sealed class AtlasMapLayerTexture : IDisposable
         oreBlockHitCount = 0;
         sampledOreRegions.Clear();
         oreBlockIds.Clear();
+        oreCodeByBlockId.Clear();
+        discoveredOreCodeSet.Clear();
+        discoveredOreCodes.Clear();
+        SelectedOreCode = null;
+        OreCodeRevision++;
         failed = false;
         loggedSamplingFailure = false;
     }
@@ -243,6 +270,10 @@ internal sealed class AtlasMapLayerTexture : IDisposable
         texture?.Dispose();
         texture = null;
         pixels = null;
+        discoveredOreCodeSet.Clear();
+        discoveredOreCodes.Clear();
+        SelectedOreCode = null;
+        OreCodeRevision++;
         Ready = false;
     }
 
@@ -269,23 +300,38 @@ internal sealed class AtlasMapLayerTexture : IDisposable
             return;
         }
 
-        int chunkSize = GlobalConstants.ChunkSize;
-        int chunkX = worldX / chunkSize;
-        int chunkZ = worldZ / chunkSize;
-        IMapChunk? mapChunk = capi.World.BlockAccessor.GetMapChunk(chunkX, chunkZ);
-        ushort[]? heightMap = mapChunk?.WorldGenTerrainHeightMap;
-        if (heightMap == null || heightMap.Length < chunkSize * chunkSize) return;
-
-        int localX = worldX - chunkX * chunkSize;
-        int localZ = worldZ - chunkZ * chunkSize;
-        int surfaceY = heightMap[localZ * chunkSize + localX];
         float value;
         if (Layer == AtlasMapLayer.OreDensity)
         {
-            if (!TryReadOreDensity(worldX, worldZ, out value)) return;
+            // Regional ore-potential maps and exact loaded block columns do
+            // not depend on the terrain-height map. Requiring that separate
+            // map-chunk field here left otherwise loaded terrain uncolored.
+            // A loaded column with no ore is a valid zero sample (blue); a
+            // genuinely unavailable column still returns false and remains
+            // transparent so the atlas does not invent knowledge.
+            if (!TryReadOreDensity(worldX, worldZ, out value))
+            {
+                // Exact GPU terrain can remain drawable after the CPU block
+                // column needed for the fallback scan is no longer present.
+                // Give that already visible terrain a distinct dark-blue
+                // unknown state instead of leaking its normal material color;
+                // do not count it as a valid zero-ore result.
+                pixels[index] = UnavailableOreColor();
+                return;
+            }
         }
         else
         {
+            int chunkSize = GlobalConstants.ChunkSize;
+            int chunkX = worldX / chunkSize;
+            int chunkZ = worldZ / chunkSize;
+            IMapChunk? mapChunk = capi.World.BlockAccessor.GetMapChunk(chunkX, chunkZ);
+            ushort[]? heightMap = mapChunk?.WorldGenTerrainHeightMap;
+            if (heightMap == null || heightMap.Length < chunkSize * chunkSize) return;
+
+            int localX = worldX - chunkX * chunkSize;
+            int localZ = worldZ - chunkZ * chunkSize;
+            int surfaceY = heightMap[localZ * chunkSize + localX];
             ClimateCondition? climate = capi.World.BlockAccessor.GetClimateAt(
                 new BlockPos(worldX, surfaceY, worldZ),
                 EnumGetClimateMode.WorldGenValues
@@ -324,11 +370,16 @@ internal sealed class AtlasMapLayerTexture : IDisposable
         {
             IntDataMap2D? map = entry.Value;
             if (map == null || map.InnerSize <= 0) continue;
+            RegisterOreCode(entry.Key);
             int raw = map.GetUnpaddedColorLerpedForNormalizedPos(
                 Math.Clamp(normalizedX, 0f, 1f),
                 Math.Clamp(normalizedZ, 0f, 1f)
             );
-            density = Math.Max(density, DecodeDensity(raw));
+            if (SelectedOreCode == null
+                || string.Equals(entry.Key, SelectedOreCode, StringComparison.Ordinal))
+            {
+                density = Math.Max(density, DecodeDensity(raw));
+            }
             maps++;
         }
         if (maps == 0)
@@ -346,7 +397,40 @@ internal sealed class AtlasMapLayerTexture : IDisposable
 
     private bool TryReadLoadedOreColumn(int worldX, int worldZ, out float density)
     {
-        density = 0;
+        bool loaded = ReadLoadedOreColumn(
+            worldX,
+            worldZ,
+            null,
+            SelectedOreCode,
+            out _,
+            out int oreBlocks,
+            out int visibleOreBlocks
+        );
+        if (!loaded)
+        {
+            density = 0;
+            return false;
+        }
+
+        oreColumnSampleCount++;
+        oreBlockHitCount += visibleOreBlocks;
+        // A single eight-block cell samples one vertical column. A saturating
+        // curve keeps isolated veins visible without claiming knowledge about
+        // neighboring columns that the atlas did not inspect.
+        density = 1f - MathF.Exp(-visibleOreBlocks / 2.5f);
+        return true;
+    }
+
+    private bool ReadLoadedOreColumn(
+        int worldX,
+        int worldZ,
+        Dictionary<string, int>? counts,
+        string? filterCode,
+        out int loadedPositions,
+        out int oreBlocks,
+        out int matchingOreBlocks
+    )
+    {
         int chunkSize = GlobalConstants.ChunkSize;
         int chunkX = worldX / chunkSize;
         int chunkZ = worldZ / chunkSize;
@@ -358,8 +442,9 @@ internal sealed class AtlasMapLayerTexture : IDisposable
         );
         int dimensionOffset = capi.World.Player.Entity.Pos.Dimension
             * GlobalConstants.DimensionSizeInChunks;
-        int loadedPositions = 0;
-        int oreBlocks = 0;
+        loadedPositions = 0;
+        oreBlocks = 0;
+        matchingOreBlocks = 0;
 
         for (int chunkY = 0; chunkY < verticalChunkCount; chunkY++)
         {
@@ -389,19 +474,213 @@ internal sealed class AtlasMapLayerTexture : IDisposable
 
                 int blockId = data.GetBlockId(index, BlockLayersAccess.Solid);
                 loadedPositions++;
-                if (oreBlockIds.Contains(blockId)) oreBlocks++;
+                if (!oreBlockIds.Contains(blockId)) continue;
+                oreBlocks++;
+                if (oreCodeByBlockId.TryGetValue(blockId, out string? oreCode))
+                {
+                    RegisterOreCode(oreCode);
+                    if (filterCode == null
+                        || string.Equals(oreCode, filterCode, StringComparison.Ordinal))
+                    {
+                        matchingOreBlocks++;
+                    }
+                    if (counts != null)
+                    {
+                        counts.TryGetValue(oreCode, out int count);
+                        counts[oreCode] = count + 1;
+                    }
+                }
             }
         }
 
-        if (loadedPositions == 0) return false;
+        return loadedPositions > 0;
+    }
 
-        oreColumnSampleCount++;
-        oreBlockHitCount += oreBlocks;
-        // A single eight-block cell samples one vertical column. A saturating
-        // curve keeps isolated veins visible without claiming knowledge about
-        // neighboring columns that the atlas did not inspect.
-        density = 1f - MathF.Exp(-oreBlocks / 2.5f);
+    public bool TryInspectOre(int worldX, int worldZ, out AtlasOreInspection? inspection)
+    {
+        inspection = null;
+        if (Layer != AtlasMapLayer.OreDensity
+            || worldX < 0
+            || worldZ < 0
+            || worldX >= capi.World.BlockAccessor.MapSizeX
+            || worldZ >= capi.World.BlockAccessor.MapSizeZ)
+        {
+            return false;
+        }
+
+        double dx = worldX - disclosureCenterX;
+        double dz = worldZ - disclosureCenterZ;
+        if (dx * dx + dz * dz > (double)disclosureRadius * disclosureRadius)
+        {
+            return false;
+        }
+
+        int chunkSize = GlobalConstants.ChunkSize;
+        int chunkX = worldX / chunkSize;
+        int chunkZ = worldZ / chunkSize;
+        IMapChunk? mapChunk = capi.World.BlockAccessor.GetMapChunk(chunkX, chunkZ);
+        ushort[]? heightMap = mapChunk?.WorldGenTerrainHeightMap;
+        if (heightMap == null || heightMap.Length < chunkSize * chunkSize) return false;
+
+        int localX = worldX - chunkX * chunkSize;
+        int localZ = worldZ - chunkZ * chunkSize;
+        int surfaceY = heightMap[localZ * chunkSize + localX];
+        string? hostRockCode = FindLoadedHostRock(worldX, surfaceY, worldZ);
+
+        int regionSize = Math.Max(1, capi.World.BlockAccessor.RegionSize);
+        int regionX = worldX / regionSize;
+        int regionZ = worldZ / regionSize;
+        IMapRegion? region = capi.World.BlockAccessor.GetMapRegion(regionX, regionZ);
+        if (region?.OreMaps != null && region.OreMaps.Count > 0)
+        {
+            float normalizedX = (worldX - regionX * regionSize) / (float)regionSize;
+            float normalizedZ = (worldZ - regionZ * regionSize) / (float)regionSize;
+            var readings = new List<AtlasOreReading>();
+            int sourceMapCount = 0;
+            foreach (KeyValuePair<string, IntDataMap2D> entry in region.OreMaps)
+            {
+                IntDataMap2D? map = entry.Value;
+                if (map == null || map.InnerSize <= 0) continue;
+                sourceMapCount++;
+                RegisterOreCode(entry.Key);
+                float potential = DecodeDensity(
+                    map.GetUnpaddedColorLerpedForNormalizedPos(
+                        Math.Clamp(normalizedX, 0f, 1f),
+                        Math.Clamp(normalizedZ, 0f, 1f)
+                    )
+                );
+                if (potential < AtlasOrePotential.TraceThreshold
+                    && !string.Equals(
+                        entry.Key,
+                        SelectedOreCode,
+                        StringComparison.Ordinal
+                    ))
+                {
+                    continue;
+                }
+                readings.Add(new AtlasOreReading(entry.Key, potential, 0, true));
+            }
+            readings.Sort((left, right) => right.Potential.CompareTo(left.Potential));
+            inspection = new AtlasOreInspection(
+                worldX,
+                worldZ,
+                surfaceY,
+                hostRockCode,
+                AtlasOreInspectionSource.RegionalOreMaps,
+                sourceMapCount,
+                readings.ToArray()
+            );
+            return true;
+        }
+
+        var blockCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        if (!ReadLoadedOreColumn(
+            worldX,
+            worldZ,
+            blockCounts,
+            null,
+            out _,
+            out _,
+            out _
+        ))
+        {
+            return false;
+        }
+
+        var blockReadings = new List<AtlasOreReading>(blockCounts.Count);
+        foreach (KeyValuePair<string, int> entry in blockCounts)
+        {
+            blockReadings.Add(new AtlasOreReading(entry.Key, 0, entry.Value, false));
+        }
+        blockReadings.Sort((left, right) => right.BlockCount.CompareTo(left.BlockCount));
+        inspection = new AtlasOreInspection(
+            worldX,
+            worldZ,
+            surfaceY,
+            hostRockCode,
+            AtlasOreInspectionSource.LoadedBlockColumn,
+            0,
+            blockReadings.ToArray()
+        );
         return true;
+    }
+
+    private string? FindLoadedHostRock(int worldX, int surfaceY, int worldZ)
+    {
+        for (int y = surfaceY; y >= Math.Max(0, surfaceY - 96); y--)
+        {
+            if (!TryGetLoadedBlock(worldX, y, worldZ, out Block? block)) return null;
+            if (block?.BlockMaterial == EnumBlockMaterial.Stone)
+            {
+                return block.Code?.ToString();
+            }
+        }
+        return null;
+    }
+
+    private bool TryGetLoadedBlock(int worldX, int worldY, int worldZ, out Block? block)
+    {
+        block = null;
+        int chunkSize = GlobalConstants.ChunkSize;
+        int chunkX = worldX / chunkSize;
+        int chunkY = worldY / chunkSize;
+        int chunkZ = worldZ / chunkSize;
+        int dimensionOffset = capi.World.Player.Entity.Pos.Dimension
+            * GlobalConstants.DimensionSizeInChunks;
+        IWorldChunk? chunk = capi.World.BlockAccessor.GetChunk(
+            chunkX,
+            chunkY + dimensionOffset,
+            chunkZ
+        );
+        if (chunk == null
+            || chunk.Disposed
+            || chunk is IClientChunk clientChunk && !clientChunk.LoadedFromServer
+            || chunk.Data == null)
+        {
+            return false;
+        }
+
+        int localX = worldX - chunkX * chunkSize;
+        int localY = worldY - chunkY * chunkSize;
+        int localZ = worldZ - chunkZ * chunkSize;
+        int index = localX + localZ * chunkSize + localY * chunkSize * chunkSize;
+        if (index < 0 || index >= chunk.Data.Length) return false;
+        int blockId = chunk.Data.GetBlockId(index, BlockLayersAccess.Solid);
+        if (blockId < 0 || blockId >= capi.World.Blocks.Count) return false;
+        block = capi.World.Blocks[blockId];
+        return true;
+    }
+
+    private void RegisterOreCode(string? code)
+    {
+        if (string.IsNullOrWhiteSpace(code)) return;
+        string normalized = code.Trim();
+        if (!discoveredOreCodeSet.Add(normalized)) return;
+        discoveredOreCodes.Add(normalized);
+        discoveredOreCodes.Sort(StringComparer.Ordinal);
+        OreCodeRevision++;
+    }
+
+    private static string ResolveOreBlockCode(Block block)
+    {
+        if (block.Variant != null
+            && block.Variant.TryGetValue("type", out string? type)
+            && !string.IsNullOrWhiteSpace(type))
+        {
+            return type;
+        }
+
+        string path = block.Code?.Path ?? "unknown-ore";
+        string[] segments = path.Split('-', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length >= 3
+            && segments[0] == "ore"
+            && segments[1] is "poor" or "medium" or "rich" or "bountiful")
+        {
+            return segments[2];
+        }
+        return segments.Length >= 2 && segments[0] == "ore"
+            ? segments[1]
+            : path;
     }
 
     private static float DecodeDensity(int raw)
@@ -422,38 +701,50 @@ internal sealed class AtlasMapLayerTexture : IDisposable
         {
             AtlasMapLayer.SoilFertility => ThreeStop(
                 value,
-                (0.43f, 0.18f, 0.07f),
-                (0.95f, 0.71f, 0.08f),
-                (0.10f, 0.75f, 0.21f)
+                (0.30f, 0.08f, 0.025f),
+                (1.00f, 0.66f, 0.025f),
+                (0.025f, 0.90f, 0.15f)
             ),
             AtlasMapLayer.Moisture => ThreeStop(
                 value,
-                (0.90f, 0.43f, 0.05f),
-                (0.09f, 0.77f, 0.81f),
-                (0.09f, 0.27f, 0.92f)
+                (1.00f, 0.29f, 0.015f),
+                (0.02f, 0.88f, 0.75f),
+                (0.015f, 0.14f, 1.00f)
             ),
             AtlasMapLayer.Temperature => ThreeStop(
                 value,
-                (0.09f, 0.47f, 1.00f),
-                (1.00f, 0.88f, 0.12f),
-                (1.00f, 0.15f, 0.09f)
+                (0.015f, 0.27f, 1.00f),
+                (1.00f, 0.91f, 0.04f),
+                (1.00f, 0.035f, 0.015f)
             ),
             AtlasMapLayer.OreDensity => ThreeStop(
                 value,
-                (0.24f, 0.06f, 0.40f),
-                (0.96f, 0.11f, 0.55f),
+                (0.015f, 0.16f, 1.00f),
+                (0.91f, 0.10f, 0.58f),
                 (1.00f, 0.94f, 0.17f)
             ),
             _ => (0f, 0f, 0f)
         };
-        return EncodeBgra(color.R, color.G, color.B, 1f);
+        // Zero alpha remains the invalid/unloaded sentinel. Valid samples use
+        // the upper three quarters of alpha to carry the normalized scalar so
+        // the shader can draw terrain-following contours independently from
+        // the user-selected overlay opacity.
+        float encodedScalar = 0.25f + Math.Clamp(value, 0f, 1f) * 0.75f;
+        return EncodeBgra(color.R, color.G, color.B, encodedScalar);
     }
 
     private static float ExpandColorContrast(float value)
     {
-        float expanded = Math.Clamp((value - 0.5f) * 1.5f + 0.5f, 0f, 1f);
+        float expanded = Math.Clamp((value - 0.5f) * 1.75f + 0.5f, 0f, 1f);
         return expanded * expanded * (3f - 2f * expanded);
     }
+
+    private static int UnavailableOreColor() => EncodeBgra(
+        0.015f,
+        0.055f,
+        0.38f,
+        0.25f
+    );
 
     private static (float R, float G, float B) ThreeStop(
         float value,

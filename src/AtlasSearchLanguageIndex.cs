@@ -188,6 +188,36 @@ internal sealed class AtlasSearchLanguageIndex
         );
     }
 
+    internal string GetEnglishOreName(string? oreCode)
+    {
+        if (string.IsNullOrWhiteSpace(oreCode)) return "Unknown ore";
+
+        string code = oreCode.Trim();
+        int separator = code.IndexOf(':');
+        string domain = separator >= 0 ? code[..separator] : "game";
+        string path = separator >= 0 ? code[(separator + 1)..] : code;
+        string translationKey = $"{domain}:ore-{path}";
+        string? translated = GetTranslation(englishTranslations, translationKey);
+        return string.IsNullOrWhiteSpace(translated)
+            ? HumanizeAssetPath(path)
+            : translated.Trim();
+    }
+
+    internal string GetEnglishBlockName(string? blockCode)
+    {
+        if (string.IsNullOrWhiteSpace(blockCode)) return "Not loaded";
+        var code = new AssetLocation(blockCode);
+        foreach (string translationKey in GetTranslationKeys(
+            code,
+            AtlasSearchAliasKind.Block
+        ))
+        {
+            string? translated = GetTranslation(englishTranslations, translationKey);
+            if (!string.IsNullOrWhiteSpace(translated)) return translated.Trim();
+        }
+        return HumanizeAssetPath(code.Path);
+    }
+
     internal bool TryGetActiveBlockVariantQuery(
         AssetLocation? code,
         string? variantSuffix,
@@ -388,6 +418,13 @@ internal sealed class AtlasSearchLanguageIndex
     }
 
     internal static string Compact(string value) => value.Replace(" ", "", StringComparison.Ordinal);
+
+    private static string HumanizeAssetPath(string value)
+    {
+        string normalized = value.Replace('_', ' ').Replace('-', ' ').Trim();
+        if (normalized.Length == 0) return "Unknown";
+        return char.ToUpperInvariant(normalized[0]) + normalized[1..];
+    }
 
     private SearchAlias[] GetAliases(AssetLocation code, AtlasSearchAliasKind kind)
     {

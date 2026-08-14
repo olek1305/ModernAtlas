@@ -27,6 +27,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     private const int FogTextureDownsample = 4;
     private const int MovingAtlasRefreshMilliseconds = 16;
     private const int IdleAtlasRefreshMilliseconds = 83;
+    private const int OreHoverRefreshMilliseconds = 100;
+    private const string AllOresFilterValue = "__all__";
     private const string SmokeScreenshotEnvironmentVariable =
         "MODERNATLAS_SMOKE_SCREENSHOT";
     private const string SmokeFixedSunHourEnvironmentVariable =
@@ -66,6 +68,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private long lastInterfaceRestoreMilliseconds = -10000;
     private LoadedTexture? fogTexture;
     private LoadedTexture? searchMarkerTexture;
+    private LoadedTexture? oreHoverTexture;
     private LoadedTexture? normalWorldSnapshotTexture;
     private bool normalWorldSnapshotCaptured;
     private LoadedTexture? atlasFrameCacheTexture;
@@ -139,7 +142,9 @@ public sealed class ModernAtlasDialog : GuiDialog
     private double automatedLanternBlockY;
     private double automatedLanternBlockZ;
     private int automatedSmokeTestMapLayerPhase;
+    private float automatedSmokeTestOreLayerZoom;
     private bool automatedSmokeTestMapLayerPassed;
+    private string? pendingAutomatedMapLayerScreenshotSuffix;
     private bool automatedSmokeTestPerformanceModeSelected;
     private bool automatedSmokeTestPerformanceModeRendered;
     private bool automatedSmokeTestPreferencesCaptured;
@@ -157,7 +162,18 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool automatedOriginalHideVegetation;
     private bool pendingInterfaceRecompose;
     private AtlasMapLayer activeMapLayer = AtlasMapLayer.TexturedTerrain;
+    private string? selectedOreCode;
+    private AtlasOreInspection? oreHoverInspection;
+    private ElementBounds? searchPanelBounds;
+    private ElementBounds? mapLayerPanelBounds;
+    private int oreHoverMouseX;
+    private int oreHoverMouseY;
+    private int oreHoverCellX = int.MinValue;
+    private int oreHoverCellZ = int.MinValue;
+    private long lastOreHoverUpdateMilliseconds;
+    private int synchronizedOreCodeRevision = -1;
     private bool synchronizingMapLayerDropdown;
+    private bool synchronizingOreFilterDropdown;
     private bool synchronizingPerformanceControls;
 
     internal bool AutomatedSmokeTestRenderedExactWorld { get; private set; }
@@ -353,6 +369,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         compassRenderer.ResetForAtlasOpen(config.ShowPlayerCompass);
         lastInterfaceRestoreMilliseconds = -10000;
         selectedEntityId = null;
+        ClearOreHover();
         ClearSearch();
         ResetPointerDrag();
         atlasAnimationSeconds = 0;
@@ -412,6 +429,16 @@ public sealed class ModernAtlasDialog : GuiDialog
         AdvancePausedAnimation();
         AdvanceCamera(atlasRealDeltaTime);
         mapLayerTexture.Advance();
+        SynchronizeOreFilterOptions();
+        bool pointerOverMapPanel = searchPanelBounds?.PointInside(
+                capi.Input.MouseX,
+                capi.Input.MouseY
+            ) == true
+            || mapLayerPanelBounds?.PointInside(
+                capi.Input.MouseX,
+                capi.Input.MouseY
+            ) == true;
+        UpdateOreHover(capi.Input.MouseX, capi.Input.MouseY, pointerOverMapPanel);
         if (!loggedFirstRender)
         {
             loggedFirstRender = true;
@@ -548,6 +575,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         {
             RenderSearchMarkers();
         }
+        RenderOreHoverCard();
         string rendererStatus = rendered
             ? "exact loaded terrain"
             : "renderer unavailable";
@@ -571,6 +599,9 @@ public sealed class ModernAtlasDialog : GuiDialog
         overlay?.GetDynamicText("status").SetNewText(status);
         searchPanel?.GetDynamicText("search-status").SetNewText(searchController.StatusText);
         mapLayerPanel?.GetDynamicText("layer-status").SetNewText(mapLayerTexture.StatusText);
+        mapLayerPanel?.GetDynamicText("layer-legend").SetNewText(
+            activeMapLayer.DetailedLegend()
+        );
         if (!interfaceHidden)
         {
             overlay?.Render(deltaTime);
@@ -685,6 +716,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             return;
         }
 
+        ClearOreHover();
         soundController.PlayPageTouch();
 
         if (args.Button == EnumMouseButton.Left)
@@ -780,30 +812,35 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         if (!interfaceHidden && performanceModalOpen)
         {
+            ClearOreHover();
             performanceModal?.OnMouseMove(args);
             args.Handled = true;
             return;
         }
         if (!interfaceHidden && visualLabModalOpen)
         {
+            ClearOreHover();
             visualLabModal?.OnMouseMove(args);
             args.Handled = true;
             return;
         }
         if (!interfaceHidden && creativeSettingsModalOpen)
         {
+            ClearOreHover();
             creativeSettingsModal?.OnMouseMove(args);
             args.Handled = true;
             return;
         }
         if (!interfaceHidden && settingsModalOpen)
         {
+            ClearOreHover();
             settingsModal?.OnMouseMove(args);
             args.Handled = true;
             return;
         }
         if (leftDragging || rightDragging)
         {
+            ClearOreHover();
             // Preserve the engine's relative delta so long pulls are not
             // truncated at a window edge. Gesture ownership below prevents a
             // settings control from leaving this relative drag latched.
@@ -846,6 +883,9 @@ public sealed class ModernAtlasDialog : GuiDialog
             if (CreativeCheatSettingsAvailable) creativeSettingsShortcut?.OnMouseMove(args);
             overlay?.OnMouseMove(args);
         }
+        bool overPanel = searchPanelBounds?.PointInside(args.X, args.Y) == true
+            || mapLayerPanelBounds?.PointInside(args.X, args.Y) == true;
+        UpdateOreHover(args.X, args.Y, args.Handled || overPanel);
         // The atlas covers the entire screen. Do not leak hover interaction to
         // hotbar slots, creative inventory elements or dialogs underneath it.
         args.Handled = true;
@@ -1308,6 +1348,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         {
             creativeSettingsModalOpen = false;
             ClearSearch();
+            selectedOreCode = null;
+            ClearOreHover();
         }
         ClampPitchToAccessLevel(!IsOpened());
         if (accessWasAvailable != CreativeCheatSettingsAvailable)
@@ -1472,7 +1514,9 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedLanternBlockY = 0;
         automatedLanternBlockZ = 0;
         automatedSmokeTestMapLayerPhase = 0;
+        automatedSmokeTestOreLayerZoom = 0;
         automatedSmokeTestMapLayerPassed = false;
+        pendingAutomatedMapLayerScreenshotSuffix = null;
         automatedSmokeTestPerformanceModeSelected = false;
         automatedSmokeTestPerformanceModeRendered = false;
         automatedSmokeScreenshotPhase = 0;
@@ -1809,6 +1853,22 @@ public sealed class ModernAtlasDialog : GuiDialog
         string? configuredPath = Environment.GetEnvironmentVariable(
             SmokeScreenshotEnvironmentVariable
         );
+        if (pendingAutomatedMapLayerScreenshotSuffix != null)
+        {
+            string layerSuffix = pendingAutomatedMapLayerScreenshotSuffix;
+            pendingAutomatedMapLayerScreenshotSuffix = null;
+            if (!string.IsNullOrWhiteSpace(configuredPath))
+            {
+                string layerPrefix = configuredPath.EndsWith(
+                    ".png",
+                    StringComparison.OrdinalIgnoreCase
+                )
+                    ? configuredPath[..^4]
+                    : configuredPath;
+                TrySaveAutomatedSmokeScreenshot($"{layerPrefix}-{layerSuffix}.png");
+            }
+            return;
+        }
         if (!automatedSmokeTestSafeSurfaceScreenshotHandled)
         {
             automatedSmokeTestSafeSurfaceScreenshotHandled = true;
@@ -2399,6 +2459,10 @@ public sealed class ModernAtlasDialog : GuiDialog
 
         if (automatedSmokeTestMapLayerPhase == 0)
         {
+            targetPitchDegrees = 72;
+            pitchDegrees = 72;
+            FitLoadedTerrain();
+            zoom = targetZoom;
             SetMapLayer(AtlasMapLayer.Moisture);
             automatedSmokeTestMapLayerPhase = 1;
             capi.Logger.Notification(
@@ -2418,6 +2482,17 @@ public sealed class ModernAtlasDialog : GuiDialog
                 );
                 return;
             }
+            if (QueueAutomatedMapLayerScreenshot("layer-moisture"))
+            {
+                automatedSmokeTestMapLayerPhase = 10;
+                return;
+            }
+            automatedSmokeTestMapLayerPhase = 10;
+        }
+
+        if (automatedSmokeTestMapLayerPhase == 10)
+        {
+            if (pendingAutomatedMapLayerScreenshotSuffix != null) return;
             SetMapLayer(AtlasMapLayer.OreDensity);
             automatedSmokeTestMapLayerPhase = 2;
             capi.Logger.Notification(
@@ -2426,7 +2501,127 @@ public sealed class ModernAtlasDialog : GuiDialog
             return;
         }
 
-        if (automatedSmokeTestMapLayerPhase != 2 || !mapLayerTexture.Ready) return;
+        if (automatedSmokeTestMapLayerPhase == 2 && mapLayerTexture.Ready)
+        {
+            if (!AtlasOrePotential.ValidateThresholds())
+            {
+                automatedSmokeTestMapLayerPhase = -1;
+                capi.Logger.Error(
+                    "[ModernAtlas] Automated ore-potential test rejected the vanilla grade thresholds."
+                );
+                return;
+            }
+
+            int sampleX = (int)Math.Floor(
+                capi.World.Player.Entity.Pos.X / AtlasMapLayerTexture.HorizontalSampleSize
+            ) * AtlasMapLayerTexture.HorizontalSampleSize
+                + AtlasMapLayerTexture.HorizontalSampleSize / 2;
+            int sampleZ = (int)Math.Floor(
+                capi.World.Player.Entity.Pos.Z / AtlasMapLayerTexture.HorizontalSampleSize
+            ) * AtlasMapLayerTexture.HorizontalSampleSize
+                + AtlasMapLayerTexture.HorizontalSampleSize / 2;
+            if (!mapLayerTexture.TryInspectOre(
+                sampleX,
+                sampleZ,
+                out AtlasOreInspection? automatedInspection
+            ) || automatedInspection == null)
+            {
+                automatedSmokeTestMapLayerPhase = -1;
+                capi.Logger.Error(
+                    "[ModernAtlas] Automated ore-potential test could not inspect the loaded player column."
+                );
+                return;
+            }
+
+            oreHoverInspection = automatedInspection;
+            oreHoverCellX = sampleX;
+            oreHoverCellZ = sampleZ;
+            oreHoverMouseX = AtlasViewport.X + AtlasViewport.Width / 2;
+            oreHoverMouseY = AtlasViewport.Y + AtlasViewport.Height / 2;
+            BuildOreHoverTexture(automatedInspection);
+            if (QueueAutomatedMapLayerScreenshot("layer-ore-overview"))
+            {
+                automatedSmokeTestMapLayerPhase = 20;
+                return;
+            }
+            automatedSmokeTestMapLayerPhase = 20;
+        }
+
+        if (automatedSmokeTestMapLayerPhase == 20)
+        {
+            if (pendingAutomatedMapLayerScreenshotSuffix != null) return;
+
+            if (mapLayerTexture.DiscoveredOreCodes.Count > 0)
+            {
+                selectedOreCode = mapLayerTexture.DiscoveredOreCodes[0];
+                PrepareMapLayer();
+                automatedSmokeTestMapLayerPhase = 3;
+                capi.Logger.Notification(
+                    "[ModernAtlas] Automated smoke test selected the loaded ore filter {0}.",
+                    selectedOreCode
+                );
+                return;
+            }
+        }
+
+        if (automatedSmokeTestMapLayerPhase == 3)
+        {
+            if (!mapLayerTexture.Ready) return;
+            if (mapLayerTexture.TryInspectOre(
+                oreHoverCellX,
+                oreHoverCellZ,
+                out AtlasOreInspection? filteredInspection
+            ) && filteredInspection != null)
+            {
+                oreHoverInspection = filteredInspection;
+                BuildOreHoverTexture(filteredInspection);
+            }
+            if (QueueAutomatedMapLayerScreenshot("layer-ore-filtered"))
+            {
+                automatedSmokeTestMapLayerPhase = 30;
+                return;
+            }
+            automatedSmokeTestMapLayerPhase = 30;
+        }
+        if (automatedSmokeTestMapLayerPhase == 30
+            && pendingAutomatedMapLayerScreenshotSuffix != null)
+        {
+            return;
+        }
+        if (automatedSmokeTestMapLayerPhase == 30)
+        {
+            automatedSmokeTestOreLayerZoom = zoom;
+            targetZoom = Math.Clamp(
+                zoom * 0.62f,
+                MaximumZoomIn,
+                30000
+            );
+            automatedSmokeTestMapLayerPhase = 31;
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated smoke test is zooming the filtered ore layer while keeping its transient data texture active."
+            );
+            return;
+        }
+        if (automatedSmokeTestMapLayerPhase == 31)
+        {
+            if (Math.Abs(targetZoom - zoom) > 0.01f) return;
+            if (QueueAutomatedMapLayerScreenshot("layer-ore-filtered-zoom"))
+            {
+                automatedSmokeTestMapLayerPhase = 32;
+                return;
+            }
+            automatedSmokeTestMapLayerPhase = 32;
+        }
+        if (automatedSmokeTestMapLayerPhase == 32
+            && pendingAutomatedMapLayerScreenshotSuffix != null)
+        {
+            return;
+        }
+        if (automatedSmokeTestMapLayerPhase is not (20 or 32)
+            || !mapLayerTexture.Ready)
+        {
+            return;
+        }
         if (mapLayerTexture.TextureId <= 0)
         {
             automatedSmokeTestMapLayerPhase = -1;
@@ -2437,10 +2632,27 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
 
         automatedSmokeTestMapLayerPassed = true;
+        targetZoom = automatedSmokeTestOreLayerZoom > 0
+            ? automatedSmokeTestOreLayerZoom
+            : targetZoom;
+        zoom = targetZoom;
+        selectedOreCode = null;
         SetMapLayer(AtlasMapLayer.TexturedTerrain);
         capi.Logger.Notification(
-            "[ModernAtlas] Automated smoke test rendered climate and Creative/Cheat ore map layers from loaded data."
+            "[ModernAtlas] Automated smoke test rendered climate and Creative/Cheat ore map layers from loaded data and retained the selected ore colors through zoom."
         );
+    }
+
+    private bool QueueAutomatedMapLayerScreenshot(string suffix)
+    {
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(
+            SmokeScreenshotEnvironmentVariable
+        )))
+        {
+            return false;
+        }
+        pendingAutomatedMapLayerScreenshotSuffix = suffix;
+        return true;
     }
 
     internal void OnWorldLeave()
@@ -2469,6 +2681,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedLanternBlockZ = 0;
         automatedSmokeTestMapLayerPhase = 0;
         automatedSmokeTestMapLayerPassed = false;
+        pendingAutomatedMapLayerScreenshotSuffix = null;
         AutomatedSmokeTestRenderedExactWorld = false;
         cheatModeEnabled = false;
         settingsModalOpen = false;
@@ -2479,6 +2692,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         selectedEntityId = null;
         searchController.Clear();
         activeMapLayer = AtlasMapLayer.TexturedTerrain;
+        selectedOreCode = null;
+        ClearOreHover();
         mapLayerTexture.Reset();
         preparingSurfaceFilter = false;
         preparingOreConcealment = false;
@@ -2538,6 +2753,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         fogTexture = null;
         searchMarkerTexture?.Dispose();
         searchMarkerTexture = null;
+        oreHoverTexture?.Dispose();
+        oreHoverTexture = null;
         compassRenderer.Dispose();
         ReleaseNormalWorldSnapshot();
         ReleaseAtlasFrameCache();
@@ -2675,6 +2892,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             560,
             82
         );
+        searchPanelBounds = searchRoot;
         searchPanel = capi.Gui.CreateCompo("modernatlas-search", searchRoot)
             .AddStaticCustomDraw(ElementBounds.Fixed(0, 0, 560, 82), AtlasUiStyle.DrawCard)
             .AddStaticText(
@@ -2707,34 +2925,10 @@ public sealed class ModernAtlasDialog : GuiDialog
             $"Block, creature, player or item — {searchController.SearchLanguageSummary}"
         );
 
-        ElementBounds mapLayerRoot = ElementBounds.Fixed(
-            contentX + 18,
-            contentY + (CreativeCheatSettingsAvailable ? 202 : 112),
-            560,
-            82
+        ComposeMapLayerPanel(
+            contentX,
+            contentY + (CreativeCheatSettingsAvailable ? 202 : 112)
         );
-        mapLayerPanel = capi.Gui.CreateCompo("modernatlas-map-layer", mapLayerRoot)
-            .AddStaticCustomDraw(ElementBounds.Fixed(0, 0, 560, 82), AtlasUiStyle.DrawCard)
-            .AddStaticText(
-                "MAP LAYER",
-                AtlasUiStyle.LabelFont(12),
-                ElementBounds.Fixed(18, 17, 124, 24)
-            )
-            .AddDropDown(
-                AtlasMapLayerInfo.Values,
-                AtlasMapLayerInfo.Names,
-                (int)activeMapLayer,
-                OnMapLayerChanged,
-                ElementBounds.Fixed(142, 8, 400, 44),
-                "map-layer"
-            )
-            .AddDynamicText(
-                "",
-                AtlasUiStyle.DetailFont(11),
-                ElementBounds.Fixed(18, 55, 524, 20),
-                "layer-status"
-            )
-            .Compose(false);
 
         ElementBounds unitRoot = config.RenderOnScroll
             ? ElementBounds.Fixed(
@@ -3557,6 +3751,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool HideInterface()
     {
         ResetPointerDrag();
+        ClearOreHover();
         searchPanel?.UnfocusOwnElements();
         selectedEntityId = null;
         settingsModalOpen = false;
@@ -3586,6 +3781,167 @@ public sealed class ModernAtlasDialog : GuiDialog
         return CloseAtlas();
     }
 
+    private void ComposeMapLayerPanel(double contentX, double contentY)
+    {
+        bool oreControls = activeMapLayer == AtlasMapLayer.OreDensity
+            && CreativeCheatSettingsAvailable;
+        double height = oreControls ? 150 : 104;
+        ElementBounds root = ElementBounds.Fixed(
+            contentX + 18,
+            contentY,
+            560,
+            height
+        );
+        mapLayerPanelBounds = root;
+        GuiComposer composer = capi.Gui.CreateCompo("modernatlas-map-layer", root)
+            .AddStaticCustomDraw(
+                ElementBounds.Fixed(0, 0, 560, height),
+                AtlasUiStyle.DrawCard
+            )
+            .AddStaticText(
+                "MAP LAYER",
+                AtlasUiStyle.LabelFont(12),
+                ElementBounds.Fixed(18, 17, 124, 24)
+            )
+            .AddDropDown(
+                AtlasMapLayerInfo.Values,
+                AtlasMapLayerInfo.Names,
+                (int)activeMapLayer,
+                OnMapLayerChanged,
+                ElementBounds.Fixed(142, 8, 400, 44),
+                "map-layer"
+            );
+
+        if (oreControls)
+        {
+            GetOreFilterOptions(out string[] values, out string[] names, out int selectedIndex);
+            composer
+                .AddStaticText(
+                    "ORE FILTER",
+                    AtlasUiStyle.LabelFont(12),
+                    ElementBounds.Fixed(18, 62, 124, 24)
+                )
+                .AddDropDown(
+                    values,
+                    names,
+                    selectedIndex,
+                    OnOreFilterChanged,
+                    ElementBounds.Fixed(142, 53, 400, 44),
+                    "ore-filter"
+                );
+        }
+
+        double statusY = oreControls ? 102 : 55;
+        mapLayerPanel = composer
+            .AddDynamicText(
+                "",
+                AtlasUiStyle.DetailFont(11),
+                ElementBounds.Fixed(18, statusY, 524, 20),
+                "layer-status"
+            )
+            .AddDynamicText(
+                activeMapLayer.DetailedLegend(),
+                AtlasUiStyle.DetailFont(10),
+                ElementBounds.Fixed(18, statusY + 21, 524, 20),
+                "layer-legend"
+            )
+            .Compose(false);
+        synchronizedOreCodeRevision = mapLayerTexture.OreCodeRevision;
+    }
+
+    private void RecomposeMapLayerPanel()
+    {
+        mapLayerPanel?.Dispose();
+        mapLayerPanel = null;
+        double guiScale = Math.Max(0.5, RuntimeEnv.GUIScale);
+        AtlasViewportBounds viewport = AtlasViewport;
+        double contentX = config.RenderOnScroll ? viewport.X / guiScale : 0;
+        double contentY = config.RenderOnScroll ? viewport.Y / guiScale : 0;
+        ComposeMapLayerPanel(
+            contentX,
+            contentY + (CreativeCheatSettingsAvailable ? 202 : 112)
+        );
+        SyncMapLayerDropdown();
+    }
+
+    private void GetOreFilterOptions(
+        out string[] values,
+        out string[] names,
+        out int selectedIndex
+    )
+    {
+        var options = new List<(string Code, string Name)>();
+        var unique = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string code in mapLayerTexture.DiscoveredOreCodes)
+        {
+            if (unique.Add(code))
+            {
+                options.Add((code, searchController.GetEnglishOreName(code)));
+            }
+        }
+        if (selectedOreCode != null && unique.Add(selectedOreCode))
+        {
+            options.Add((
+                selectedOreCode,
+                searchController.GetEnglishOreName(selectedOreCode)
+            ));
+        }
+        options.Sort((left, right) => string.Compare(
+            left.Name,
+            right.Name,
+            StringComparison.OrdinalIgnoreCase
+        ));
+
+        values = new string[options.Count + 1];
+        names = new string[options.Count + 1];
+        values[0] = AllOresFilterValue;
+        names[0] = "All ores";
+        selectedIndex = 0;
+        for (int index = 0; index < options.Count; index++)
+        {
+            values[index + 1] = options[index].Code;
+            names[index + 1] = options[index].Name;
+            if (string.Equals(options[index].Code, selectedOreCode, StringComparison.Ordinal))
+            {
+                selectedIndex = index + 1;
+            }
+        }
+    }
+
+    private void SynchronizeOreFilterOptions()
+    {
+        if (activeMapLayer != AtlasMapLayer.OreDensity
+            || mapLayerTexture.OreCodeRevision == synchronizedOreCodeRevision)
+        {
+            return;
+        }
+
+        GuiElementDropDown? dropdown = mapLayerPanel?.GetDropDown("ore-filter");
+        if (dropdown == null) return;
+        GetOreFilterOptions(out string[] values, out string[] names, out int selectedIndex);
+        synchronizingOreFilterDropdown = true;
+        try
+        {
+            dropdown.SetList(values, names);
+            dropdown.SetSelectedIndex(selectedIndex);
+            synchronizedOreCodeRevision = mapLayerTexture.OreCodeRevision;
+        }
+        finally
+        {
+            synchronizingOreFilterDropdown = false;
+        }
+    }
+
+    private void OnOreFilterChanged(string value, bool selected)
+    {
+        if (!selected || synchronizingOreFilterDropdown) return;
+        selectedOreCode = string.Equals(value, AllOresFilterValue, StringComparison.Ordinal)
+            ? null
+            : value;
+        ClearOreHover();
+        if (IsOpened()) PrepareMapLayer();
+    }
+
     private void OnMapLayerChanged(string value, bool selected)
     {
         if (!selected || synchronizingMapLayerDropdown) return;
@@ -3606,6 +3962,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private void SetMapLayer(AtlasMapLayer layer)
     {
+        AtlasMapLayer previousLayer = activeMapLayer;
         if (!config.MapLayersEnabled)
         {
             layer = AtlasMapLayer.TexturedTerrain;
@@ -3615,6 +3972,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             layer = AtlasMapLayer.TexturedTerrain;
         }
         activeMapLayer = layer;
+        ClearOreHover();
+        if (previousLayer != activeMapLayer && mapLayerPanel != null)
+        {
+            RecomposeMapLayerPanel();
+        }
         SyncMapLayerDropdown();
         if (IsOpened()) PrepareMapLayer();
         else mapLayerTexture.Reset();
@@ -3650,7 +4012,8 @@ public sealed class ModernAtlasDialog : GuiDialog
             capi.World.Player.Entity.Pos.X,
             capi.World.Player.Entity.Pos.Z,
             GameViewDistance,
-            UnitInspectionEnabled
+            UnitInspectionEnabled,
+            selectedOreCode
         );
     }
 
@@ -3778,6 +4141,308 @@ public sealed class ModernAtlasDialog : GuiDialog
         context.Fill();
 
         capi.Gui.LoadOrUpdateCairoTexture(surface, true, ref searchMarkerTexture);
+    }
+
+    private void UpdateOreHover(int mouseX, int mouseY, bool blocked)
+    {
+        oreHoverMouseX = mouseX;
+        oreHoverMouseY = mouseY;
+        if (blocked
+            || interfaceHidden
+            || activeMapLayer != AtlasMapLayer.OreDensity
+            || !CreativeCheatSettingsAvailable
+            || settingsModalOpen
+            || performanceModalOpen
+            || creativeSettingsModalOpen
+            || visualLabModalOpen
+            || leftDragging
+            || rightDragging
+            || !AtlasViewport.Contains(mouseX, mouseY))
+        {
+            ClearOreHover();
+            return;
+        }
+
+        long now = capi.ElapsedMilliseconds;
+        if (now - lastOreHoverUpdateMilliseconds < OreHoverRefreshMilliseconds)
+        {
+            return;
+        }
+        lastOreHoverUpdateMilliseconds = now;
+
+        if (!TryResolvePointerSurface(mouseX, mouseY, out int worldX, out int worldZ))
+        {
+            ClearOreHover();
+            return;
+        }
+
+        int cellX = (int)Math.Floor(worldX / (double)AtlasMapLayerTexture.HorizontalSampleSize)
+            * AtlasMapLayerTexture.HorizontalSampleSize
+            + AtlasMapLayerTexture.HorizontalSampleSize / 2;
+        int cellZ = (int)Math.Floor(worldZ / (double)AtlasMapLayerTexture.HorizontalSampleSize)
+            * AtlasMapLayerTexture.HorizontalSampleSize
+            + AtlasMapLayerTexture.HorizontalSampleSize / 2;
+        if (cellX == oreHoverCellX && cellZ == oreHoverCellZ
+            && oreHoverInspection != null)
+        {
+            return;
+        }
+
+        oreHoverCellX = cellX;
+        oreHoverCellZ = cellZ;
+        if (!mapLayerTexture.TryInspectOre(cellX, cellZ, out oreHoverInspection)
+            || oreHoverInspection == null)
+        {
+            ClearOreHover();
+            return;
+        }
+        BuildOreHoverTexture(oreHoverInspection);
+    }
+
+    private bool TryResolvePointerSurface(
+        int mouseX,
+        int mouseY,
+        out int worldX,
+        out int worldZ
+    )
+    {
+        worldX = 0;
+        worldZ = 0;
+        AtlasViewportBounds viewport = AtlasViewport;
+        if (!viewport.Contains(mouseX, mouseY)) return false;
+
+        double pixelsPerBlock = viewport.Height / (2.0 * Math.Max(0.001f, zoom));
+        double projectedRight = (mouseX - (viewport.X + viewport.Width * 0.5))
+            / pixelsPerBlock;
+        double projectedUp = ((viewport.Y + viewport.Height * 0.5) - mouseY)
+            / pixelsPerBlock;
+        double yaw = yawDegrees * GameMath.DEG2RAD;
+        double pitch = pitchDegrees * GameMath.DEG2RAD;
+        double sinYaw = Math.Sin(yaw);
+        double cosYaw = Math.Cos(yaw);
+        double sinPitch = Math.Sin(pitch);
+        double cosPitch = Math.Cos(pitch);
+
+        double rightX = cosYaw;
+        double rightZ = -sinYaw;
+        double upX = -sinYaw * sinPitch;
+        double upY = cosPitch;
+        double upZ = -cosYaw * sinPitch;
+        double forwardX = -sinYaw * cosPitch;
+        double forwardY = -sinPitch;
+        double forwardZ = -cosYaw * cosPitch;
+        double rayDistance = Math.Max(640, GameViewDistance * 2.5);
+        double originX = centerX - forwardX * rayDistance
+            + rightX * projectedRight + upX * projectedUp;
+        double originY = centerY - forwardY * rayDistance + upY * projectedUp;
+        double originZ = centerZ - forwardZ * rayDistance
+            + rightZ * projectedRight + upZ * projectedUp;
+        double maximumTravel = rayDistance * 2.0;
+        const double step = 4.0;
+        int mapSizeX = capi.World.BlockAccessor.MapSizeX;
+        int mapSizeZ = capi.World.BlockAccessor.MapSizeZ;
+        int chunkSize = GlobalConstants.ChunkSize;
+        double disclosureRadiusSquared = (double)GameViewDistance * GameViewDistance;
+        double playerX = capi.World.Player.Entity.Pos.X;
+        double playerZ = capi.World.Player.Entity.Pos.Z;
+
+        for (double travel = 0; travel <= maximumTravel; travel += step)
+        {
+            double x = originX + forwardX * travel;
+            double y = originY + forwardY * travel;
+            double z = originZ + forwardZ * travel;
+            int xInt = (int)Math.Floor(x);
+            int zInt = (int)Math.Floor(z);
+            if (xInt < 0 || zInt < 0 || xInt >= mapSizeX || zInt >= mapSizeZ)
+            {
+                continue;
+            }
+            double dx = x - playerX;
+            double dz = z - playerZ;
+            if (dx * dx + dz * dz > disclosureRadiusSquared) continue;
+
+            int chunkX = xInt / chunkSize;
+            int chunkZ = zInt / chunkSize;
+            IMapChunk? mapChunk = capi.World.BlockAccessor.GetMapChunk(chunkX, chunkZ);
+            ushort[]? heightMap = mapChunk?.WorldGenTerrainHeightMap;
+            if (heightMap == null || heightMap.Length < chunkSize * chunkSize) continue;
+            int localX = xInt - chunkX * chunkSize;
+            int localZ = zInt - chunkZ * chunkSize;
+            int surfaceY = heightMap[localZ * chunkSize + localX];
+            if (y > surfaceY + 1.0) continue;
+
+            worldX = xInt;
+            worldZ = zInt;
+            return true;
+        }
+        return false;
+    }
+
+    private void BuildOreHoverTexture(AtlasOreInspection inspection)
+    {
+        AtlasOreReading[] visible = SelectVisibleOreReadings(inspection.Readings);
+        double scale = Math.Max(0.5, RuntimeEnv.GUIScale);
+        int width = Math.Max(1, (int)Math.Ceiling(390 * scale));
+        int rowCount = Math.Max(1, visible.Length);
+        int height = Math.Max(1, (int)Math.Ceiling((148 + rowCount * 25) * scale));
+        oreHoverTexture ??= new LoadedTexture(capi);
+        using ImageSurface surface = new(Format.Argb32, width, height);
+        using Context context = new(surface);
+        AtlasUiStyle.Clear(context);
+        AtlasUiStyle.DrawRaisedPanel(context, 0, 0, width, height, 13);
+
+        DrawOreHoverText(context, "ORE POTENTIAL", 18, 25, 12, true, 0.97, 0.98, 0.99, scale);
+        string position = $"X {inspection.WorldX}  •  Z {inspection.WorldZ}  •  Surface {inspection.SurfaceY}";
+        DrawOreHoverText(context, position, 18, 47, 10.5, false, 0.75, 0.81, 0.86, scale);
+
+        double rowY = 76;
+        if (visible.Length == 0)
+        {
+            string empty = inspection.Source == AtlasOreInspectionSource.RegionalOreMaps
+                ? "No mapped potential above the trace threshold"
+                : "No ore blocks in this loaded column";
+            DrawOreHoverText(context, empty, 18, rowY, 11, false, 0.85, 0.87, 0.89, scale);
+        }
+        else
+        {
+            foreach (AtlasOreReading reading in visible)
+            {
+                string name = TruncateLabel(searchController.GetEnglishOreName(reading.Code), 24);
+                bool selected = selectedOreCode != null
+                    && string.Equals(reading.Code, selectedOreCode, StringComparison.Ordinal);
+                if (selected) name = "› " + name;
+                string value = reading.IsPotential
+                    ? $"{AtlasOrePotential.Grade(reading.Potential)}  {reading.Potential * 100:0.##}%"
+                    : reading.BlockCount == 1 ? "1 loaded block" : $"{reading.BlockCount} loaded blocks";
+                (double red, double green, double blue) = reading.IsPotential
+                    ? GradeColor(reading.Potential)
+                    : (0.92, 0.72, 0.30);
+                DrawOreHoverText(context, name, 18, rowY, 11, selected, 0.96, 0.97, 0.98, scale);
+                DrawOreHoverText(context, value, 210, rowY, 10.5, true, red, green, blue, scale);
+                rowY += 25;
+            }
+        }
+
+        int hiddenCount = Math.Max(0, inspection.Readings.Length - visible.Length);
+        if (hiddenCount > 0)
+        {
+            DrawOreHoverText(context, $"+{hiddenCount} more mapped ores", 18, rowY, 9.5, false, 0.65, 0.70, 0.74, scale);
+        }
+        double infoY = (148 + rowCount * 25) - 45;
+        string rock = searchController.GetEnglishBlockName(inspection.HostRockCode);
+        DrawOreHoverText(context, $"Rock: {TruncateLabel(rock, 32)}", 18, infoY, 10, false, 0.76, 0.81, 0.85, scale);
+        string source = inspection.Source == AtlasOreInspectionSource.RegionalOreMaps
+            ? $"Source: {inspection.SourceMapCount} loaded regional OreMaps"
+            : "Source: exact loaded block column • grade unavailable";
+        DrawOreHoverText(context, source, 18, infoY + 20, 9.5, false, 0.65, 0.71, 0.75, scale);
+        capi.Gui.LoadOrUpdateCairoTexture(surface, true, ref oreHoverTexture);
+    }
+
+    private AtlasOreReading[] SelectVisibleOreReadings(AtlasOreReading[] readings)
+    {
+        const int maximum = 5;
+        if (readings.Length <= maximum) return readings;
+        var selected = new List<AtlasOreReading>(maximum);
+        if (selectedOreCode != null)
+        {
+            foreach (AtlasOreReading reading in readings)
+            {
+                if (!string.Equals(reading.Code, selectedOreCode, StringComparison.Ordinal)) continue;
+                selected.Add(reading);
+                break;
+            }
+        }
+        foreach (AtlasOreReading reading in readings)
+        {
+            if (selected.Count >= maximum) break;
+            if (selectedOreCode != null
+                && string.Equals(reading.Code, selectedOreCode, StringComparison.Ordinal))
+            {
+                continue;
+            }
+            selected.Add(reading);
+        }
+        return selected.ToArray();
+    }
+
+    private static (double R, double G, double B) GradeColor(float potential) =>
+        potential switch
+        {
+            >= 0.6666667f => (1.00, 0.91, 0.16),
+            >= 0.5333334f => (1.00, 0.60, 0.14),
+            >= 0.4f => (1.00, 0.35, 0.28),
+            >= 0.2666667f => (0.95, 0.30, 0.66),
+            >= 0.1333334f => (0.72, 0.40, 0.94),
+            >= AtlasOrePotential.CategorizedThreshold => (0.52, 0.55, 0.88),
+            _ => (0.64, 0.69, 0.75)
+        };
+
+    private static string TruncateLabel(string value, int maximumLength) =>
+        value.Length <= maximumLength ? value : value[..(maximumLength - 1)] + "…";
+
+    private static void DrawOreHoverText(
+        Context context,
+        string text,
+        double x,
+        double y,
+        double size,
+        bool bold,
+        double red,
+        double green,
+        double blue,
+        double scale
+    )
+    {
+        context.SelectFontFace(
+            "Sans",
+            FontSlant.Normal,
+            bold ? FontWeight.Bold : FontWeight.Normal
+        );
+        context.SetFontSize(size * scale);
+        context.SetSourceRGBA(red, green, blue, 0.98);
+        context.MoveTo(x * scale, y * scale);
+        context.ShowText(text);
+    }
+
+    private void RenderOreHoverCard()
+    {
+        if (oreHoverInspection == null
+            || oreHoverTexture?.TextureId <= 0
+            || interfaceHidden
+            || activeMapLayer != AtlasMapLayer.OreDensity
+            || !CreativeCheatSettingsAvailable)
+        {
+            return;
+        }
+
+        AtlasViewportBounds viewport = AtlasViewport;
+        LoadedTexture hoverTexture = oreHoverTexture!;
+        float width = hoverTexture.Width;
+        float height = hoverTexture.Height;
+        float x = oreHoverMouseX + 18;
+        if (x + width > viewport.Right - 8) x = oreHoverMouseX - width - 18;
+        x = Math.Clamp(x, viewport.X + 8, Math.Max(viewport.X + 8, viewport.Right - width - 8));
+        float y = Math.Clamp(
+            oreHoverMouseY + 16,
+            viewport.Y + 8,
+            Math.Max(viewport.Y + 8, viewport.Bottom - height - 8)
+        );
+        capi.Render.Render2DTexture(
+            hoverTexture.TextureId,
+            x,
+            y,
+            width,
+            height,
+            48,
+            ColorUtil.WhiteArgbVec
+        );
+    }
+
+    private void ClearOreHover()
+    {
+        oreHoverInspection = null;
+        oreHoverCellX = int.MinValue;
+        oreHoverCellZ = int.MinValue;
     }
 
     private bool RenderLiveWorld(float deltaTime)

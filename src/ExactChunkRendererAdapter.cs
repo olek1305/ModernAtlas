@@ -1351,10 +1351,17 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                             "atlasLayerSampleSize",
                             (float)AtlasMapLayerTexture.HorizontalSampleSize
                         );
-                        shader.Uniform(
-                            "atlasLayerOpacity",
-                            Math.Clamp(mapLayerOpacity, 0f, 1f)
-                        );
+                            shader.Uniform(
+                                "atlasLayerOpacity",
+                                Math.Clamp(mapLayerOpacity, 0f, 1f)
+                            );
+                            if (shader.HasUniform("atlasLayerContours"))
+                            {
+                                shader.Uniform(
+                                    "atlasLayerContours",
+                                    mapLayerTexture.ContoursEnabled ? 1 : 0
+                                );
+                            }
                     }
                 }
                 shader.Uniform(
@@ -1501,6 +1508,10 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 {
                     shader.Uniform("atlasLayerEnabled", 0);
                 }
+                if (shader.HasUniform("atlasLayerContours"))
+                {
+                    shader.Uniform("atlasLayerContours", 0);
+                }
                 if (shader.HasUniform("atlasDisableHorizonFade"))
                 {
                     // Compiling the atlas variant makes Vintage Story's
@@ -1603,31 +1614,27 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         }
         string mapLayerCode = supportsBoundaryColor
             ? """
-    if (atlasLayerEnabled > 0)
-    {
-        vec2 layerPosition =
-            (modernAtlasAbsoluteWorldPosition.xz - atlasLayerOriginXZ)
-            / atlasLayerSampleSize;
-        ivec2 layerDimensions = textureSize(atlasLayerTex, 0);
-        if (all(greaterThanEqual(layerPosition, vec2(0.0)))
-            && all(lessThan(layerPosition, vec2(layerDimensions))))
-        {
-            vec2 layerUv = layerPosition / vec2(layerDimensions);
-            vec4 layerColor = texture(atlasLayerTex, layerUv);
-            float baseLuminance = dot(
-                clamp(outColor.rgb, vec3(0.0), vec3(1.0)),
-                vec3(0.2126, 0.7152, 0.0722)
-            );
-            vec3 reliefColor = layerColor.rgb * mix(0.68, 1.18, baseLuminance);
-            outColor.rgb = mix(
-                outColor.rgb,
-                reliefColor,
-                clamp(layerColor.a * atlasLayerOpacity, 0.0, 1.0)
-            );
-        }
-    }
+    modernAtlasApplyMapLayer(outColor, modernAtlasAbsoluteWorldPosition);
 """
             : "";
+        if (!supportsBoundaryColor)
+        {
+            const string oitOutput = "OIT(texColor, glowLevel);";
+            if (!renamed.Contains(oitOutput, StringComparison.Ordinal))
+            {
+                return null;
+            }
+            renamed = renamed.Replace(
+                oitOutput,
+                "modernAtlasApplyRelativeMapLayer(texColor, worldPos.xyz);\n"
+                    + "    OIT(texColor, glowLevel);",
+                StringComparison.Ordinal
+            );
+            renamed = renamed.Insert(
+                mainIndex,
+                "void modernAtlasApplyRelativeMapLayer(inout vec4 targetColor, vec3 relativeWorldPosition);\n\n"
+            );
+        }
         string caveFilterCode = supportsBoundaryColor
             ? """
     // Keep the historical high-ground exception for opaque terrain. It is
@@ -1656,6 +1663,10 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 // side. This uses no generated shell or persistent geometry.
                 modernAtlasOriginalMain();
                 outColor = vec4(atlasCaveConcealmentColor, 1.0);
+                modernAtlasApplyMapLayer(
+                    outColor,
+                    modernAtlasAbsoluteWorldPosition
+                );
                 return;
             }
             discard;
@@ -1698,12 +1709,65 @@ uniform sampler2D atlasLayerTex;
 uniform vec2 atlasLayerOriginXZ;
 uniform float atlasLayerSampleSize;
 uniform float atlasLayerOpacity;
+uniform int atlasLayerContours;
 uniform int atlasConcealOres;
 uniform float atlasTextureMipBias;
 uniform sampler2D atlasOreMapTex;
 uniform sampler2D atlasStoneTex;
 uniform int atlasHideVegetation;
 uniform sampler2D atlasVegetationMaskTex;
+
+void modernAtlasApplyMapLayer(
+    inout vec4 targetColor,
+    vec3 absoluteWorldPosition
+)
+{
+    if (atlasLayerEnabled <= 0) return;
+
+    vec2 layerPosition =
+        (absoluteWorldPosition.xz - atlasLayerOriginXZ)
+        / atlasLayerSampleSize;
+    ivec2 layerDimensions = textureSize(atlasLayerTex, 0);
+    if (any(lessThan(layerPosition, vec2(0.0)))
+        || any(greaterThanEqual(layerPosition, vec2(layerDimensions))))
+    {
+        return;
+    }
+
+    vec2 layerUv = layerPosition / vec2(layerDimensions);
+    vec4 layerColor = texture(atlasLayerTex, layerUv);
+    float layerValidity = smoothstep(0.04, 0.22, layerColor.a);
+    float layerScalar = clamp((layerColor.a - 0.25) / 0.75, 0.0, 1.0);
+    float baseLuminance = dot(
+        clamp(targetColor.rgb, vec3(0.0), vec3(1.0)),
+        vec3(0.2126, 0.7152, 0.0722)
+    );
+    vec3 reliefColor = layerColor.rgb * mix(0.68, 1.18, baseLuminance);
+    if (atlasLayerContours > 0)
+    {
+        float bands = layerScalar * 6.0;
+        float distanceToLine = abs(fract(bands + 0.5) - 0.5);
+        float lineWidth = max(fwidth(bands) * 0.55, 0.025);
+        float contour = 1.0 - smoothstep(lineWidth, lineWidth * 2.2, distanceToLine);
+        reliefColor *= mix(1.0, 0.86, contour * layerValidity);
+    }
+    targetColor.rgb = mix(
+        targetColor.rgb,
+        reliefColor,
+        clamp(layerValidity * atlasLayerOpacity, 0.0, 1.0)
+    );
+}
+
+void modernAtlasApplyRelativeMapLayer(
+    inout vec4 targetColor,
+    vec3 relativeWorldPosition
+)
+{
+    modernAtlasApplyMapLayer(
+        targetColor,
+        relativeWorldPosition + atlasWorldOffset
+    );
+}
 
 bool modernAtlasIsVegetation(vec2 sourceUv)
 {
@@ -2422,6 +2486,10 @@ void main()
             activeLiquidShader.Uniform(
                 "atlasLayerOpacity",
                 Math.Clamp(mapLayerOpacity, 0f, 1f)
+            );
+            activeLiquidShader.Uniform(
+                "atlasLayerContours",
+                mapLayerTexture.ContoursEnabled ? 1 : 0
             );
         }
         activeLiquidShader.Uniform("atlasSunDirection", atlasSunDirection);

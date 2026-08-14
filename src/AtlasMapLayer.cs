@@ -48,8 +48,18 @@ internal static class AtlasMapLayerInfo
         AtlasMapLayer.SoilFertility => "barren → fertile",
         AtlasMapLayer.Moisture => "dry → wet",
         AtlasMapLayer.Temperature => "cold → hot",
-        AtlasMapLayer.OreDensity => "low → high potential",
+        AtlasMapLayer.OreDensity => "dark blue: unavailable • blue: none → high potential",
         _ => "live block materials"
+    };
+
+    public static string DetailedLegend(this AtlasMapLayer layer) => layer switch
+    {
+        AtlasMapLayer.SoilFertility => "Barren  •  Average  •  Fertile",
+        AtlasMapLayer.Moisture => "Dry  •  Temperate  •  Wet",
+        AtlasMapLayer.Temperature => "Cold  •  Mild  •  Hot",
+        AtlasMapLayer.OreDensity =>
+            "Dark blue: unavailable · Blue: none/below trace · Trace · Very poor · Poor · Decent · High · Very high · Ultra high",
+        _ => "Live registered block shapes and materials"
     };
 
     public static bool RequiresSpoilerAccess(this AtlasMapLayer layer) =>

@@ -68,6 +68,10 @@ internal sealed class AtlasSearchController
     public bool BlockScanComplete => stage == SearchStage.Complete;
     public string Query => query;
     public string SearchLanguageSummary => languageIndex.LanguageSummary;
+    internal string GetEnglishOreName(string? code) =>
+        languageIndex.GetEnglishOreName(code);
+    internal string GetEnglishBlockName(string? code) =>
+        languageIndex.GetEnglishBlockName(code);
     public string DiagnosticSummary =>
         $"blockTypes={matchingBlockIds.Count}, columns={chunkColumns.Count}, probedCoordinates={probedChunkCoordinates}, inspectedChunks={inspectedChunks}, readyChunks={readyChunks}, paletteChunks={paletteMatchingChunks}, scannedPositions={scannedBlockPositions}, rawMatches={rawBlockMatches}, radiusRejected={radiusRejectedMatches}, surfaceRejected={surfaceRejectedMatches}, markers={blockResults.Count}";
 
