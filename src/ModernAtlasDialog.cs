@@ -280,6 +280,10 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool SearchModeActive => CreativeCheatSettingsAvailable
         && config.SearchModeEnabled;
     private bool MapLayerControlsVisible => config.MapLayersEnabled;
+    private bool SettingsHierarchyOpen => settingsModalOpen
+        || performanceModalOpen
+        || creativeSettingsModalOpen
+        || visualLabModalOpen;
     private float MinimumPitchDegrees => HasUnlockedCameraPitch
         ? UnlockedMinimumPitchDegrees
         : StandardMinimumPitchDegrees;
@@ -505,7 +509,6 @@ public sealed class ModernAtlasDialog : GuiDialog
             loggedFirstRender = true;
             capi.Logger.Notification("[ModernAtlas] First 3D atlas GUI frame rendered.");
         }
-        CaptureNormalWorldSnapshot();
         bool freshAtlasFrame = ShouldRenderFreshAtlasFrame();
         bool rendered = freshAtlasFrame
             ? RenderLiveWorld(deltaTime)
@@ -735,6 +738,14 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnMouseDown(MouseEvent args)
     {
+        if (!interfaceHidden
+            && SettingsHierarchyOpen
+            && IsSettingsButtonPosition(args.X, args.Y))
+        {
+            overlay?.OnMouseDown(args);
+            args.Handled = true;
+            return;
+        }
         if (!interfaceHidden && performanceModalOpen)
         {
             performanceModal?.OnMouseDown(args);
@@ -813,6 +824,14 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnMouseUp(MouseEvent args)
     {
+        if (!interfaceHidden
+            && SettingsHierarchyOpen
+            && IsSettingsButtonPosition(args.X, args.Y))
+        {
+            overlay?.OnMouseUp(args);
+            args.Handled = true;
+            return;
+        }
         if (!interfaceHidden && performanceModalOpen)
         {
             performanceModal?.OnMouseUp(args);
@@ -1215,13 +1234,13 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     internal bool CaptureNormalWorldSnapshotBeforeTransition()
     {
-        // Survival opens through a world-rendered hand/scroll transition.
-        // Capture the completed POV before that transition can touch shared
-        // depth, alpha or chunk shader state. The atlas then uses the same
-        // pristine background that direct Creative opening receives.
+        // A synchronous full-window GrabScreenshot can stall indefinitely
+        // while a new world is still completing its first large batch of
+        // chunk meshes. The scroll renderer already owns an opaque stationary
+        // fallback background, so prefer that deterministic cover instead of
+        // blocking G, Escape and movement on a GPU readback.
         ReleaseNormalWorldSnapshot();
-        CaptureNormalWorldSnapshot();
-        return normalWorldSnapshotCaptured;
+        return true;
     }
 
     private void RestoreNormalWorldSnapshot()
@@ -1630,8 +1649,14 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "settings-button"
             )
             && settingsModalOpen;
+        bool settingsClosedByToggle = settingsOpenedByClick
+            && ClickAtlasControlForAutomatedTest(overlay, "settings-button")
+            && !SettingsHierarchyOpen;
+        bool settingsReopenedByToggle = settingsClosedByToggle
+            && ClickAtlasControlForAutomatedTest(overlay, "settings-button")
+            && settingsModalOpen;
         bool mapLayersBeforeClick = config.MapLayersEnabled;
-        bool settingsSwitchClicked = settingsOpenedByClick
+        bool settingsSwitchClicked = settingsReopenedByToggle
             && ClickAtlasControlForAutomatedTest(settingsModal, "map-layers")
             && config.MapLayersEnabled != mapLayersBeforeClick;
         bool settingsSwitchRestored = settingsSwitchClicked
@@ -1816,6 +1841,8 @@ public sealed class ModernAtlasDialog : GuiDialog
             && exactChunkRenderer?.LastSuppressedHeldItemCount == renderedEntityCount;
         automatedSmokeTestInterfaceControlsPassed = accessAvailable
             && settingsOpenedByClick
+            && settingsClosedByToggle
+            && settingsReopenedByToggle
             && settingsSwitchClicked
             && settingsSwitchRestored
             && skipOpeningClicked
@@ -1847,16 +1874,18 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (automatedSmokeTestInterfaceControlsPassed)
         {
             capi.Logger.Notification(
-                "[ModernAtlas] Automated smoke test exercised the compact neumorphic controls, Compass/Time instrument selector, scroll/full-screen presentation, map-layer and skip-opening switches, Creative/Cheat cave/search/camera controls, Escape-restored hidden UI and held-item suppression for {0} living models.",
+                "[ModernAtlas] Automated smoke test exercised the toggleable Settings panel, compact neumorphic controls, Compass/Time instrument selector, scroll/full-screen presentation, map-layer and skip-opening switches, Creative/Cheat cave/search/camera controls, Escape-restored hidden UI and held-item suppression for {0} living models.",
                 renderedEntityCount
             );
         }
         else
         {
             capi.Logger.Error(
-                "[ModernAtlas] Automated interface-controls test failed: access={0}, settingsOpen={1}, mapLayerSwitch={2}/{3}, skipOpening={4}/{5}, presentation={6}/{7}, fixedLighting={8}/{9}, sliderBoundary={10}/{11}, timeInstrument={12}, settingsClose={13}, creativeOpen={14}, creativeClose={15}, layers={16}, search={17}, safeSurface={18}, cave={19}, angleLock={20}, yaw={21}, hidden={22}, restored={23}, neumorphic={24}, heldItems={25}/{26}.",
+                "[ModernAtlas] Automated interface-controls test failed: access={0}, settingsOpen/toggle/reopen={1}/{2}/{3}, mapLayerSwitch={4}/{5}, skipOpening={6}/{7}, presentation={8}/{9}, fixedLighting={10}/{11}, sliderBoundary={12}/{13}, timeInstrument={14}, settingsClose={15}, creativeOpen={16}, creativeClose={17}, layers={18}, search={19}, safeSurface={20}, cave={21}, angleLock={22}, yaw={23}, hidden={24}, restored={25}, neumorphic={26}, heldItems={27}/{28}.",
                 accessAvailable,
                 settingsOpenedByClick,
+                settingsClosedByToggle,
+                settingsReopenedByToggle,
                 settingsSwitchClicked,
                 settingsSwitchRestored,
                 skipOpeningClicked,
@@ -2970,7 +2999,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             )
             .AddAtlasButton(
                 "SETTINGS",
-                OpenSettingsModal,
+                ToggleSettingsModal,
                 ElementBounds.Fixed(actionX, contentY + 10, 128, 44),
                 "settings-button"
             )
@@ -3547,6 +3576,13 @@ public sealed class ModernAtlasDialog : GuiDialog
         return true;
     }
 
+    private bool ToggleSettingsModal() => SettingsHierarchyOpen
+        ? CloseSettingsModal()
+        : OpenSettingsModal();
+
+    private bool IsSettingsButtonPosition(double x, double y) =>
+        overlay?.GetAtlasButton("settings-button")?.Bounds.PointInside(x, y) == true;
+
     private bool CloseSettingsModal()
     {
         settingsModalOpen = false;
@@ -3657,7 +3693,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private bool ResetVisualTuning()
     {
-        config.AtlasExposurePercent = 100;
+        config.AtlasExposurePercent = 150;
         config.MapLayerOpacityPercent = 75;
         config.CaveMaskBrightnessPercent = 100;
         saveConfig();

@@ -196,7 +196,8 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         cameraRestored = false;
         normalWorldBackgroundCaptured = false;
         localPerspectiveProjection = null;
-        return TryOpen();
+        bool opened = TryOpen();
+        return opened;
     }
 
     public bool BeginClosing(bool automated, Action<bool> onCompleted)
@@ -238,7 +239,8 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         normalWorldBackgroundCaptured = true;
         localPerspectiveProjection = null;
         soundController.StopLightCue();
-        return TryOpen();
+        bool opened = TryOpen();
+        return opened;
     }
 
     public void CancelWithoutOpening()
@@ -342,7 +344,6 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
 
     public override bool OnEscapePressed()
     {
-        if (closing) return true;
         CancelWithoutOpening();
         return true;
     }
@@ -351,14 +352,14 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     {
         if (args.KeyCode == (int)GlKeys.Escape)
         {
-            if (!closing) CancelWithoutOpening();
+            CancelWithoutOpening();
         }
         else if (args.KeyCode == (int)GlKeys.G)
         {
-            // The global HelpAndOverlays handler and dialog key handler can
-            // both receive G. During either transition it is intentionally a
-            // consumed no-op: only the explicit skip setting may bypass this
-            // scene.
+            // The global hotkey and dialog path are engine-order dependent.
+            // Both must release an opening scene so G always closes every
+            // atlas-owned input layer just like Escape.
+            CancelWithoutOpening();
         }
         args.Handled = true;
     }
@@ -376,9 +377,11 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         if (stage != EnumRenderStage.Opaque) return;
 
         localPerspectiveProjection = Mat4f.CloneIt(capi.Render.CurrentProjectionMatrix);
-        if (!finishing && IsOpened() && (closing || normalWorldBackgroundCaptured))
+        if (!finishing && IsOpened())
         {
             float elapsed = TransitionElapsedSeconds(startedTimestamp);
+            if (!closing && !normalWorldBackgroundCaptured) return;
+
             UpdatePlayerPresentation(elapsed);
             thirdPersonHandAnchorsReady |= ValidateCurrentThirdPersonHandAnchors();
         }

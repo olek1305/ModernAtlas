@@ -201,8 +201,10 @@ public sealed class ModernAtlasSystem : ModSystem
 
         if (openingTransition?.IsOpened() == true)
         {
-            // A second G must never skip an opening scene or restart a closing
-            // scene. The transition owns the key until it has released input.
+            // G closes every atlas-owned presentation. During the opening
+            // scene it acts like Escape and releases the transition input
+            // layer instead of leaving the player trapped behind it.
+            openingTransition.CancelWithoutOpening();
             return true;
         }
 
@@ -445,7 +447,9 @@ public sealed class ModernAtlasSystem : ModSystem
                 "[ModernAtlas] The opening transition was unavailable; opening the atlas directly."
             );
             dialog.TryOpen();
+            return;
         }
+
     }
 
     private bool ShouldSkipScrollTransitions()
