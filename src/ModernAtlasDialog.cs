@@ -16,8 +16,6 @@ namespace ModernAtlas;
 /// </summary>
 public sealed class ModernAtlasDialog : GuiDialog
 {
-    private static readonly string[] PerformanceModeNames =
-        { "Full texture detail", "Half texture detail", "Quarter texture detail" };
     private const float StandardMinimumPitchDegrees = 20;
     private const float UnlockedMinimumPitchDegrees = 0;
     private const int DefaultViewDistance = 500;
@@ -150,10 +148,10 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool automatedOriginalCameraAngleLocked;
     private bool automatedOriginalRenderOnScroll;
     private bool automatedOriginalLiveLightingEnabled;
+    private bool automatedOriginalCloudsEnabled;
     private int automatedOriginalFixedSunHour;
     private bool automatedOriginalShowPlayerCompass;
     private string automatedOriginalHandheldInstrumentMode = "compass";
-    private int automatedOriginalTextureDetailReduction;
     private bool automatedOriginalPerformanceLightingEnabled;
     private bool automatedOriginalHideVegetation;
     private bool pendingInterfaceRecompose;
@@ -557,24 +555,19 @@ public sealed class ModernAtlasDialog : GuiDialog
             }
             if (automatedSmokeTestPerformanceModeSelected
                 && !automatedSmokeTestPerformanceModeRendered
-                && exactChunkRenderer?.LastRenderedTextureDetailReduction == 2
-                && exactChunkRenderer.LastRenderedVegetationHidden
+                && exactChunkRenderer?.LastRenderedVegetationHidden == true
                 && !exactChunkRenderer.LastRenderedPerformanceLightingEnabled
                 && exactChunkRenderer.ValidateVegetationMask(
                     out string vegetationDiagnostic
                 ))
             {
                 automatedSmokeTestPerformanceModeRendered = true;
-                OnTextureDetailOptionToggled(
-                    automatedOriginalTextureDetailReduction,
-                    true
-                );
                 OnPerformanceLightingToggled(
                     automatedOriginalPerformanceLightingEnabled
                 );
                 OnHideVegetationToggled(automatedOriginalHideVegetation);
                 capi.Logger.Notification(
-                    "[ModernAtlas] Automated performance check rendered exact terrain with flat lighting, quarter texture detail and the registered vegetation filter, then restored the original settings: {0}.",
+                    "[ModernAtlas] Automated performance check rendered exact terrain with flat lighting and the registered vegetation filter, then restored the original settings: {0}.",
                     vegetationDiagnostic
                 );
             }
@@ -1516,14 +1509,10 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedOriginalCameraAngleLocked = config.CameraAngleLocked;
         automatedOriginalRenderOnScroll = config.RenderOnScroll;
         automatedOriginalLiveLightingEnabled = config.LiveLightingEnabled;
+        automatedOriginalCloudsEnabled = config.CloudsEnabled;
         automatedOriginalFixedSunHour = config.FixedSunHour;
         automatedOriginalShowPlayerCompass = config.ShowPlayerCompass;
         automatedOriginalHandheldInstrumentMode = HandheldInstrumentMode;
-        automatedOriginalTextureDetailReduction = Math.Clamp(
-            config.TextureDetailReduction,
-            0,
-            2
-        );
         automatedOriginalPerformanceLightingEnabled =
             config.PerformanceLightingEnabled;
         automatedOriginalHideVegetation = config.HideVegetation;
@@ -1533,6 +1522,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         config.SearchModeEnabled = true;
         config.CameraAngleLocked = false;
         config.RenderOnScroll = true;
+        config.CloudsEnabled = true;
         // Capture the resized compass in the early smoke frames. The normal
         // interface exercise later selects Time, so one run now covers both
         // instrument faces before restoring the player's original choice.
@@ -1679,16 +1669,6 @@ public sealed class ModernAtlasDialog : GuiDialog
         bool performanceOpenedByClick = settingsOpenedByClick
             && ClickAtlasControlForAutomatedTest(settingsModal, "performance-open")
             && performanceModalOpen;
-        if (config.TextureDetailReduction == 2)
-        {
-            OnTextureDetailOptionToggled(0, true);
-        }
-        bool quarterTextureSelected = performanceOpenedByClick
-            && ClickAtlasControlForAutomatedTest(
-                performanceModal,
-                "texture-quarter"
-            )
-            && config.TextureDetailReduction == 2;
         if (!config.PerformanceLightingEnabled)
         {
             OnPerformanceLightingToggled(true);
@@ -1710,14 +1690,9 @@ public sealed class ModernAtlasDialog : GuiDialog
             )
             && config.HideVegetation;
         automatedSmokeTestPerformanceModeSelected =
-            quarterTextureSelected
-            && flatLightingSelected
+            flatLightingSelected
             && vegetationSelected
-            && performanceModal?.GetElement("texture-full")
-                is GuiElementAtlasSwitch
-            && performanceModal.GetElement("texture-half")
-                is GuiElementAtlasSwitch
-            && performanceModal.GetElement("texture-quarter")
+            && performanceModal?.GetElement("performance-lighting")
                 is GuiElementAtlasSwitch;
         bool performanceClosedByClick = performanceOpenedByClick
             && ClickAtlasControlForAutomatedTest(
@@ -2238,10 +2213,10 @@ public sealed class ModernAtlasDialog : GuiDialog
         config.SearchModeEnabled = automatedOriginalSearchModeEnabled;
         config.CameraAngleLocked = automatedOriginalCameraAngleLocked;
         config.LiveLightingEnabled = automatedOriginalLiveLightingEnabled;
+        config.CloudsEnabled = automatedOriginalCloudsEnabled;
         config.FixedSunHour = automatedOriginalFixedSunHour;
         config.ShowPlayerCompass = automatedOriginalShowPlayerCompass;
         config.HandheldInstrumentMode = automatedOriginalHandheldInstrumentMode;
-        config.TextureDetailReduction = automatedOriginalTextureDetailReduction;
         config.PerformanceLightingEnabled = automatedOriginalPerformanceLightingEnabled;
         config.HideVegetation = automatedOriginalHideVegetation;
         if (config.RenderOnScroll != automatedOriginalRenderOnScroll)
@@ -3194,7 +3169,7 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "skip-opening-animation"
             )
             .AddStaticText(
-                "Live clouds",
+                "Live 3D clouds",
                 AtlasUiStyle.DetailFont(13),
                 ElementBounds.Fixed(28, 274, 240, 26)
             )
@@ -3340,14 +3315,14 @@ public sealed class ModernAtlasDialog : GuiDialog
             "h"
         );
 
-        ElementBounds performanceRoot = ElementBounds.Fixed(0, 0, 460, 478)
+        ElementBounds performanceRoot = ElementBounds.Fixed(0, 0, 460, 330)
             .WithAlignment(EnumDialogArea.CenterMiddle);
         performanceModal = capi.Gui.CreateCompo(
                 "modernatlas-performance",
                 performanceRoot
             )
             .AddStaticCustomDraw(
-                ElementBounds.Fixed(0, 0, 460, 478),
+                ElementBounds.Fixed(0, 0, 460, 330),
                 AtlasUiStyle.DrawCard
             )
             .AddStaticText(
@@ -3391,63 +3366,24 @@ public sealed class ModernAtlasDialog : GuiDialog
                 AtlasUiStyle.DrawSeparator
             )
             .AddStaticText(
-                "TEXTURE DETAIL",
-                AtlasUiStyle.LabelFont(11),
-                ElementBounds.Fixed(26, 190, 200, 22)
-            )
-            .AddStaticText(
-                "Full textures",
-                AtlasUiStyle.DetailFont(13),
-                ElementBounds.Fixed(28, 220, 260, 26)
-            )
-            .AddAtlasSwitch(
-                enabled => OnTextureDetailOptionToggled(0, enabled),
-                ElementBounds.Fixed(370, 213, 64, 40),
-                "texture-full"
-            )
-            .AddStaticText(
-                "Half texture detail",
-                AtlasUiStyle.DetailFont(13),
-                ElementBounds.Fixed(28, 262, 260, 26)
-            )
-            .AddAtlasSwitch(
-                enabled => OnTextureDetailOptionToggled(1, enabled),
-                ElementBounds.Fixed(370, 255, 64, 40),
-                "texture-half"
-            )
-            .AddStaticText(
-                "Quarter texture detail",
-                AtlasUiStyle.DetailFont(13),
-                ElementBounds.Fixed(28, 304, 280, 26)
-            )
-            .AddAtlasSwitch(
-                enabled => OnTextureDetailOptionToggled(2, enabled),
-                ElementBounds.Fixed(370, 297, 64, 40),
-                "texture-quarter"
-            )
-            .AddStaticCustomDraw(
-                ElementBounds.Fixed(26, 350, 408, 2),
-                AtlasUiStyle.DrawSeparator
-            )
-            .AddStaticText(
                 "Hide vegetation",
                 AtlasUiStyle.DetailFont(13),
-                ElementBounds.Fixed(28, 370, 260, 26)
+                ElementBounds.Fixed(28, 198, 260, 26)
             )
             .AddAtlasSwitch(
                 OnHideVegetationToggled,
-                ElementBounds.Fixed(370, 363, 64, 40),
+                ElementBounds.Fixed(370, 191, 64, 40),
                 "hide-vegetation"
             )
             .AddStaticText(
                 "Hides registered plants, bushes and leaves, including mods.",
                 AtlasUiStyle.DetailFont(11),
-                ElementBounds.Fixed(28, 405, 404, 42)
+                ElementBounds.Fixed(28, 233, 404, 42)
             )
             .AddStaticText(
                 "Atlas refresh: 60 FPS moving • 12 FPS idle.",
                 AtlasUiStyle.DetailFont(11),
-                ElementBounds.Fixed(28, 451, 404, 20)
+                ElementBounds.Fixed(28, 284, 404, 20)
             )
             .Compose(false);
 
@@ -4674,7 +4610,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             SurfaceSafetyEnabled ? surfaceHeightTexture : null,
             mapLayerTexture,
             EffectiveMapLayerOpacity,
-            Math.Clamp(config.TextureDetailReduction, 0, 2),
+            0,
             config.PerformanceLightingEnabled,
             config.HideVegetation,
             Math.Clamp(config.AtlasExposurePercent, 50, 150) / 100f,
@@ -5029,27 +4965,6 @@ public sealed class ModernAtlasDialog : GuiDialog
         SyncSettingsControls();
     }
 
-    private void OnTextureDetailOptionToggled(int reduction, bool enabled)
-    {
-        if (synchronizingPerformanceControls) return;
-        reduction = Math.Clamp(reduction, 0, 2);
-        if (!enabled)
-        {
-            SyncPerformanceControls();
-            return;
-        }
-        if (config.TextureDetailReduction == reduction) return;
-
-        config.TextureDetailReduction = reduction;
-        saveConfig();
-        SyncPerformanceControls();
-        capi.Logger.Notification(
-            "[ModernAtlas] Atlas performance mode changed to {0}; terrain and liquid texture detail reduction is {1}x.",
-            PerformanceModeNames[reduction],
-            1 << reduction
-        );
-    }
-
     private void OnPerformanceLightingToggled(bool enabled)
     {
         if (synchronizingPerformanceControls) return;
@@ -5179,7 +5094,12 @@ public sealed class ModernAtlasDialog : GuiDialog
         settingsModal.GetAtlasSwitch("skip-opening-animation")?.SetValue(
             config.SkipOpeningAnimation
         );
-        settingsModal.GetAtlasSwitch("clouds")?.SetValue(config.CloudsEnabled);
+        bool liveCloudsAvailable =
+            VolumetricCloudRendererAdapter.IsEnabledByGraphicsSettings(capi);
+        settingsModal.GetAtlasSwitch("clouds")?.SetValue(
+            liveCloudsAvailable && config.CloudsEnabled
+        );
+        settingsModal.GetAtlasSwitch("clouds")!.Enabled = liveCloudsAvailable;
         bool solarLightingActive = config.PerformanceLightingEnabled;
         settingsModal.GetAtlasSwitch("live-lighting")?.SetValue(
             solarLightingActive && config.LiveLightingEnabled
@@ -5205,13 +5125,9 @@ public sealed class ModernAtlasDialog : GuiDialog
         synchronizingPerformanceControls = true;
         try
         {
-            int reduction = Math.Clamp(config.TextureDetailReduction, 0, 2);
             performanceModal.GetAtlasSwitch("performance-lighting")?.SetValue(
                 config.PerformanceLightingEnabled
             );
-            performanceModal.GetAtlasSwitch("texture-full")?.SetValue(reduction == 0);
-            performanceModal.GetAtlasSwitch("texture-half")?.SetValue(reduction == 1);
-            performanceModal.GetAtlasSwitch("texture-quarter")?.SetValue(reduction == 2);
             performanceModal.GetAtlasSwitch("hide-vegetation")?.SetValue(
                 config.HideVegetation
             );

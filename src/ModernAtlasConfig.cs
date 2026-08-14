@@ -13,8 +13,7 @@ public sealed class ModernAtlasConfig
     public bool RenderOnScroll { get; set; } = true;
     public bool ScrollRealtimeWeatherEnabled { get; set; } = true;
     public bool SkipOpeningAnimation { get; set; }
-    public bool CloudsEnabled { get; set; } = true;
-    public int TextureDetailReduction { get; set; }
+    public bool CloudsEnabled { get; set; }
     public bool PerformanceLightingEnabled { get; set; } = true;
     public bool HideVegetation { get; set; }
     public bool LiveLightingEnabled { get; set; } = true;
