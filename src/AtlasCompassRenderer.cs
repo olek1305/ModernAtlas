@@ -1,4 +1,5 @@
 using System;
+using Cairo;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.MathTools;
@@ -19,6 +20,7 @@ internal sealed class AtlasCompassRenderer : IDisposable
     private MeshRef? housingMesh;
     private MeshRef? faceMesh;
     private MeshRef? needleMesh;
+    private LoadedTexture? dialTexture;
     private float visibility;
     private bool targetVisible;
     private bool stowingForClose;
@@ -73,7 +75,7 @@ internal sealed class AtlasCompassRenderer : IDisposable
         if (!EnsureMeshes()) return;
 
         IShaderProgram? shader = shaderProvider();
-        if (shader == null || shader.Disposed || housingMesh == null || faceMesh == null || needleMesh == null)
+        if (shader == null || shader.Disposed || housingMesh == null || faceMesh == null || needleMesh == null || dialTexture?.TextureId <= 0)
         {
             return;
         }
@@ -117,6 +119,7 @@ internal sealed class AtlasCompassRenderer : IDisposable
             }
             shader.Use();
             shader.UniformMatrix("projectionMatrix", projection);
+            shader.BindTexture2D("compassTex", dialTexture!.TextureId, 1);
             if (!forearmsPrepared)
             {
                 forearmsPrepared = forearms.Prepare();
@@ -134,12 +137,16 @@ internal sealed class AtlasCompassRenderer : IDisposable
             Mat4f.Translate(body, body, gripX, gripY, -0.18f);
             Mat4f.RotateX(body, body, MathF.PI * 0.5f);
             RenderComponent(shader, housingMesh, body, 9, 0.19f, alpha);
-            float[] dial = Mat4f.CloneIt(body);
-            Mat4f.Translate(dial, dial, 0, 0, 0.035f);
+            // The cylindrical casing turns around the screen Z axis, but the
+            // dial must remain in the screen XY plane. Reusing the rotated
+            // casing matrix made the texture edge-on, leaving only its brown
+            // rim visible instead of the compass face.
+            float[] dial = Mat4f.Create();
+            Mat4f.Translate(dial, dial, gripX, gripY, -0.060f);
             RenderComponent(shader, faceMesh, dial, 10, 0.145f, alpha);
             float[] needle = Mat4f.CloneIt(dial);
-            Mat4f.Translate(needle, needle, 0, 0, 0.011f);
-            Mat4f.RotateZ(needle, needle, -atlasYawDegrees * GameMath.DEG2RAD);
+            Mat4f.Translate(needle, needle, 0, 0, 0.008f);
+            Mat4f.RotateZ(needle, needle, NeedleRotationRadians(atlasYawDegrees));
             RenderComponent(shader, needleMesh, needle, 11, 0.115f, alpha);
         }
         finally
@@ -156,12 +163,13 @@ internal sealed class AtlasCompassRenderer : IDisposable
 
     private bool EnsureMeshes()
     {
-        if (housingMesh != null && faceMesh != null && needleMesh != null) return true;
+        if (housingMesh != null && faceMesh != null && needleMesh != null && dialTexture?.TextureId > 0) return true;
         try
         {
             housingMesh ??= capi.Render.UploadMesh(CreateCylinderMesh(18));
             faceMesh ??= capi.Render.UploadMesh(CreateQuadMesh());
             needleMesh ??= capi.Render.UploadMesh(CreateNeedleMesh());
+            EnsureDialTexture();
             return true;
         }
         catch (Exception exception)
@@ -196,6 +204,7 @@ internal sealed class AtlasCompassRenderer : IDisposable
         housingMesh?.Dispose(); housingMesh = null;
         faceMesh?.Dispose(); faceMesh = null;
         needleMesh?.Dispose(); needleMesh = null;
+        dialTexture?.Dispose(); dialTexture = null;
     }
 
     public void Dispose()
@@ -213,12 +222,72 @@ internal sealed class AtlasCompassRenderer : IDisposable
     {
         MeshData mesh = new(4);
         int color = unchecked((int)0xffffffff);
-        mesh.AddVertex(-0.5f, -0.5f, 0, 0, 0, color);
-        mesh.AddVertex(0.5f, -0.5f, 0, 1, 0, color);
-        mesh.AddVertex(0.5f, 0.5f, 0, 1, 1, color);
-        mesh.AddVertex(-0.5f, 0.5f, 0, 0, 1, color);
+        // Cairo's first row is the visual top, while this OpenGL texture
+        // coordinate convention starts V at the visual bottom. Flip V here
+        // so N remains at the top and glyphs are not vertically mirrored.
+        mesh.AddVertex(-0.5f, -0.5f, 0, 0, 1, color);
+        mesh.AddVertex(0.5f, -0.5f, 0, 1, 1, color);
+        mesh.AddVertex(0.5f, 0.5f, 0, 1, 0, color);
+        mesh.AddVertex(-0.5f, 0.5f, 0, 0, 0, color);
         mesh.AddQuadIndices(0);
         return mesh;
+    }
+
+    private void EnsureDialTexture()
+    {
+        if (dialTexture?.TextureId > 0) return;
+        const int size = 256;
+        dialTexture ??= new LoadedTexture(capi);
+        using ImageSurface surface = new(Format.Argb32, size, size);
+        using Context context = new(surface);
+        context.Operator = Operator.Source;
+        context.SetSourceRGBA(0.12, 0.075, 0.028, 1);
+        context.Paint();
+        context.Operator = Operator.Over;
+
+        // A small, authored parchment dial. It is generated at runtime so no
+        // game or third-party art is redistributed with the mod.
+        context.SetSourceRGBA(0.82, 0.72, 0.50, 1);
+        context.Arc(128, 128, 118, 0, Math.PI * 2);
+        context.Fill();
+        context.SetSourceRGBA(0.22, 0.13, 0.045, 1);
+        context.LineWidth = 8;
+        context.Arc(128, 128, 114, 0, Math.PI * 2);
+        context.Stroke();
+        context.SetSourceRGBA(0.34, 0.21, 0.075, 0.92);
+        context.LineWidth = 3;
+        context.Arc(128, 128, 91, 0, Math.PI * 2);
+        context.Stroke();
+
+        for (int tick = 0; tick < 32; tick++)
+        {
+            double angle = tick * Math.PI * 2 / 32 - Math.PI * 0.5;
+            double outer = 101;
+            double inner = tick % 8 == 0 ? 79 : tick % 4 == 0 ? 86 : 92;
+            context.LineWidth = tick % 4 == 0 ? 3.5 : 1.5;
+            context.MoveTo(128 + Math.Cos(angle) * inner, 128 + Math.Sin(angle) * inner);
+            context.LineTo(128 + Math.Cos(angle) * outer, 128 + Math.Sin(angle) * outer);
+            context.Stroke();
+        }
+
+        context.SelectFontFace("Sans", FontSlant.Normal, FontWeight.Bold);
+        context.SetFontSize(25);
+        context.SetSourceRGBA(0.20, 0.11, 0.035, 1);
+        DrawCenteredText(context, "N", 128, 62);
+        DrawCenteredText(context, "E", 194, 136);
+        DrawCenteredText(context, "S", 128, 205);
+        DrawCenteredText(context, "W", 62, 136);
+        context.SetSourceRGBA(0.65, 0.10, 0.055, 1);
+        context.Arc(128, 128, 9, 0, Math.PI * 2);
+        context.Fill();
+        capi.Gui.LoadOrUpdateCairoTexture(surface, true, ref dialTexture);
+    }
+
+    private static void DrawCenteredText(Context context, string text, double x, double y)
+    {
+        TextExtents extents = context.TextExtents(text);
+        context.MoveTo(x - extents.Width * 0.5 - extents.XBearing, y - extents.Height * 0.5 - extents.YBearing);
+        context.ShowText(text);
     }
 
     private static MeshData CreateNeedleMesh()
@@ -267,6 +336,11 @@ internal sealed class AtlasCompassRenderer : IDisposable
 
     private float ScreenToViewX(float screenX, float aspect) => (screenX / capi.Render.FrameWidth * 2f - 1f) * aspect;
     private float ScreenToViewY(float screenY) => 1f - screenY / capi.Render.FrameHeight * 2f;
+    internal static float NeedleRotationRadians(float interpolatedAtlasYawDegrees)
+    {
+        float normalizedYaw = interpolatedAtlasYawDegrees % 360f;
+        return -normalizedYaw * GameMath.DEG2RAD;
+    }
     private static float Lerp(float from, float to, float amount) => from + (to - from) * Math.Clamp(amount, 0f, 1f);
     private static float MoveTowards(float from, float to, float amount) => from < to ? Math.Min(to, from + amount) : Math.Max(to, from - amount);
     private static float SmoothStep(float value) { value = Math.Clamp(value, 0f, 1f); return value * value * (3f - 2f * value); }

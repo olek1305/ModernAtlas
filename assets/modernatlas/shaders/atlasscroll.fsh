@@ -7,6 +7,7 @@ uniform sampler2D entityTex;
 uniform vec4 entityColor;
 uniform sampler2D atlasTex;
 uniform sampler2D backgroundTex;
+uniform sampler2D compassTex;
 uniform int backgroundAvailable;
 
 in vec2 uv;
@@ -103,12 +104,7 @@ void main(void)
     }
     else if (materialKind == 10)
     {
-        vec2 dial = uv - 0.5;
-        float radius = length(dial);
-        float angle = atan(dial.y, dial.x);
-        float ticks = smoothstep(0.82, 0.96, sin(angle * 16.0) * 0.5 + 0.5);
-        float rim = smoothstep(0.38, 0.48, radius);
-        baseColor = mix(vec3(0.74, 0.66, 0.48), vec3(0.20, 0.15, 0.08), max(rim, ticks * step(0.34, radius)));
+        baseColor = texture(compassTex, uv).rgb;
     }
     else if (materialKind == 11)
     {

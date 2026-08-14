@@ -532,12 +532,6 @@ public sealed class ModernAtlasDialog : GuiDialog
         {
             RenderSearchMarkers();
         }
-        compassRenderer.Render(
-            config.ShowPlayerCompass,
-            yawDegrees,
-            AtlasViewport,
-            atlasRealDeltaTime
-        );
         string rendererStatus = rendered
             ? "exact loaded terrain"
             : "renderer unavailable";
@@ -598,6 +592,15 @@ public sealed class ModernAtlasDialog : GuiDialog
         {
             scrollViewportRenderer.RenderRollersOverlay(AtlasViewport);
         }
+        // Render the optional hand scene after every interactive composer.
+        // Its private shader state can therefore never suppress SETTINGS,
+        // EXIT or other atlas controls, even if a driver rejects the scene.
+        compassRenderer.Render(
+            config.ShowPlayerCompass,
+            yawDegrees,
+            AtlasViewport,
+            atlasRealDeltaTime
+        );
         ForceOpaqueWindowAlpha();
         capi.Render.GetEngineShader(EnumShaderProgram.Gui).Use();
         CaptureAutomatedSmokeScreenshot();
