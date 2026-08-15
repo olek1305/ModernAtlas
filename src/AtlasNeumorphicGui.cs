@@ -377,6 +377,7 @@ internal sealed class GuiElementAtlasSwitch : GuiElementControl
     private readonly LoadedTexture onTexture;
     private readonly LoadedTexture disabledTexture;
     private bool value;
+    private bool pressed;
 
     public GuiElementAtlasSwitch(
         ICoreClientAPI capi,
@@ -410,21 +411,35 @@ internal sealed class GuiElementAtlasSwitch : GuiElementControl
     public override void OnMouseDownOnElement(ICoreClientAPI capi, MouseEvent args)
     {
         if (!Enabled || args.Button != EnumMouseButton.Left) return;
+        pressed = true;
         args.Handled = true;
     }
 
     public override void OnMouseUpOnElement(ICoreClientAPI capi, MouseEvent args)
     {
-        if (!Enabled || args.Button != EnumMouseButton.Left) return;
+        if (args.Button != EnumMouseButton.Left) return;
+        bool ownedPress = pressed;
+        pressed = false;
+        if (!ownedPress || !Enabled) return;
         value = !value;
         onChanged(value);
         args.Handled = true;
+    }
+
+    public override void OnMouseUp(ICoreClientAPI capi, MouseEvent args)
+    {
+        // A presentation change can rebuild viewport composers between the
+        // two mouse events. Always clear the local press latch, but only a
+        // press owned by this switch may toggle its value.
+        base.OnMouseUp(capi, args);
+        if (args.Button == EnumMouseButton.Left) pressed = false;
     }
 
     public void SetValue(bool enabled) => value = enabled;
 
     public override void Dispose()
     {
+        pressed = false;
         offTexture.Dispose();
         onTexture.Dispose();
         disabledTexture.Dispose();

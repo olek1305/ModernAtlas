@@ -313,6 +313,20 @@ void main(void)
             ? frozenBackground(uv) * vec3(0.62, 0.66, 0.64)
             : vec3(0.012, 0.020, 0.027);
     }
+    else if (materialKind == 16)
+    {
+        // A failed or not-yet-published atlas frame still gets a fully opaque
+        // neutral map surface. It is deliberately distinct from the paper so
+        // the missing frame cannot expose the normal world framebuffer.
+        float fiber = paperFiber(uv * 1.25);
+        float mottle = hash21(floor(uv * vec2(13.0, 17.0)));
+        baseColor = mix(
+            vec3(0.20, 0.24, 0.25),
+            vec3(0.29, 0.33, 0.34),
+            fiber * 0.72 + mottle * 0.18
+        );
+        materialAlpha = 1.0;
+    }
     else if (materialKind == 9)
     {
         // One rough, dark wooden casing shared by compass and sundial.

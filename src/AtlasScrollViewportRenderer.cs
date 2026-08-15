@@ -33,14 +33,15 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
         AtlasViewportBounds viewport
     )
     {
-        if (atlasTextureId <= 0 || !EnsureMeshes()) return;
+        IRenderAPI render = capi.Render;
+        SetCanonicalGuiState(render);
+        if (!EnsureMeshes()) return;
         IShaderProgram? shader = shaderProvider();
         if (shader == null || shader.Disposed || sheetMesh == null || cylinderMesh == null)
         {
             return;
         }
 
-        IRenderAPI render = capi.Render;
         float frameHeight = Math.Max(1, render.FrameHeight);
         float aspect = render.FrameWidth / frameHeight;
         float centerX = ((viewport.X + viewport.Width * 0.5f) / render.FrameWidth * 2f - 1f)
@@ -56,15 +57,13 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
         Mat4f.Ortho(projection, -aspect, aspect, -1f, 1f, -4f, 4f);
 
         render.CurrentActiveShader?.Stop();
-        render.CurrentFrameBuffer = null;
-        render.GLDisableDepthTest();
-        render.GLDepthMask(false);
-        render.GlDisableCullFace();
-        render.GlToggleBlend(true, EnumBlendMode.Standard);
         shader.Use();
         shader.UniformMatrix("projectionMatrix", projection);
         shader.Uniform("entityColor", new Vec4f(1f, 1f, 1f, 1f));
-        shader.BindTexture2D("atlasTex", atlasTextureId, 0);
+        if (atlasTextureId > 0)
+        {
+            shader.BindTexture2D("atlasTex", atlasTextureId, 0);
+        }
         shader.Uniform("backgroundAvailable", backgroundTextureId > 0 ? 1 : 0);
         if (backgroundTextureId > 0)
         {
@@ -116,7 +115,7 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
                     shader,
                     sheetMesh,
                     CreateModel(centerX, centerY, -0.012f, mapWidth, mapHeight, 0.82f),
-                    7
+                    atlasTextureId > 0 ? 7 : 16
                 );
             }
             finally
@@ -133,12 +132,7 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
         finally
         {
             shader.Stop();
-            // GUI composers render immediately after the scroll and use
-            // screen-facing quads. Leave face culling disabled so their
-            // cards, labels and controls are not discarded.
-            render.GLDepthMask(true);
-            render.GLEnableDepthTest();
-            render.GlToggleBlend(false, EnumBlendMode.Standard);
+            SetCanonicalGuiState(render);
         }
     }
 
@@ -273,29 +267,26 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
 
     public void RenderAtlasFullscreen(int atlasTextureId)
     {
-        if (atlasTextureId <= 0 || !EnsureMeshes() || sheetMesh == null) return;
+        IRenderAPI render = capi.Render;
+        SetCanonicalGuiState(render);
+        if (!EnsureMeshes() || sheetMesh == null) return;
         IShaderProgram? shader = shaderProvider();
         if (shader == null || shader.Disposed) return;
 
-        IRenderAPI render = capi.Render;
         float frameHeight = Math.Max(1, render.FrameHeight);
         float aspect = render.FrameWidth / frameHeight;
         float[] projection = Mat4f.Create();
         Mat4f.Ortho(projection, -aspect, aspect, -1f, 1f, -4f, 4f);
 
         render.CurrentActiveShader?.Stop();
-        render.CurrentFrameBuffer = null;
         render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
-        render.GLDisableDepthTest();
-        render.GLDepthMask(false);
-        render.GlDisableCullFace();
-        render.GlScissorFlag(false);
-        render.GlToggleBlend(false, EnumBlendMode.Standard);
         shader.Use();
         shader.UniformMatrix("projectionMatrix", projection);
         shader.Uniform("entityColor", new Vec4f(1f, 1f, 1f, 1f));
-        shader.Uniform("backgroundAvailable", 0);
-        shader.BindTexture2D("atlasTex", atlasTextureId, 0);
+        if (atlasTextureId > 0)
+        {
+            shader.BindTexture2D("atlasTex", atlasTextureId, 0);
+        }
         try
         {
             // Framebuffer textures use the orientation expected by the atlas
@@ -306,15 +297,28 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
                 shader,
                 sheetMesh,
                 CreateModel(0f, 0f, 0f, aspect * 2f, 2f, 1f),
-                7
+                atlasTextureId > 0 ? 7 : 16
             );
         }
         finally
         {
             shader.Stop();
-            render.GLDepthMask(true);
-            render.GlToggleBlend(false, EnumBlendMode.Standard);
+            SetCanonicalGuiState(render);
         }
+    }
+
+    private static void SetCanonicalGuiState(IRenderAPI render)
+    {
+        // This renderer is a GUI presentation pass. Never inherit a failed
+        // atlas draw's framebuffer, scissor, color mask or world depth state.
+        render.CurrentFrameBuffer = null;
+        render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
+        render.GlColorMask(true, true, true, true);
+        render.GlScissorFlag(false);
+        render.GLDisableDepthTest();
+        render.GLDepthMask(false);
+        render.GlDisableCullFace();
+        render.GlToggleBlend(false, EnumBlendMode.Standard);
     }
 
     private void RenderRoller(

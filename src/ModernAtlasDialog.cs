@@ -25,6 +25,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private const int MovingAtlasRefreshMilliseconds = 16;
     private const int IdleAtlasRefreshMilliseconds = 83;
     private const int OreHoverRefreshMilliseconds = 100;
+    private const int PresentationChangeDebounceMilliseconds = 125;
     private const string AllOresFilterValue = "__all__";
     private const string SmokeScreenshotEnvironmentVariable =
         "MODERNATLAS_SMOKE_SCREENSHOT";
@@ -66,9 +67,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     private long lastInterfaceRestoreMilliseconds = -10000;
     private LoadedTexture? searchMarkerTexture;
     private LoadedTexture? oreHoverTexture;
-    private LoadedTexture? normalWorldSnapshotTexture;
-    private bool normalWorldSnapshotCaptured;
     private LoadedTexture? atlasFrameCacheTexture;
+    private LoadedTexture? atlasFrameStagingTexture;
     private LoadedTexture? primaryAtlasSourceTexture;
     private int primaryAtlasSourceTextureId;
     private long lastAtlasWorldRenderMilliseconds;
@@ -140,6 +140,12 @@ public sealed class ModernAtlasDialog : GuiDialog
     private string? pendingAutomatedMapLayerScreenshotSuffix;
     private bool automatedSmokeTestPerformanceModeSelected;
     private bool automatedSmokeTestPerformanceModeRendered;
+    private bool automatedSmokeTestPresentationPassed;
+    private int automatedSmokeTestPresentationPhase;
+    private GuiComposer? automatedSmokeTestSettingsComposer;
+    private GuiComposer? automatedSmokeTestPerformanceComposer;
+    private GuiComposer? automatedSmokeTestCreativeComposer;
+    private GuiComposer? automatedSmokeTestVisualLabComposer;
     private bool automatedSmokeTestPreferencesCaptured;
     private int automatedSmokeScreenshotPhase;
     private bool automatedOriginalMapLayersEnabled;
@@ -154,6 +160,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private string automatedOriginalHandheldInstrumentMode = "compass";
     private bool automatedOriginalPerformanceLightingEnabled;
     private bool automatedOriginalHideVegetation;
+    private bool automatedOriginalCheatModeEnabled;
     private bool pendingInterfaceRecompose;
     private AtlasMapLayer activeMapLayer = AtlasMapLayer.TexturedTerrain;
     private string? selectedOreCode;
@@ -174,8 +181,72 @@ public sealed class ModernAtlasDialog : GuiDialog
     private double composedGuiScale;
     private long lastResizeRecomposeMilliseconds;
 
+    private readonly PresentationChangeCoordinator presentationChangeCoordinator = new();
+
     internal bool AutomatedSmokeTestRenderedExactWorld { get; private set; }
     internal bool CheatModeEnabledForAutomation => cheatModeEnabled;
+
+    /// <summary>
+    /// Coalesces presentation clicks without changing the committed viewport
+    /// until the player has stopped clicking for a short real-time interval.
+    /// Keeping this state separate from the saved configuration also keeps the
+    /// existing Settings composer alive during the debounce window.
+    /// </summary>
+    private sealed class PresentationChangeCoordinator
+    {
+        private bool pending;
+        private bool requestedRenderOnScroll;
+        private long applyAfterMilliseconds;
+
+        public bool HasPending => pending;
+        public bool RequestedRenderOnScroll => requestedRenderOnScroll;
+
+        public void Reset(bool committedRenderOnScroll)
+        {
+            pending = false;
+            requestedRenderOnScroll = committedRenderOnScroll;
+            applyAfterMilliseconds = 0;
+        }
+
+        public void Request(
+            bool requestedRenderOnScroll,
+            long nowMilliseconds,
+            int debounceMilliseconds
+        )
+        {
+            this.requestedRenderOnScroll = requestedRenderOnScroll;
+            applyAfterMilliseconds = nowMilliseconds + debounceMilliseconds;
+            pending = true;
+        }
+
+        public bool TryTake(
+            long nowMilliseconds,
+            out bool requestedRenderOnScroll
+        )
+        {
+            requestedRenderOnScroll = this.requestedRenderOnScroll;
+            if (!pending || nowMilliseconds < applyAfterMilliseconds)
+            {
+                return false;
+            }
+
+            pending = false;
+            return true;
+        }
+
+        public bool TryTakePending(out bool requestedRenderOnScroll)
+        {
+            requestedRenderOnScroll = this.requestedRenderOnScroll;
+            if (!pending) return false;
+
+            pending = false;
+            return true;
+        }
+
+        public bool DisplayedValue(bool committedRenderOnScroll) => pending
+            ? requestedRenderOnScroll
+            : committedRenderOnScroll;
+    }
 
     private string HandheldInstrumentMode => string.Equals(
         config.HandheldInstrumentMode,
@@ -404,6 +475,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     public override void OnGuiOpened()
     {
         base.OnGuiOpened();
+        presentationChangeCoordinator.Reset(config.RenderOnScroll);
         // The dialog is constructed before a world/player necessarily exists.
         // Recompose now that Survival, Creative and accepted Cheat Mode access
         // can be resolved, so unavailable controls leave no empty slot.
@@ -464,6 +536,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnRenderGUI(float deltaTime)
     {
+        AdvancePresentationChange();
         bool viewportChanged = capi.Render.FrameWidth != composedFrameWidth
             || capi.Render.FrameHeight != composedFrameHeight
             || Math.Abs(RuntimeEnv.GUIScale - composedGuiScale) > 0.001;
@@ -600,13 +673,10 @@ public sealed class ModernAtlasDialog : GuiDialog
             {
                 CaptureAtlasFrameCache();
             }
-            RestoreNormalWorldSnapshot();
             capi.Render.CurrentFrameBuffer = null;
             scrollViewportRenderer.Render(
-                atlasFrameCacheTexture?.TextureId
-                    ?? exactChunkRenderer?.PrimaryColorTextureId
-                    ?? 0,
-                normalWorldSnapshotTexture?.TextureId ?? 0,
+                atlasFrameCacheTexture?.TextureId ?? 0,
+                0,
                 AtlasViewport
             );
             // Eligibility is checked before touching the weather system so
@@ -651,10 +721,11 @@ public sealed class ModernAtlasDialog : GuiDialog
             {
                 CaptureAtlasFrameCache();
             }
-            if (rendered)
-            {
-                RenderCachedAtlasFullscreen();
-            }
+            // Even before the first complete cache frame exists, cover the
+            // window with the atlas renderer's opaque neutral placeholder.
+            // Leaving the previous world framebuffer visible here makes a
+            // failed or throttled atlas frame look like a one-frame world leak.
+            RenderCachedAtlasFullscreen();
         }
         capi.Render.GetEngineShader(EnumShaderProgram.Gui).Use();
         capi.Render.GLDepthMask(false);
@@ -726,6 +797,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         ForceOpaqueWindowAlpha();
         capi.Render.GetEngineShader(EnumShaderProgram.Gui).Use();
         CaptureAutomatedSmokeScreenshot();
+        AdvanceAutomatedPresentationSwitchTest();
         AdvanceAutomatedSmokeTest();
     }
 
@@ -1147,6 +1219,8 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnGuiClosed()
     {
+        CommitPendingPresentationPreference();
+        presentationChangeCoordinator.Reset(config.RenderOnScroll);
         overlay?.UnfocusOwnElements();
         searchPanel?.UnfocusOwnElements();
         settingsModalOpen = false;
@@ -1165,111 +1239,68 @@ public sealed class ModernAtlasDialog : GuiDialog
         // leave still releases all of this non-persistent data.
         ResetPointerDrag();
         compassRenderer.Dispose();
-        ReleaseNormalWorldSnapshot();
         ReleaseAtlasFrameCache();
         ScheduleNormalWorldShaderRestore();
         base.OnGuiClosed();
     }
 
-    private void CaptureNormalWorldSnapshot()
-    {
-        if (!config.RenderOnScroll || normalWorldSnapshotCaptured) return;
-
-        try
-        {
-            int width = Math.Max(1, capi.Render.FrameWidth);
-            int height = Math.Max(1, capi.Render.FrameHeight);
-            using BitmapRef screenshot = capi.Render.GrabScreenshot(
-                width,
-                height,
-                false,
-                true,
-                true
-            );
-
-            if (normalWorldSnapshotTexture != null
-                && normalWorldSnapshotTexture.TextureId > 0
-                && (normalWorldSnapshotTexture.Width != width
-                    || normalWorldSnapshotTexture.Height != height))
-            {
-                normalWorldSnapshotTexture.Dispose();
-                normalWorldSnapshotTexture = null;
-            }
-            normalWorldSnapshotTexture ??= new LoadedTexture(capi);
-            normalWorldSnapshotTexture.Width = width;
-            normalWorldSnapshotTexture.Height = height;
-            int[] snapshotPixels = screenshot.Pixels;
-            for (int index = 0; index < snapshotPixels.Length; index++)
-            {
-                // The normal world framebuffer does not use alpha as screen
-                // coverage, so valid RGB pixels can carry alpha zero. The GUI
-                // blit would discard those pixels and leave atlas geometry
-                // visible behind the scroll. This private snapshot represents
-                // a completed opaque POV, therefore normalize only its alpha.
-                snapshotPixels[index] |= unchecked((int)0xff000000);
-            }
-            capi.Render.LoadOrUpdateTextureFromBgra(
-                snapshotPixels,
-                false,
-                1,
-                ref normalWorldSnapshotTexture
-            );
-            normalWorldSnapshotCaptured = normalWorldSnapshotTexture.TextureId > 0;
-        }
-        catch (Exception exception)
-        {
-            capi.Logger.Warning(
-                "[ModernAtlas] Could not protect the normal world view behind the scroll: {0}",
-                exception.Message
-            );
-        }
-    }
-
     internal bool CaptureNormalWorldSnapshotBeforeTransition()
     {
-        // A synchronous full-window GrabScreenshot can stall indefinitely
-        // while a new world is still completing its first large batch of
-        // chunk meshes. The scroll renderer already owns an opaque stationary
-        // fallback background, so prefer that deterministic cover instead of
-        // blocking G, Escape and movement on a GPU readback.
-        ReleaseNormalWorldSnapshot();
+        // The scroll renderer owns an opaque stationary backdrop and a neutral
+        // placeholder, so the transition never needs a synchronous screenshot
+        // of the normal world framebuffer.
         return true;
     }
 
-    private void RestoreNormalWorldSnapshot()
+    private void AdvancePresentationChange()
     {
-        LoadedTexture? snapshot = normalWorldSnapshotTexture;
-        if (!normalWorldSnapshotCaptured || snapshot == null || snapshot.TextureId <= 0)
+        if (!presentationChangeCoordinator.TryTake(
+            capi.ElapsedMilliseconds,
+            out bool requestedRenderOnScroll
+        ))
         {
             return;
         }
 
-        IRenderAPI render = capi.Render;
-        render.CurrentActiveShader?.Stop();
-        render.CurrentFrameBuffer = null;
-        render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
-        render.GetEngineShader(EnumShaderProgram.Gui).Use();
-        render.GLDisableDepthTest();
-        render.GLDepthMask(false);
-        render.GlToggleBlend(false, EnumBlendMode.Standard);
-        render.Render2DTexture(
-            snapshot.TextureId,
-            0,
-            0,
-            render.FrameWidth,
-            render.FrameHeight,
-            0,
-            ColorUtil.WhiteArgbVec
+        if (config.RenderOnScroll == requestedRenderOnScroll)
+        {
+            // A rapid round trip back to the committed value still counts as
+            // the last selection, but it does not write the configuration or
+            // disturb any GUI composer.
+            SyncSettingsControls();
+            return;
+        }
+
+        config.RenderOnScroll = requestedRenderOnScroll;
+        ResetPointerDrag();
+        selectedEntityId = null;
+        FitLoadedTerrain();
+        RecomposeViewportInterface();
+        saveConfig();
+        SyncSettingsControls();
+        capi.Logger.Notification(
+            requestedRenderOnScroll
+                ? "[ModernAtlas] Applied the final debounced presentation choice: interactive 3D scroll."
+                : "[ModernAtlas] Applied the final debounced presentation choice: full screen."
         );
-        render.GlToggleBlend(true, EnumBlendMode.Standard);
-        render.GLDepthMask(true);
     }
 
-    private void ReleaseNormalWorldSnapshot()
+    private void CommitPendingPresentationPreference()
     {
-        normalWorldSnapshotTexture?.Dispose();
-        normalWorldSnapshotTexture = null;
-        normalWorldSnapshotCaptured = false;
+        // Closing during the debounce interval must not silently discard the
+        // final visible switch value. Automated smoke preferences are restored
+        // separately and must never be persisted as player settings.
+        if (automatedSmokeTestActive
+            || !presentationChangeCoordinator.TryTakePending(
+                out bool requestedRenderOnScroll
+            )
+            || config.RenderOnScroll == requestedRenderOnScroll)
+        {
+            return;
+        }
+
+        config.RenderOnScroll = requestedRenderOnScroll;
+        saveConfig();
     }
 
     private bool ShouldRenderFreshAtlasFrame()
@@ -1302,13 +1333,13 @@ public sealed class ModernAtlasDialog : GuiDialog
         int height = Math.Max(1, primary.Height);
         try
         {
-            if (atlasFrameCacheTexture == null
-                || atlasFrameCacheTexture.TextureId <= 0
-                || atlasFrameCacheTexture.Width != width
-                || atlasFrameCacheTexture.Height != height)
+            if (atlasFrameStagingTexture == null
+                || atlasFrameStagingTexture.TextureId <= 0
+                || atlasFrameStagingTexture.Width != width
+                || atlasFrameStagingTexture.Height != height)
             {
-                atlasFrameCacheTexture?.Dispose();
-                atlasFrameCacheTexture = new LoadedTexture(capi)
+                atlasFrameStagingTexture?.Dispose();
+                atlasFrameStagingTexture = new LoadedTexture(capi)
                 {
                     Width = width,
                     Height = height
@@ -1318,9 +1349,14 @@ public sealed class ModernAtlasDialog : GuiDialog
                     emptyPixels,
                     true,
                     0,
-                    ref atlasFrameCacheTexture
+                    ref atlasFrameStagingTexture
                 );
             }
+
+            LoadedTexture stagingTexture = atlasFrameStagingTexture
+                ?? throw new InvalidOperationException(
+                    "Atlas frame staging texture was not created."
+                );
 
             if (primaryAtlasSourceTexture == null
                 || primaryAtlasSourceTextureId != textureId
@@ -1347,12 +1383,18 @@ public sealed class ModernAtlasDialog : GuiDialog
                 0,
                 width,
                 height,
-                atlasFrameCacheTexture,
+                stagingTexture,
                 0,
                 0,
                 0
             );
             render.CurrentFrameBuffer = null;
+            // Publish only after the GPU copy completed. The old published
+            // texture remains the presentation source if any staging step
+            // throws, so Primary can never become an accidental fallback.
+            LoadedTexture? previousCompleteFrame = atlasFrameCacheTexture;
+            atlasFrameCacheTexture = stagingTexture;
+            atlasFrameStagingTexture = previousCompleteFrame;
             if (!loggedAtlasRefreshThrottle)
             {
                 loggedAtlasRefreshThrottle = true;
@@ -1364,24 +1406,28 @@ public sealed class ModernAtlasDialog : GuiDialog
         catch (Exception exception)
         {
             capi.Logger.Warning(
-                "[ModernAtlas] Could not cache a throttled atlas frame; full-rate rendering remains active: {0}",
+                "[ModernAtlas] Could not publish a complete throttled atlas frame; the previous complete frame remains active: {0}",
                 exception.Message
             );
-            ReleaseAtlasFrameCache();
         }
     }
 
     private void RenderCachedAtlasFullscreen()
     {
-        LoadedTexture? cache = atlasFrameCacheTexture;
-        if (cache == null || cache.TextureId <= 0) return;
-        scrollViewportRenderer.RenderAtlasFullscreen(cache.TextureId);
+        scrollViewportRenderer.RenderAtlasFullscreen(
+            atlasFrameCacheTexture?.TextureId ?? 0
+        );
     }
 
     private void ReleaseAtlasFrameCache()
     {
         atlasFrameCacheTexture?.Dispose();
+        if (!ReferenceEquals(atlasFrameStagingTexture, atlasFrameCacheTexture))
+        {
+            atlasFrameStagingTexture?.Dispose();
+        }
         atlasFrameCacheTexture = null;
+        atlasFrameStagingTexture = null;
         primaryAtlasSourceTexture = null;
         primaryAtlasSourceTextureId = 0;
         lastAtlasWorldRenderMilliseconds = 0;
@@ -1503,6 +1549,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     internal void BeginAutomatedSmokeTest(Action<bool> completion)
     {
+        presentationChangeCoordinator.Reset(config.RenderOnScroll);
         automatedOriginalMapLayersEnabled = config.MapLayersEnabled;
         automatedOriginalCaveModeEnabled = config.CaveModeEnabled;
         automatedOriginalSearchModeEnabled = config.SearchModeEnabled;
@@ -1516,7 +1563,15 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedOriginalPerformanceLightingEnabled =
             config.PerformanceLightingEnabled;
         automatedOriginalHideVegetation = config.HideVegetation;
+        automatedOriginalCheatModeEnabled = cheatModeEnabled;
         automatedSmokeTestPreferencesCaptured = true;
+        if (capi.IsSinglePlayer)
+        {
+            cheatModeEnabled = true;
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated smoke test temporarily accepted Cheat Mode for Creative-only atlas checks."
+            );
+        }
         config.MapLayersEnabled = true;
         config.CaveModeEnabled = false;
         config.SearchModeEnabled = true;
@@ -1594,6 +1649,12 @@ public sealed class ModernAtlasDialog : GuiDialog
         pendingAutomatedMapLayerScreenshotSuffix = null;
         automatedSmokeTestPerformanceModeSelected = false;
         automatedSmokeTestPerformanceModeRendered = false;
+        automatedSmokeTestPresentationPassed = false;
+        automatedSmokeTestPresentationPhase = 0;
+        automatedSmokeTestSettingsComposer = null;
+        automatedSmokeTestPerformanceComposer = null;
+        automatedSmokeTestCreativeComposer = null;
+        automatedSmokeTestVisualLabComposer = null;
         automatedSmokeScreenshotPhase = 0;
         AutomatedSmokeTestRenderedExactWorld = false;
     }
@@ -1618,9 +1679,39 @@ public sealed class ModernAtlasDialog : GuiDialog
             && automatedSmokeTestMaximumZoomFrameRendered
             && automatedSmokeTestSearchPassed
             && automatedSmokeTestMapLayerPassed
-            && automatedSmokeTestPerformanceModeRendered;
+            && automatedSmokeTestPerformanceModeRendered
+            && automatedSmokeTestPresentationPassed;
         if (passed && automatedSmokeTestElapsedSeconds < 3f) return;
         if (!passed && automatedSmokeTestElapsedSeconds < 60f) return;
+
+        if (!passed)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated smoke summary: exact={0}, safeSurface={1}, pitch={2}/{3}, interface={4}, unit={5}/{6}, searchInput={7}, bilingual={8}, ore={9}, creativeOre={10}, partialZoom={11}, maximumZoom={12}, search={13}(phase={14}), layers={15}(phase={16}), performance={17}(selected={18}, renderedVegetationHidden={19}, flatLighting={20}), presentation={21}.",
+                AutomatedSmokeTestRenderedExactWorld,
+                automatedSmokeTestSafeSurfaceFrameRendered,
+                automatedSmokeTestRenderedAtPitchFloor,
+                automatedSmokeTestRequiresUnlockedPitch,
+                automatedSmokeTestInterfaceControlsPassed,
+                automatedSmokeTestUnitInspectionPassed,
+                automatedSmokeTestUnitInspectionAttempted,
+                automatedSmokeTestSearchInputPassed,
+                automatedSmokeTestBilingualSearchPassed,
+                automatedSmokeTestOreConcealmentPassed,
+                automatedSmokeTestCreativeOreRevealFrameRendered,
+                automatedSmokeTestPartialZoomFrameRendered,
+                automatedSmokeTestMaximumZoomFrameRendered,
+                automatedSmokeTestSearchPassed,
+                automatedSmokeTestSearchPhase,
+                automatedSmokeTestMapLayerPassed,
+                automatedSmokeTestMapLayerPhase,
+                automatedSmokeTestPerformanceModeRendered,
+                automatedSmokeTestPerformanceModeSelected,
+                exactChunkRenderer?.LastRenderedVegetationHidden ?? false,
+                !(exactChunkRenderer?.LastRenderedPerformanceLightingEnabled ?? true),
+                automatedSmokeTestPresentationPassed
+            );
+        }
 
         automatedSmokeTestActive = false;
         Action<bool>? completion = automatedSmokeTestCompletion;
@@ -1694,6 +1785,12 @@ public sealed class ModernAtlasDialog : GuiDialog
             && vegetationSelected
             && performanceModal?.GetElement("performance-lighting")
                 is GuiElementAtlasSwitch;
+        if (automatedSmokeTestPerformanceModeSelected)
+        {
+            // The next frame must render the selected visual controls before
+            // the screenshot/modal exercise changes presentation again.
+            lastAtlasWorldRenderMilliseconds = 0;
+        }
         bool performanceClosedByClick = performanceOpenedByClick
             && ClickAtlasControlForAutomatedTest(
                 performanceModal,
@@ -1701,32 +1798,9 @@ public sealed class ModernAtlasDialog : GuiDialog
             )
             && settingsModalOpen
             && !performanceModalOpen;
-        bool renderOnScrollBeforeClick = config.RenderOnScroll;
-        bool presentationSwitchClicked = performanceClosedByClick
-            && ClickAtlasControlForAutomatedTest(
-                settingsModal,
-                "render-on-scroll"
-            )
-            && config.RenderOnScroll != renderOnScrollBeforeClick;
-        bool presentationSwitchRestored = presentationSwitchClicked
-            && ClickAtlasControlForAutomatedTest(
-                settingsModal,
-                "render-on-scroll"
-            )
-            && config.RenderOnScroll == renderOnScrollBeforeClick;
-        bool realtimeWeatherBeforeClick = config.ScrollRealtimeWeatherEnabled;
-        bool realtimeWeatherSwitchClicked = presentationSwitchRestored
-            && ClickAtlasControlForAutomatedTest(
-                settingsModal,
-                "scroll-realtime-weather"
-            )
-            && config.ScrollRealtimeWeatherEnabled != realtimeWeatherBeforeClick;
-        bool realtimeWeatherSwitchRestored = realtimeWeatherSwitchClicked
-            && ClickAtlasControlForAutomatedTest(
-                settingsModal,
-                "scroll-realtime-weather"
-            )
-            && config.ScrollRealtimeWeatherEnabled == realtimeWeatherBeforeClick;
+        bool presentationSwitchAvailable = performanceClosedByClick
+            && settingsModal?.GetElement("render-on-scroll")
+                is GuiElementAtlasSwitch;
         bool liveLightingBeforeSliderTest = config.LiveLightingEnabled;
         bool fixedLightingPrepared = !liveLightingBeforeSliderTest
             || (settingsOpenedByClick
@@ -1760,6 +1834,16 @@ public sealed class ModernAtlasDialog : GuiDialog
             )
             && config.ShowPlayerCompass
             && HandheldInstrumentMode == "time";
+        if (automatedSmokeTestPerformanceModeSelected)
+        {
+            // Live/fixed lighting controls intentionally re-enable directional
+            // lighting. Re-apply the already-tested developer visual choice so
+            // one real atlas frame observes flat lighting and hidden vegetation
+            // before the smoke test restores the player's preferences.
+            OnPerformanceLightingToggled(false);
+            OnHideVegetationToggled(true);
+            lastAtlasWorldRenderMilliseconds = 0;
+        }
         bool settingsClosedByClick = settingsOpenedByClick
             && ClickAtlasControlForAutomatedTest(settingsModal, "settings-close")
             && !settingsModalOpen;
@@ -1825,10 +1909,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             && skipOpeningRestored
             && automatedSmokeTestPerformanceModeSelected
             && performanceClosedByClick
-            && presentationSwitchClicked
-            && presentationSwitchRestored
-            && realtimeWeatherSwitchClicked
-            && realtimeWeatherSwitchRestored
+            && presentationSwitchAvailable
             && fixedLightingPrepared
             && sliderBoundaryDragHandled
             && sliderBoundaryDragClamped
@@ -1850,14 +1931,14 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (automatedSmokeTestInterfaceControlsPassed)
         {
             capi.Logger.Notification(
-                "[ModernAtlas] Automated smoke test exercised the toggleable Settings panel, compact neumorphic controls, Compass/Time instrument selector, scroll/full-screen presentation, map-layer and skip-opening switches, Creative/Cheat cave/search/camera controls, Escape-restored hidden UI and held-item suppression for {0} living models.",
+                "[ModernAtlas] Automated smoke test exercised the toggleable Settings panel, compact neumorphic controls, Compass/Time instrument selector, map-layer and skip-opening switches, Creative/Cheat cave/search/camera controls, Escape-restored hidden UI and held-item suppression for {0} living models; debounced presentation coverage is running next.",
                 renderedEntityCount
             );
         }
         else
         {
             capi.Logger.Error(
-                "[ModernAtlas] Automated interface-controls test failed: access={0}, settingsOpen/toggle/reopen={1}/{2}/{3}, mapLayerSwitch={4}/{5}, skipOpening={6}/{7}, presentation={8}/{9}, fixedLighting={10}/{11}, sliderBoundary={12}/{13}, timeInstrument={14}, settingsClose={15}, creativeOpen={16}, creativeClose={17}, layers={18}, search={19}, safeSurface={20}, cave={21}, angleLock={22}, yaw={23}, hidden={24}, restored={25}, neumorphic={26}, heldItems={27}/{28}.",
+                "[ModernAtlas] Automated interface-controls test failed: access={0}, settingsOpen/toggle/reopen={1}/{2}/{3}, mapLayerSwitch={4}/{5}, skipOpening={6}/{7}, presentationControl={8}, fixedLighting={9}/{10}, sliderBoundary={11}/{12}, timeInstrument={13}, settingsClose={14}, creativeOpen={15}, creativeClose={16}, layers={17}, search={18}, safeSurface={19}, cave={20}, angleLock={21}, yaw={22}, hidden={23}, restored={24}, neumorphic={25}, heldItems={26}/{27}.",
                 accessAvailable,
                 settingsOpenedByClick,
                 settingsClosedByToggle,
@@ -1866,8 +1947,7 @@ public sealed class ModernAtlasDialog : GuiDialog
                 settingsSwitchRestored,
                 skipOpeningClicked,
                 skipOpeningRestored,
-                presentationSwitchClicked,
-                presentationSwitchRestored,
+                presentationSwitchAvailable,
                 fixedLightingPrepared,
                 liveLightingRestored,
                 sliderBoundaryDragHandled,
@@ -1889,6 +1969,297 @@ public sealed class ModernAtlasDialog : GuiDialog
                 renderedEntityCount
             );
         }
+    }
+
+    private void AdvanceAutomatedPresentationSwitchTest()
+    {
+        if (!automatedSmokeTestActive
+            || !automatedSmokeTestInterfaceControlsAttempted
+            || !automatedSmokeTestInterfaceControlsPassed
+            || automatedSmokeScreenshotPhase < 5
+            || automatedSmokeTestPresentationPassed
+            || automatedSmokeTestPresentationPhase < 0
+            || automatedSmokeTestPresentationPhase >= 5)
+        {
+            return;
+        }
+
+        switch (automatedSmokeTestPresentationPhase)
+        {
+            case 0:
+            {
+                if (!settingsModalOpen
+                    && (!ClickAtlasControlForAutomatedTest(
+                            overlay,
+                            "settings-button"
+                        )
+                        || !settingsModalOpen))
+                {
+                    FailAutomatedPresentationSwitchTest(
+                        "could not open Settings before the first rapid sequence"
+                    );
+                    return;
+                }
+
+                automatedSmokeTestSettingsComposer = settingsModal;
+                automatedSmokeTestPerformanceComposer = performanceModal;
+                automatedSmokeTestCreativeComposer = creativeSettingsModal;
+                automatedSmokeTestVisualLabComposer = visualLabModal;
+                bool startedOnScroll = config.RenderOnScroll;
+                bool firstClick = ClickAtlasControlForAutomatedTest(
+                    settingsModal,
+                    "render-on-scroll"
+                );
+                bool secondClick = ClickAtlasControlForAutomatedTest(
+                    settingsModal,
+                    "render-on-scroll"
+                );
+                bool queuedScrollFullscreenScroll = startedOnScroll
+                    && firstClick
+                    && secondClick
+                    && config.RenderOnScroll
+                    && presentationChangeCoordinator.HasPending
+                    && presentationChangeCoordinator.RequestedRenderOnScroll;
+                bool pendingFrameCaptured = queuedScrollFullscreenScroll
+                    && CaptureAutomatedPresentationFrame(
+                        "presentation-scroll-fullscreen-scroll-pending"
+                    );
+                if (!pendingFrameCaptured)
+                {
+                    FailAutomatedPresentationSwitchTest(
+                        "Scroll -> Fullscreen -> Scroll did not retain the committed scroll view while pending"
+                    );
+                    return;
+                }
+
+                automatedSmokeTestPresentationPhase = 1;
+                return;
+            }
+
+            case 1:
+            {
+                if (presentationChangeCoordinator.HasPending) return;
+
+                bool settingsComposerKept = ReferenceEquals(
+                    settingsModal,
+                    automatedSmokeTestSettingsComposer
+                );
+                bool scrollCommittedState = config.RenderOnScroll
+                    && settingsModalOpen
+                    && settingsComposerKept;
+                bool scrollCommitted = scrollCommittedState
+                    && CaptureAutomatedPresentationFrame(
+                        "presentation-scroll-fullscreen-scroll"
+                    );
+                if (!scrollCommitted)
+                {
+                    capi.Logger.Error(
+                        "[ModernAtlas] Presentation phase diagnostic: committedScroll={0}, settingsOpen={1}, settingsComposerKept={2}, pending={3}, requestedScroll={4}, screenshot={5}.",
+                        config.RenderOnScroll,
+                        settingsModalOpen,
+                        settingsComposerKept,
+                        presentationChangeCoordinator.HasPending,
+                        presentationChangeCoordinator.RequestedRenderOnScroll,
+                        scrollCommittedState
+                    );
+                    FailAutomatedPresentationSwitchTest(
+                        "the final Scroll choice was not committed after the debounce interval"
+                    );
+                    return;
+                }
+
+                bool fullscreenClick = ClickAtlasControlForAutomatedTest(
+                    settingsModal,
+                    "render-on-scroll"
+                );
+                bool fullscreenQueued = fullscreenClick
+                    && config.RenderOnScroll
+                    && presentationChangeCoordinator.HasPending
+                    && !presentationChangeCoordinator.RequestedRenderOnScroll
+                    && CaptureAutomatedPresentationFrame(
+                        "presentation-fullscreen-pending"
+                    );
+                if (!fullscreenQueued)
+                {
+                    FailAutomatedPresentationSwitchTest(
+                        "could not queue the fullscreen presentation without rebuilding Settings"
+                    );
+                    return;
+                }
+
+                automatedSmokeTestPresentationPhase = 2;
+                return;
+            }
+
+            case 2:
+            {
+                if (presentationChangeCoordinator.HasPending) return;
+
+                bool fullscreenCommitted = !config.RenderOnScroll
+                    && settingsModalOpen
+                    && ReferenceEquals(
+                        settingsModal,
+                        automatedSmokeTestSettingsComposer
+                    )
+                    && CaptureAutomatedPresentationFrame(
+                        "presentation-fullscreen"
+                    );
+                if (!fullscreenCommitted)
+                {
+                    FailAutomatedPresentationSwitchTest(
+                        "the fullscreen presentation did not replace the scroll viewport after commit"
+                    );
+                    return;
+                }
+
+                bool firstReturnToScroll = ClickAtlasControlForAutomatedTest(
+                    settingsModal,
+                    "render-on-scroll"
+                );
+                bool secondReturnToScroll = ClickAtlasControlForAutomatedTest(
+                    settingsModal,
+                    "render-on-scroll"
+                );
+                bool queuedFullscreenScrollFullscreen = !config.RenderOnScroll
+                    && firstReturnToScroll
+                    && secondReturnToScroll
+                    && presentationChangeCoordinator.HasPending
+                    && !presentationChangeCoordinator.RequestedRenderOnScroll
+                    && CaptureAutomatedPresentationFrame(
+                        "presentation-fullscreen-scroll-fullscreen-pending"
+                    );
+                if (!queuedFullscreenScrollFullscreen)
+                {
+                    FailAutomatedPresentationSwitchTest(
+                        "Fullscreen -> Scroll -> Fullscreen did not keep the latest fullscreen request pending"
+                    );
+                    return;
+                }
+
+                automatedSmokeTestPresentationPhase = 3;
+                return;
+            }
+
+            case 3:
+            {
+                if (presentationChangeCoordinator.HasPending) return;
+
+                bool finalFullscreen = !config.RenderOnScroll
+                    && settingsModalOpen
+                    && ReferenceEquals(
+                        settingsModal,
+                        automatedSmokeTestSettingsComposer
+                    )
+                    && ReferenceEquals(
+                        performanceModal,
+                        automatedSmokeTestPerformanceComposer
+                    )
+                    && ReferenceEquals(
+                        creativeSettingsModal,
+                        automatedSmokeTestCreativeComposer
+                    )
+                    && ReferenceEquals(
+                        visualLabModal,
+                        automatedSmokeTestVisualLabComposer
+                    )
+                    && CaptureAutomatedPresentationFrame(
+                        "presentation-fullscreen-scroll-fullscreen"
+                    );
+                bool weatherBefore = config.ScrollRealtimeWeatherEnabled;
+                bool weatherToggled = ClickAtlasControlForAutomatedTest(
+                    settingsModal,
+                    "scroll-realtime-weather"
+                )
+                    && config.ScrollRealtimeWeatherEnabled != weatherBefore;
+                bool weatherRestored = weatherToggled
+                    && ClickAtlasControlForAutomatedTest(
+                        settingsModal,
+                        "scroll-realtime-weather"
+                    )
+                    && config.ScrollRealtimeWeatherEnabled == weatherBefore;
+                bool otherBefore = config.SkipOpeningAnimation;
+                bool otherToggled = ClickAtlasControlForAutomatedTest(
+                    settingsModal,
+                    "skip-opening-animation"
+                )
+                    && config.SkipOpeningAnimation != otherBefore;
+                bool otherRestored = otherToggled
+                    && ClickAtlasControlForAutomatedTest(
+                        settingsModal,
+                        "skip-opening-animation"
+                    )
+                    && config.SkipOpeningAnimation == otherBefore;
+                bool settingsStillActive = settingsModalOpen
+                    && ReferenceEquals(
+                        settingsModal,
+                        automatedSmokeTestSettingsComposer
+                    );
+                bool closed = settingsStillActive
+                    && ClickAtlasControlForAutomatedTest(
+                        settingsModal,
+                        "settings-close"
+                    )
+                    && !settingsModalOpen;
+
+                automatedSmokeTestPresentationPassed = finalFullscreen
+                    && weatherToggled
+                    && weatherRestored
+                    && otherToggled
+                    && otherRestored
+                    && settingsStillActive
+                    && closed;
+                automatedSmokeTestPresentationPhase = 5;
+                if (automatedSmokeTestPresentationPassed)
+                {
+                    capi.Logger.Notification(
+                        "[ModernAtlas] Automated presentation debounce check passed: Scroll -> Fullscreen -> Scroll and Fullscreen -> Scroll -> Fullscreen kept the last choice, retained Settings/modal composers, and produced opaque transition frames."
+                    );
+                }
+                else
+                {
+                    capi.Logger.Error(
+                        "[ModernAtlas] Automated presentation debounce check failed: finalFullscreen={0}, weather={1}/{2}, other={3}/{4}, settingsActive={5}, closed={6}.",
+                        finalFullscreen,
+                        weatherToggled,
+                        weatherRestored,
+                        otherToggled,
+                        otherRestored,
+                        settingsStillActive,
+                        closed
+                    );
+                }
+                return;
+            }
+        }
+    }
+
+    private void FailAutomatedPresentationSwitchTest(string diagnostic)
+    {
+        automatedSmokeTestPresentationPhase = -1;
+        automatedSmokeTestPresentationPassed = false;
+        capi.Logger.Error(
+            "[ModernAtlas] Automated presentation debounce check failed: {0}.",
+            diagnostic
+        );
+    }
+
+    private bool CaptureAutomatedPresentationFrame(string suffix)
+    {
+        string? configuredPath = Environment.GetEnvironmentVariable(
+            SmokeScreenshotEnvironmentVariable
+        );
+        if (string.IsNullOrWhiteSpace(configuredPath))
+        {
+            return ValidateAutomatedSmokeWindowAlpha();
+        }
+
+        string prefix = configuredPath.EndsWith(
+            ".png",
+            StringComparison.OrdinalIgnoreCase
+        )
+            ? configuredPath[..^4]
+            : configuredPath;
+        return TrySaveAutomatedSmokeScreenshot($"{prefix}-{suffix}.png");
     }
 
     private bool ClickAtlasControlForAutomatedTest(GuiComposer? composer, string key)
@@ -2150,6 +2521,42 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
     }
 
+    private bool ValidateAutomatedSmokeWindowAlpha()
+    {
+        try
+        {
+            using BitmapRef screenshot = capi.Render.GrabScreenshot(
+                capi.Render.FrameWidth,
+                capi.Render.FrameHeight,
+                false,
+                true,
+                true
+            );
+            int minimumAlpha = 255;
+            foreach (int pixel in screenshot.Pixels)
+            {
+                minimumAlpha = Math.Min(minimumAlpha, (pixel >> 24) & 0xff);
+            }
+            if (minimumAlpha < 255)
+            {
+                capi.Logger.Error(
+                    "[ModernAtlas] Automated presentation frame retained transparent window pixels: minimum alpha {0}.",
+                    minimumAlpha
+                );
+                return false;
+            }
+            return true;
+        }
+        catch (Exception exception)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated presentation alpha validation failed: {0}",
+                exception.Message
+            );
+            return false;
+        }
+    }
+
     private bool TrySaveAutomatedSmokeScreenshot(string path)
     {
         try
@@ -2196,6 +2603,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         if (!automatedSmokeTestPreferencesCaptured) return;
 
+        presentationChangeCoordinator.Reset(config.RenderOnScroll);
+
         if (automatedSmokeTestPartialZoomPending
             || automatedSmokeTestMaximumZoomPending)
         {
@@ -2208,6 +2617,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
 
         automatedSmokeTestPreferencesCaptured = false;
+        bool accessChanged = cheatModeEnabled != automatedOriginalCheatModeEnabled;
+        cheatModeEnabled = automatedOriginalCheatModeEnabled;
         config.MapLayersEnabled = automatedOriginalMapLayersEnabled;
         config.CaveModeEnabled = automatedOriginalCaveModeEnabled;
         config.SearchModeEnabled = automatedOriginalSearchModeEnabled;
@@ -2218,6 +2629,10 @@ public sealed class ModernAtlasDialog : GuiDialog
         config.ShowPlayerCompass = automatedOriginalShowPlayerCompass;
         config.HandheldInstrumentMode = automatedOriginalHandheldInstrumentMode;
         config.PerformanceLightingEnabled = automatedOriginalPerformanceLightingEnabled;
+        if (accessChanged)
+        {
+            ClampPitchToAccessLevel(immediate: true);
+        }
         config.HideVegetation = automatedOriginalHideVegetation;
         if (config.RenderOnScroll != automatedOriginalRenderOnScroll)
         {
@@ -2753,6 +3168,8 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     internal void OnWorldLeave()
     {
+        CommitPendingPresentationPreference();
+        presentationChangeCoordinator.Reset(config.RenderOnScroll);
         RestoreAutomatedSmokeTestPreferences();
         automatedSmokeTestActive = false;
         automatedSmokeTestElapsedSeconds = 0;
@@ -2778,6 +3195,12 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestMapLayerPhase = 0;
         automatedSmokeTestMapLayerPassed = false;
         pendingAutomatedMapLayerScreenshotSuffix = null;
+        automatedSmokeTestPresentationPassed = false;
+        automatedSmokeTestPresentationPhase = 0;
+        automatedSmokeTestSettingsComposer = null;
+        automatedSmokeTestPerformanceComposer = null;
+        automatedSmokeTestCreativeComposer = null;
+        automatedSmokeTestVisualLabComposer = null;
         AutomatedSmokeTestRenderedExactWorld = false;
         cheatModeEnabled = false;
         settingsModalOpen = false;
@@ -2828,7 +3251,6 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
         preparedGameViewDistance = -1;
         surfaceHeightTexture.Reset();
-        ReleaseNormalWorldSnapshot();
         ReleaseAtlasFrameCache();
         capi.Logger.Notification(
             "[ModernAtlas] Released world-specific atlas rendering resources."
@@ -2837,6 +3259,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void Dispose()
     {
+        presentationChangeCoordinator.Reset(config.RenderOnScroll);
         RestoreAutomatedSmokeTestPreferences();
         automatedSmokeTestActive = false;
         automatedSmokeTestCompletion = null;
@@ -2849,7 +3272,6 @@ public sealed class ModernAtlasDialog : GuiDialog
         oreHoverTexture?.Dispose();
         oreHoverTexture = null;
         compassRenderer.Dispose();
-        ReleaseNormalWorldSnapshot();
         ReleaseAtlasFrameCache();
         opacityQuad?.Dispose();
         opacityQuad = null;
@@ -2913,7 +3335,42 @@ public sealed class ModernAtlasDialog : GuiDialog
         SyncMapLayerDropdown();
     }
 
-    private void ComposeOverlay()
+    private void RecomposeViewportInterface()
+    {
+        // Presentation changes alter only the map-relative controls. Keep
+        // Settings and every modal child alive so a switch cannot receive its
+        // MouseUp on a newly-created composer and so modal input remains valid.
+        overlay?.UnfocusOwnElements();
+        searchPanel?.UnfocusOwnElements();
+        mapLayerPanel?.UnfocusOwnElements();
+        creativeSettingsShortcut?.UnfocusOwnElements();
+        unitPanel?.UnfocusOwnElements();
+        overlay?.Dispose();
+        searchPanel?.Dispose();
+        mapLayerPanel?.Dispose();
+        creativeSettingsShortcut?.Dispose();
+        unitPanel?.Dispose();
+        overlay = null;
+        searchPanel = null;
+        mapLayerPanel = null;
+        creativeSettingsShortcut = null;
+        unitPanel = null;
+
+        ComposeOverlay(true);
+        composedFrameWidth = capi.Render.FrameWidth;
+        composedFrameHeight = capi.Render.FrameHeight;
+        composedGuiScale = RuntimeEnv.GUIScale;
+        if (searchController.Query.Length > 0)
+        {
+            searchPanel?.GetTextInput("search-input")?.SetValue(
+                searchController.Query,
+                true
+            );
+        }
+        SyncMapLayerDropdown();
+    }
+
+    private void ComposeOverlay(bool viewportOnly = false)
     {
         ElementBounds root = ElementBounds.Fill;
         double guiScale = Math.Max(0.5, RuntimeEnv.GUIScale);
@@ -2958,7 +3415,7 @@ public sealed class ModernAtlasDialog : GuiDialog
                 )
             )
             .AddStaticText(
-                "v0.6.6",
+                "v0.6.7",
                 AtlasUiStyle.DetailFont(9),
                 ElementBounds.Fixed(contentX + versionX, contentY + versionY, 52, 18)
             )
@@ -3094,6 +3551,8 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "unit-details"
             )
             .Compose();
+
+        if (viewportOnly) return;
 
         ElementBounds modalRoot = ElementBounds.Fixed(0, 0, 430, 800)
             .WithAlignment(EnumDialogArea.CenterMiddle);
@@ -4839,19 +5298,14 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private void OnRenderOnScrollToggled(bool enabled)
     {
-        if (config.RenderOnScroll == enabled) return;
-        config.RenderOnScroll = enabled;
-        pendingInterfaceRecompose = true;
-        ResetPointerDrag();
-        selectedEntityId = null;
-        FitLoadedTerrain();
-        saveConfig();
-        SyncSettingsControls();
-        capi.Logger.Notification(
-            enabled
-                ? "[ModernAtlas] Atlas presentation changed to the interactive 3D scroll."
-                : "[ModernAtlas] Atlas presentation changed to full screen."
+        presentationChangeCoordinator.Request(
+            enabled,
+            capi.ElapsedMilliseconds,
+            PresentationChangeDebounceMilliseconds
         );
+        // Keep the requested state visible in the surviving Settings composer
+        // while the committed map viewport continues to render unchanged.
+        SyncSettingsControls();
     }
 
     private void OnScrollRealtimeWeatherToggled(bool enabled)
@@ -5076,7 +5530,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         if (settingsModal == null) return;
         settingsModal.GetAtlasSwitch("render-on-scroll")?.SetValue(
-            config.RenderOnScroll
+            presentationChangeCoordinator.DisplayedValue(config.RenderOnScroll)
         );
         settingsModal.GetAtlasSwitch("scroll-realtime-weather")?.SetValue(
             config.ScrollRealtimeWeatherEnabled
