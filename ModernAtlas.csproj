@@ -38,5 +38,17 @@
       <HintPath>$(VintageStoryPath)/Lib/0Harmony.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="OpenTK.Graphics">
+      <HintPath>$(VintageStoryPath)/Lib/OpenTK.Graphics.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="OpenTK.Core">
+      <HintPath>$(VintageStoryPath)/Lib/OpenTK.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="OpenTK.Mathematics">
+      <HintPath>$(VintageStoryPath)/Lib/OpenTK.Mathematics.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 </Project>

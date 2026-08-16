@@ -362,11 +362,48 @@ the product scope when the atlas itself is correct.
   array to `glUniform4fv` and crash Mesa. Restore managed shader source and
   Harmony state only. Atlas filter switches are cleared in each render
   `finally` block while the renderer is still valid.
+- The screenshot feature is a tiled camera-grid capture, not a styled
+  re-render. `AtlasTiledScreenshot` divides the current view into an
+  `ScreenshotScale` grid (1x-20x, every integer step), re-renders the exact
+  world for every tile with a zoomed and offset camera, reads the Primary
+  sub-region per tile and stitches one seamless top-down PNG on a background
+  thread. High scales can capture hundreds of tiles across several seconds;
+  the stitched output is bounded by a pixel budget (about 36 megapixels) so
+  extreme grids cannot exhaust memory, and every tile is downsampled to that
+  budget before it is stored. A
+  `CANCEL / CLOSE` progress modal owns input while the capture, stitch and
+  save run; Escape cancels the capture and restores the camera. The camera
+  baseline (zoom, X/Y/Z centers) is snapshotted, snapped per tile and
+  restored after the last tile. Tile offsets are computed in screen space:
+  the tilted LookAt camera needs a ground-forward part (sin pitch) plus a
+  world-Y lift (cos pitch) per vertical grid step, and exactly one integer
+  tile of Primary pixels per step. Every shared edge has a small overlap
+  margin that the stitcher linearly crossfades, hiding the sub-pixel drift
+  between camera positions. Wind, water and cloud offsets are frozen for all
+  tiles (`screenshotFrozen*`, `GetLiveCloudOffset`) so animated surfaces
+  cannot tear at seams; the 0-degree Creative pitch capture is covered.
+  The smoke test queues a 2x capture only after every other exercise
+  (including the presentation debounce test) has passed, returns the
+  presentation to scroll first without re-requesting the debounce every
+  frame, and verifies the saved PNG plus the restored camera. Tile row 0 is
+  the TOP of the stitched image (the `[1][2] / [3][4]` grid order): the
+  vertical eye offsets must follow the working drag sign convention
+  (`imageDown = (-forwardPart*sinPitch + upPart*cosPitch) / worldPerPixel`),
+  so the top tiles capture the content above the view center. The stitcher
+  keeps the outer overlap margins in the image, so the composite covers the
+  full live-view world area and text or structures at the viewport edges are
+  not cropped. During every capture frame the local player's own 3D model
+  (including its hands) is hidden through
+  `ExactChunkRendererAdapter.HideLocalPlayerModel`, so the map photo shows
+  no photographer character; the flag is cleared in a `finally` after every
+  atlas draw. The closing transition's pocket sound fires at
+  `ClosingDurationSeconds - 0.2f`, not 1.78f, because the closing transition
+  lasts only 1.5 seconds.
 
 ## Build and in-game test workflow
 
 - For every rendering change, build `ModernAtlas.csproj` in Release mode,
-  create `Releases/modernatlas_0.6.6.zip`, validate the ZIP, and copy that exact
+  create `Releases/modernatlas_0.6.7.zip`, validate the ZIP, and copy that exact
   archive to the active Vintage Story `Mods` directory. Compare SHA-256 hashes
   so the release and active archives are demonstrably identical.
 - Close the running game cleanly before replacing or retesting the active mod.

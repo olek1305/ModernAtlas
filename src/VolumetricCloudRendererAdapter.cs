@@ -143,11 +143,26 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
     internal static bool IsEnabledByGraphicsSettings(ICoreClientAPI capi) =>
         IsSupportedCloudMode(capi.Settings.Int["cloudRenderMode"]);
 
+    /// <summary>The current live wind-drift offset of the native cloud map.</summary>
+    public Vec3f? GetLiveOffset()
+    {
+        if (disabled) return null;
+        try
+        {
+            return (Vec3f?)offsetField.GetValue(map);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     public bool Render(
         float[] projection,
         double[] view,
         float pausedAnimationDeltaTime,
-        bool renderIntoPrimary = false
+        bool renderIntoPrimary = false,
+        Vec3f? frozenOffset = null
     )
     {
         if (disabled) return false;
@@ -182,7 +197,10 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
             int textureColor = (int)(textureColorField.GetValue(map) ?? 0);
             int cloudMapWidth = (int)(cloudTileLengthField.GetValue(map) ?? 0);
             if (textureMap <= 0 || textureColor <= 0 || cloudMapWidth <= 0) return false;
-            Vec3f offset = (Vec3f)(offsetField.GetValue(map)
+            // A frozen offset (tiled screenshot capture) pins the drifting
+            // cloud layer to one captured frame so the stitched tiles share
+            // identical cloud shapes at every seam.
+            Vec3f offset = frozenOffset ?? (Vec3f)(offsetField.GetValue(map)
                 ?? throw new InvalidOperationException("The live cloud offset is unavailable."));
 
             IRenderAPI render = capi.Render;

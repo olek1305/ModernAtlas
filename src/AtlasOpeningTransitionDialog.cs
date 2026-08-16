@@ -568,7 +568,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             );
         }
 
-        if (!pocketSoundAttempted && elapsed >= 1.78f)
+        if (!pocketSoundAttempted && elapsed >= ClosingDurationSeconds - 0.2f)
         {
             pocketSoundAttempted = true;
             pocketSoundPlayed = soundController.PlayPageTouch();

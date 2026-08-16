@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Text;
 using Cairo;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
@@ -45,6 +47,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private readonly AtlasScrollViewportRenderer scrollViewportRenderer;
     private readonly AtlasScrollRealtimeWeather scrollRealtimeWeather;
     private readonly AtlasCompassRenderer compassRenderer;
+    private readonly AtlasTiledScreenshot tileScreenshot;
     private readonly AtlasSurfaceHeightTexture surfaceHeightTexture;
     private readonly AtlasMapLayerTexture mapLayerTexture;
     private readonly AtlasSearchController searchController;
@@ -58,6 +61,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     private GuiComposer? performanceModal;
     private GuiComposer? creativeSettingsModal;
     private GuiComposer? visualLabModal;
+    private GuiComposer? screenshotPanel;
+    private GuiComposer? screenshotProgressModal;
     private GuiComposer? unitPanel;
     private bool settingsModalOpen;
     private bool performanceModalOpen;
@@ -115,6 +120,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool automatedSmokeTestUnitInspectionPassed;
     private bool automatedSmokeTestSearchInputAttempted;
     private bool automatedSmokeTestSearchInputPassed;
+    private bool automatedScreenshotCaptureRequested;
+    private bool automatedScreenshotCapturePassed;
     private bool automatedSmokeTestBilingualSearchPassed;
     private bool automatedSmokeTestOreConcealmentPassed;
     private bool automatedSmokeTestCreativeOreRevealFrameRendered;
@@ -161,12 +168,38 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool automatedOriginalPerformanceLightingEnabled;
     private bool automatedOriginalHideVegetation;
     private bool automatedOriginalCheatModeEnabled;
+    private int automatedOriginalScreenshotScale = 2;
     private bool pendingInterfaceRecompose;
+    private bool pendingScreenshotRequest;
+    private long screenshotStatusShownUntilMilliseconds = -10000;
+    private string? screenshotStatusOverride;
+    private bool screenshotCameraSnapshotted;
+    private float screenshotBaselineZoom;
+    private float screenshotBaselineTargetZoom;
+    private double screenshotBaselineCenterX;
+    private double screenshotBaselineCenterY;
+    private double screenshotBaselineCenterZ;
+    private double screenshotBaselineTargetCenterX;
+    private double screenshotBaselineTargetCenterZ;
+    private float screenshotFrozenWindWaveCounter;
+    private float screenshotFrozenWindWaveCounterHighFrequency;
+    private float screenshotFrozenWaterStillCounter;
+    private float screenshotFrozenWaterFlowCounter;
+    private Vec3f? screenshotFrozenCloudOffset;
+    private float automatedScreenshotBaselineZoom;
+    private double automatedScreenshotBaselineCenterX;
+    private double automatedScreenshotBaselineCenterY;
+    private double automatedScreenshotBaselineCenterZ;
+    private bool screenshotPanelCollapsed = true;
+    private bool mapLayerPanelCollapsed;
+    private bool pendingScreenshotPanelRecompose;
+    private bool pendingMapLayerPanelRecompose;
     private AtlasMapLayer activeMapLayer = AtlasMapLayer.TexturedTerrain;
     private string? selectedOreCode;
     private AtlasOreInspection? oreHoverInspection;
     private ElementBounds? searchPanelBounds;
     private ElementBounds? mapLayerPanelBounds;
+    private ElementBounds? screenshotPanelBounds;
     private int oreHoverMouseX;
     private int oreHoverMouseY;
     private int oreHoverCellX = int.MinValue;
@@ -360,19 +393,21 @@ public sealed class ModernAtlasDialog : GuiDialog
         ? null
         : visualLabModalOpen
             ? visualLabModal
-            : performanceModalOpen
-                ? performanceModal
-                : creativeSettingsModalOpen
-                    ? creativeSettingsModal
-                    : settingsModalOpen
-                        ? settingsModal
-                        : SearchModeActive
-                            && searchPanel?.GetTextInput("search-input")?.HasFocus == true
-                                ? searchPanel
-                                : MapLayerControlsVisible
-                                    && mapLayerPanel?.CurrentTabIndexElement?.HasFocus == true
-                                        ? mapLayerPanel
-                                        : overlay;
+                : performanceModalOpen
+                    ? performanceModal
+                    : creativeSettingsModalOpen
+                        ? creativeSettingsModal
+                        : settingsModalOpen
+                            ? settingsModal
+                            : screenshotProgressModal != null
+                                ? screenshotProgressModal
+                                : SearchModeActive
+                                    && searchPanel?.GetTextInput("search-input")?.HasFocus == true
+                                        ? searchPanel
+                                        : MapLayerControlsVisible
+                                            && mapLayerPanel?.CurrentTabIndexElement?.HasFocus == true
+                                                ? mapLayerPanel
+                                                : overlay;
     internal bool SearchInputHasFocus => IsOpened()
         && !interfaceHidden
         && SearchModeActive
@@ -380,6 +415,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         && !performanceModalOpen
         && !creativeSettingsModalOpen
         && !visualLabModalOpen
+        && screenshotProgressModal == null
         && searchPanel?.GetTextInput("search-input")?.HasFocus == true;
 
     /// <summary>
@@ -396,6 +432,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         performanceModal?.UnfocusOwnElements();
         creativeSettingsModal?.UnfocusOwnElements();
         visualLabModal?.UnfocusOwnElements();
+        screenshotPanel?.UnfocusOwnElements();
+        screenshotProgressModal?.UnfocusOwnElements();
     }
     private float EffectiveMapLayerOpacity
     {
@@ -465,6 +503,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         );
         scrollRealtimeWeather = new AtlasScrollRealtimeWeather(capi);
         compassRenderer = new AtlasCompassRenderer(capi, atlasScrollShaderProvider);
+        tileScreenshot = new AtlasTiledScreenshot(capi);
         surfaceHeightTexture = new AtlasSurfaceHeightTexture(capi);
         mapLayerTexture = new AtlasMapLayerTexture(capi);
         searchController = new AtlasSearchController(capi);
@@ -495,6 +534,13 @@ public sealed class ModernAtlasDialog : GuiDialog
         ClearOreHover();
         ClearSearch();
         ResetPointerDrag();
+        tileScreenshot.ClearStatus();
+        pendingScreenshotRequest = false;
+        screenshotStatusOverride = null;
+        screenshotCameraSnapshotted = false;
+        screenshotFrozenCloudOffset = null;
+        screenshotProgressModal?.Dispose();
+        screenshotProgressModal = null;
         atlasAnimationSeconds = 0;
         loggedEntityModels = false;
         loggedScrollWeatherDiagnostic = false;
@@ -562,6 +608,16 @@ public sealed class ModernAtlasDialog : GuiDialog
             pendingInterfaceRecompose = false;
             RecomposeInterface();
         }
+        if (pendingMapLayerPanelRecompose)
+        {
+            pendingMapLayerPanelRecompose = false;
+            RecomposeMapLayerPanel();
+        }
+        if (pendingScreenshotPanelRecompose)
+        {
+            pendingScreenshotPanelRecompose = false;
+            RecomposeScreenshotPanel();
+        }
         AdvancePausedAnimation();
         AdvanceCamera(atlasRealDeltaTime);
         mapLayerTexture.Advance();
@@ -571,6 +627,10 @@ public sealed class ModernAtlasDialog : GuiDialog
                 capi.Input.MouseY
             ) == true
             || mapLayerPanelBounds?.PointInside(
+                capi.Input.MouseX,
+                capi.Input.MouseY
+            ) == true
+            || screenshotPanelBounds?.PointInside(
                 capi.Input.MouseX,
                 capi.Input.MouseY
             ) == true;
@@ -587,6 +647,10 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (freshAtlasFrame && rendered)
         {
             lastAtlasWorldRenderMilliseconds = capi.ElapsedMilliseconds;
+            if (pendingScreenshotRequest)
+            {
+                AdvanceTileScreenshot();
+            }
         }
         if (SearchModeActive)
         {
@@ -741,8 +805,8 @@ public sealed class ModernAtlasDialog : GuiDialog
             $"View distance: {GameViewDistance}"
         );
         searchPanel?.GetDynamicText("search-status").SetNewText(searchController.StatusText);
-        mapLayerPanel?.GetDynamicText("layer-status").SetNewText(mapLayerTexture.StatusText);
-        mapLayerPanel?.GetDynamicText("layer-legend").SetNewText(
+        mapLayerPanel?.GetDynamicText("layer-status")?.SetNewText(mapLayerTexture.StatusText);
+        mapLayerPanel?.GetDynamicText("layer-legend")?.SetNewText(
             activeMapLayer.DetailedLegend()
         );
         if (!interfaceHidden)
@@ -756,11 +820,13 @@ public sealed class ModernAtlasDialog : GuiDialog
             {
                 mapLayerPanel?.Render(deltaTime);
             }
+            screenshotPanel?.Render(deltaTime);
             if (SearchModeActive)
             {
                 searchPanel?.Render(deltaTime);
             }
             RenderUnitInspection(deltaTime);
+            screenshotProgressModal?.Render(deltaTime);
             if (settingsModalOpen)
             {
                 settingsModal?.Render(deltaTime);
@@ -785,17 +851,23 @@ public sealed class ModernAtlasDialog : GuiDialog
         // Render the optional hand scene after every interactive composer.
         // Its private shader state can therefore never suppress SETTINGS,
         // EXIT or other atlas controls, even if a driver rejects the scene.
-        compassRenderer.Render(
-            config.ShowPlayerCompass,
-            HandheldInstrumentMode == "time",
-            HandheldInstrumentHour,
-            HandheldInstrumentShowsTime,
-            yawDegrees,
-            AtlasViewport,
-            atlasRealDeltaTime
-        );
+        // While a screenshot is being captured the handheld instrument stays
+        // hidden so the framed map is clean.
+        if (!pendingScreenshotRequest)
+        {
+            compassRenderer.Render(
+                config.ShowPlayerCompass,
+                HandheldInstrumentMode == "time",
+                HandheldInstrumentHour,
+                HandheldInstrumentShowsTime,
+                yawDegrees,
+                AtlasViewport,
+                atlasRealDeltaTime
+            );
+        }
         ForceOpaqueWindowAlpha();
         capi.Render.GetEngineShader(EnumShaderProgram.Gui).Use();
+        UpdateScreenshotStatusText();
         CaptureAutomatedSmokeScreenshot();
         AdvanceAutomatedPresentationSwitchTest();
         AdvanceAutomatedSmokeTest();
@@ -829,6 +901,12 @@ public sealed class ModernAtlasDialog : GuiDialog
             args.Handled = true;
             return;
         }
+        if (!interfaceHidden && screenshotProgressModal != null)
+        {
+            screenshotProgressModal.OnMouseDown(args);
+            args.Handled = true;
+            return;
+        }
         if (!interfaceHidden && settingsModalOpen)
         {
             settingsModal?.OnMouseDown(args);
@@ -856,6 +934,8 @@ public sealed class ModernAtlasDialog : GuiDialog
                 mapLayerPanel?.OnMouseDown(args);
                 if (args.Handled) return;
             }
+            screenshotPanel?.OnMouseDown(args);
+            if (args.Handled) return;
             if (CreativeCheatSettingsAvailable)
             {
                 creativeSettingsShortcut?.OnMouseDown(args);
@@ -915,6 +995,12 @@ public sealed class ModernAtlasDialog : GuiDialog
             args.Handled = true;
             return;
         }
+        if (!interfaceHidden && screenshotProgressModal != null)
+        {
+            screenshotProgressModal.OnMouseUp(args);
+            args.Handled = true;
+            return;
+        }
         if (!interfaceHidden && settingsModalOpen)
         {
             settingsModal?.OnMouseUp(args);
@@ -958,6 +1044,8 @@ public sealed class ModernAtlasDialog : GuiDialog
                 mapLayerPanel?.OnMouseUp(args);
                 if (args.Handled) return;
             }
+            screenshotPanel?.OnMouseUp(args);
+            if (args.Handled) return;
             if (CreativeCheatSettingsAvailable)
             {
                 creativeSettingsShortcut?.OnMouseUp(args);
@@ -989,6 +1077,13 @@ public sealed class ModernAtlasDialog : GuiDialog
         {
             ClearOreHover();
             creativeSettingsModal?.OnMouseMove(args);
+            args.Handled = true;
+            return;
+        }
+        if (!interfaceHidden && screenshotProgressModal != null)
+        {
+            ClearOreHover();
+            screenshotProgressModal.OnMouseMove(args);
             args.Handled = true;
             return;
         }
@@ -1041,6 +1136,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         {
             if (SearchModeActive) searchPanel?.OnMouseMove(args);
             if (MapLayerControlsVisible) mapLayerPanel?.OnMouseMove(args);
+            screenshotPanel?.OnMouseMove(args);
             if (CreativeCheatSettingsAvailable) creativeSettingsShortcut?.OnMouseMove(args);
             overlay?.OnMouseMove(args);
         }
@@ -1078,11 +1174,19 @@ public sealed class ModernAtlasDialog : GuiDialog
             args.SetHandled();
             return;
         }
+        if (!interfaceHidden && screenshotProgressModal != null)
+        {
+            screenshotProgressModal.OnMouseWheel(args);
+            args.SetHandled();
+            return;
+        }
         if (!interfaceHidden)
         {
             if (SearchModeActive) searchPanel?.OnMouseWheel(args);
             if (args.IsHandled) return;
             if (MapLayerControlsVisible) mapLayerPanel?.OnMouseWheel(args);
+            if (args.IsHandled) return;
+            screenshotPanel?.OnMouseWheel(args);
             if (args.IsHandled) return;
             if (CreativeCheatSettingsAvailable) creativeSettingsShortcut?.OnMouseWheel(args);
             if (args.IsHandled) return;
@@ -1136,7 +1240,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (visualLabModalOpen
             || performanceModalOpen
             || creativeSettingsModalOpen
-            || settingsModalOpen)
+            || settingsModalOpen
+            || screenshotProgressModal != null)
         {
             args.Handled = true;
             return;
@@ -1220,6 +1325,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     public override void OnGuiClosed()
     {
         CommitPendingPresentationPreference();
+        CancelScreenshotCapture();
         presentationChangeCoordinator.Reset(config.RenderOnScroll);
         overlay?.UnfocusOwnElements();
         searchPanel?.UnfocusOwnElements();
@@ -1564,6 +1670,10 @@ public sealed class ModernAtlasDialog : GuiDialog
             config.PerformanceLightingEnabled;
         automatedOriginalHideVegetation = config.HideVegetation;
         automatedOriginalCheatModeEnabled = cheatModeEnabled;
+        automatedOriginalScreenshotScale = config.ScreenshotScale;
+        // The automated capture always uses a 2x2 tile grid so the tiled
+        // pipeline is exercised without a large multi-frame sequence.
+        config.ScreenshotScale = 2;
         automatedSmokeTestPreferencesCaptured = true;
         if (capi.IsSinglePlayer)
         {
@@ -1607,6 +1717,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestUnitInspectionPassed = false;
         automatedSmokeTestSearchInputAttempted = false;
         automatedSmokeTestSearchInputPassed = false;
+        automatedScreenshotCaptureRequested = false;
+        automatedScreenshotCapturePassed = false;
         automatedSmokeTestBilingualSearchPassed =
             searchController.ValidateBilingualSearchForAutomatedTest(
                 out string languageDiagnostic
@@ -1664,7 +1776,43 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (!automatedSmokeTestActive) return;
 
         automatedSmokeTestElapsedSeconds += atlasRealDeltaTime;
-        bool passed = AutomatedSmokeTestRenderedExactWorld
+        if (automatedScreenshotCaptureRequested && !automatedScreenshotCapturePassed)
+        {
+            string? capturedPath = tileScreenshot.LastSavedPath;
+            string? capturedError = tileScreenshot.LastError;
+            bool cameraRestored = !pendingScreenshotRequest
+                && Math.Abs(zoom - automatedScreenshotBaselineZoom) < 0.001f
+                && Math.Abs(targetZoom - automatedScreenshotBaselineZoom) < 0.001f
+                && Math.Abs(centerX - automatedScreenshotBaselineCenterX) < 0.001
+                && Math.Abs(centerY - automatedScreenshotBaselineCenterY) < 0.001
+                && Math.Abs(centerZ - automatedScreenshotBaselineCenterZ) < 0.001;
+            if (capturedPath != null
+                && File.Exists(capturedPath)
+                && !tileScreenshot.Busy
+                && cameraRestored)
+            {
+                automatedScreenshotCapturePassed = true;
+                CloseScreenshotProgressModal();
+                capi.Logger.Notification(
+                    "[ModernAtlas] Automated tiled-screenshot capture passed: {0}; the atlas camera was restored.",
+                    capturedPath
+                );
+            }
+            else if (capturedError != null)
+            {
+                automatedScreenshotCapturePassed = false;
+                automatedScreenshotCaptureRequested = false;
+                capi.Logger.Error(
+                    "[ModernAtlas] Automated tiled-screenshot capture failed: {0}.",
+                    capturedError
+                );
+            }
+        }
+        // Every other automated step must be complete before the tiled
+        // capture starts. The map-layer and presentation exercises move the
+        // camera; queueing earlier would make the camera-restore comparison
+        // race their legitimate zoom changes.
+        bool smokeStepsComplete = AutomatedSmokeTestRenderedExactWorld
             && automatedSmokeTestSafeSurfaceFrameRendered
             && (!automatedSmokeTestRequiresUnlockedPitch
                 || automatedSmokeTestRenderedAtPitchFloor)
@@ -1681,13 +1829,61 @@ public sealed class ModernAtlasDialog : GuiDialog
             && automatedSmokeTestMapLayerPassed
             && automatedSmokeTestPerformanceModeRendered
             && automatedSmokeTestPresentationPassed;
+        if (smokeStepsComplete && !automatedScreenshotCaptureRequested)
+        {
+            if (!config.RenderOnScroll)
+            {
+                // The presentation test ends in fullscreen mode. Return to
+                // the scroll viewport first so the capture exercises the
+                // scroll-aspect tile cropping as well. Request only once:
+                // re-requesting every frame would restart the debounce timer.
+                if (!presentationChangeCoordinator.HasPending)
+                {
+                    OnRenderOnScrollToggled(true);
+                }
+            }
+            else if (!presentationChangeCoordinator.HasPending)
+            {
+                automatedScreenshotBaselineZoom = zoom;
+                automatedScreenshotBaselineCenterX = centerX;
+                automatedScreenshotBaselineCenterY = centerY;
+                automatedScreenshotBaselineCenterZ = centerZ;
+                // Save the live viewport frame right before the capture, so
+                // the stitched PNG can be compared against this reference to
+                // prove the tile order and orientation.
+                string? referencePath = Environment.GetEnvironmentVariable(
+                    SmokeScreenshotEnvironmentVariable
+                );
+                if (!string.IsNullOrWhiteSpace(referencePath))
+                {
+                    string prefix = referencePath.EndsWith(
+                        ".png",
+                        StringComparison.OrdinalIgnoreCase
+                    )
+                        ? referencePath[..^4]
+                        : referencePath;
+                    TrySaveAutomatedSmokeScreenshot(
+                        $"{prefix}-screenshot-view.png"
+                    );
+                }
+                TakeScreenshot();
+                automatedScreenshotCaptureRequested = pendingScreenshotRequest;
+                capi.Logger.Notification(
+                    "[ModernAtlas] Automated smoke test queued a {0}x{0} tiled atlas screenshot.",
+                    Math.Clamp(config.ScreenshotScale, 1, 20)
+                );
+            }
+        }
+        bool passed = smokeStepsComplete
+            && automatedScreenshotCaptureRequested
+            && automatedScreenshotCapturePassed;
         if (passed && automatedSmokeTestElapsedSeconds < 3f) return;
         if (!passed && automatedSmokeTestElapsedSeconds < 60f) return;
 
         if (!passed)
         {
             capi.Logger.Error(
-                "[ModernAtlas] Automated smoke summary: exact={0}, safeSurface={1}, pitch={2}/{3}, interface={4}, unit={5}/{6}, searchInput={7}, bilingual={8}, ore={9}, creativeOre={10}, partialZoom={11}, maximumZoom={12}, search={13}(phase={14}), layers={15}(phase={16}), performance={17}(selected={18}, renderedVegetationHidden={19}, flatLighting={20}), presentation={21}.",
+                "[ModernAtlas] Automated smoke summary: exact={0}, safeSurface={1}, pitch={2}/{3}, interface={4}, unit={5}/{6}, searchInput={7}, bilingual={8}, ore={9}, creativeOre={10}, partialZoom={11}, maximumZoom={12}, search={13}(phase={14}), layers={15}(phase={16}), performance={17}(selected={18}, renderedVegetationHidden={19}, flatLighting={20}), presentation={21}, screenshotCapture={22}(requested={23}).",
                 AutomatedSmokeTestRenderedExactWorld,
                 automatedSmokeTestSafeSurfaceFrameRendered,
                 automatedSmokeTestRenderedAtPitchFloor,
@@ -1709,7 +1905,9 @@ public sealed class ModernAtlasDialog : GuiDialog
                 automatedSmokeTestPerformanceModeSelected,
                 exactChunkRenderer?.LastRenderedVegetationHidden ?? false,
                 !(exactChunkRenderer?.LastRenderedPerformanceLightingEnabled ?? true),
-                automatedSmokeTestPresentationPassed
+                automatedSmokeTestPresentationPassed,
+                automatedScreenshotCapturePassed,
+                automatedScreenshotCaptureRequested
             );
         }
 
@@ -1847,6 +2045,60 @@ public sealed class ModernAtlasDialog : GuiDialog
         bool settingsClosedByClick = settingsOpenedByClick
             && ClickAtlasControlForAutomatedTest(settingsModal, "settings-close")
             && !settingsModalOpen;
+        // The screenshot panel lives in the main atlas UI under the modals.
+        // Its clicks are only valid while the settings modal is closed, and
+        // the collapsed panel must expand first. The toggle defers its own
+        // recomposition, so the exercise applies it synchronously.
+        bool screenshotToggleClicked = settingsClosedByClick
+            && ClickAtlasControlForAutomatedTest(screenshotPanel, "shot-toggle")
+            && ScreenshotPanelExpanded;
+        if (screenshotToggleClicked)
+        {
+            pendingScreenshotPanelRecompose = false;
+            RecomposeScreenshotPanel();
+        }
+        bool screenshotPanelExpanded = screenshotToggleClicked
+            && screenshotPanel?.GetElement("shot-scale") is GuiElementAtlasChoice;
+        int screenshotScaleBefore = config.ScreenshotScale;
+        bool screenshotScaleChanged = false;
+        if (screenshotPanelExpanded
+            && ClickAtlasControlForAutomatedTest(screenshotPanel, "shot-scale"))
+        {
+            // The dropdown list itself cannot be driven without real mouse
+            // input; invoke its handler the same way the player's selection
+            // would, then restore the original value.
+            OnScreenshotScaleChanged(
+                screenshotScaleBefore == 4 ? "1" : "4",
+                true
+            );
+            screenshotScaleChanged = config.ScreenshotScale != screenshotScaleBefore;
+            OnScreenshotScaleChanged(screenshotScaleBefore.ToString(), true);
+        }
+        bool screenshotScaleRestored = screenshotScaleChanged
+            && config.ScreenshotScale == screenshotScaleBefore;
+        // Collapse and re-expand the map-layer panel. The collapsed panel
+        // lacks the dropdown and status elements, which previously crashed
+        // the per-frame status updates.
+        bool mapLayerToggleClicked = settingsClosedByClick
+            && ClickAtlasControlForAutomatedTest(mapLayerPanel, "map-layer-toggle")
+            && mapLayerPanelCollapsed;
+        if (mapLayerToggleClicked)
+        {
+            pendingMapLayerPanelRecompose = false;
+            RecomposeMapLayerPanel();
+        }
+        bool mapLayerCollapsedSafe = mapLayerToggleClicked
+            && mapLayerPanel?.GetElement("map-layer") == null;
+        bool mapLayerReExpanded = mapLayerCollapsedSafe
+            && ClickAtlasControlForAutomatedTest(mapLayerPanel, "map-layer-toggle")
+            && !mapLayerPanelCollapsed;
+        if (mapLayerReExpanded)
+        {
+            pendingMapLayerPanelRecompose = false;
+            RecomposeMapLayerPanel();
+        }
+        mapLayerReExpanded = mapLayerReExpanded
+            && mapLayerPanel?.GetElement("map-layer") is GuiElementDropDown;
         bool creativeOpenedByClick = accessAvailable
             && ClickAtlasControlForAutomatedTest(
                 creativeSettingsShortcut,
@@ -1879,7 +2131,10 @@ public sealed class ModernAtlasDialog : GuiDialog
 
         bool hidden = ClickAtlasControlForAutomatedTest(overlay, "hide-ui-button")
             && interfaceHidden;
-        bool restored = HandleEscape() && !interfaceHidden && IsOpened();
+        // Only press Escape when the UI really is hidden. Otherwise this
+        // destructive call could close the atlas or an open modal instead of
+        // restoring the interface.
+        bool restored = hidden && HandleEscape() && !interfaceHidden && IsOpened();
         bool neumorphicControls = overlay?.GetElement("settings-button")
                 is GuiElementAtlasButton
             && settingsModal?.GetElement("map-layers") is GuiElementAtlasSwitch
@@ -1895,6 +2150,10 @@ public sealed class ModernAtlasDialog : GuiDialog
                 is GuiElementAtlasSwitch
             && creativeSettingsModal?.GetElement("camera-angle-lock")
                 is GuiElementAtlasSwitch
+            && screenshotPanel?.GetElement("shot-scale")
+                is GuiElementAtlasChoice
+            && screenshotPanel?.GetElement("shot-take")
+                is GuiElementAtlasButton
             && mapLayerPanel?.GetElement("map-layer") is GuiElementDropDown;
         int renderedEntityCount = exactChunkRenderer?.LastRenderedEntityCount ?? 0;
         bool heldItemsSuppressed = renderedEntityCount > 0
@@ -1915,6 +2174,12 @@ public sealed class ModernAtlasDialog : GuiDialog
             && sliderBoundaryDragClamped
             && liveLightingRestored
             && timeInstrumentSelected
+            && screenshotPanelExpanded
+            && screenshotScaleChanged
+            && screenshotScaleRestored
+            && mapLayerToggleClicked
+            && mapLayerCollapsedSafe
+            && mapLayerReExpanded
             && settingsClosedByClick
             && creativeOpenedByClick
             && creativeClosedByClick
@@ -1931,14 +2196,14 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (automatedSmokeTestInterfaceControlsPassed)
         {
             capi.Logger.Notification(
-                "[ModernAtlas] Automated smoke test exercised the toggleable Settings panel, compact neumorphic controls, Compass/Time instrument selector, map-layer and skip-opening switches, Creative/Cheat cave/search/camera controls, Escape-restored hidden UI and held-item suppression for {0} living models; debounced presentation coverage is running next.",
+                "[ModernAtlas] Automated smoke test exercised the toggleable Settings panel, compact neumorphic controls, Compass/Time instrument selector, map-layer and skip-opening switches, Creative/Cheat cave/search/camera controls, the Screenshot scale selector with a queued tiled capture, Escape-restored hidden UI and held-item suppression for {0} living models; debounced presentation coverage is running next.",
                 renderedEntityCount
             );
         }
         else
         {
             capi.Logger.Error(
-                "[ModernAtlas] Automated interface-controls test failed: access={0}, settingsOpen/toggle/reopen={1}/{2}/{3}, mapLayerSwitch={4}/{5}, skipOpening={6}/{7}, presentationControl={8}, fixedLighting={9}/{10}, sliderBoundary={11}/{12}, timeInstrument={13}, settingsClose={14}, creativeOpen={15}, creativeClose={16}, layers={17}, search={18}, safeSurface={19}, cave={20}, angleLock={21}, yaw={22}, hidden={23}, restored={24}, neumorphic={25}, heldItems={26}/{27}.",
+                "[ModernAtlas] Automated interface-controls test failed: access={0}, settingsOpen/toggle/reopen={1}/{2}/{3}, mapLayerSwitch={4}/{5}, skipOpening={6}/{7}, presentationControl={8}, fixedLighting={9}/{10}, sliderBoundary={11}/{12}, timeInstrument={13}, screenshotPanel={14}, screenshotScale={15}/{16}, mapLayerToggle={17}/{18}/{19}, settingsClose={20}, creativeOpen={21}, creativeClose={22}, layers={23}, search={24}, safeSurface={25}, cave={26}, angleLock={27}, yaw={28}, hidden={29}, restored={30}, neumorphic={31}, heldItems={32}/{33}.",
                 accessAvailable,
                 settingsOpenedByClick,
                 settingsClosedByToggle,
@@ -1953,6 +2218,12 @@ public sealed class ModernAtlasDialog : GuiDialog
                 sliderBoundaryDragHandled,
                 sliderBoundaryDragClamped,
                 timeInstrumentSelected,
+                screenshotPanelExpanded,
+                screenshotScaleChanged,
+                screenshotScaleRestored,
+                mapLayerToggleClicked,
+                mapLayerCollapsedSafe,
+                mapLayerReExpanded,
                 settingsClosedByClick,
                 creativeOpenedByClick,
                 creativeClosedByClick,
@@ -2619,6 +2890,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestPreferencesCaptured = false;
         bool accessChanged = cheatModeEnabled != automatedOriginalCheatModeEnabled;
         cheatModeEnabled = automatedOriginalCheatModeEnabled;
+        config.ScreenshotScale = automatedOriginalScreenshotScale;
+        SyncScreenshotSettingsControls();
         config.MapLayersEnabled = automatedOriginalMapLayersEnabled;
         config.CaveModeEnabled = automatedOriginalCaveModeEnabled;
         config.SearchModeEnabled = automatedOriginalSearchModeEnabled;
@@ -2639,6 +2912,8 @@ public sealed class ModernAtlasDialog : GuiDialog
             config.RenderOnScroll = automatedOriginalRenderOnScroll;
             pendingInterfaceRecompose = true;
         }
+        screenshotPanelCollapsed = true;
+        mapLayerPanelCollapsed = false;
         if (!SearchModeActive)
         {
             ClearSearch();
@@ -3182,6 +3457,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestUnitInspectionPassed = false;
         automatedSmokeTestSearchInputAttempted = false;
         automatedSmokeTestSearchInputPassed = false;
+        automatedScreenshotCaptureRequested = false;
+        automatedScreenshotCapturePassed = false;
         automatedSmokeTestBilingualSearchPassed = false;
         automatedSmokeTestOreConcealmentPassed = false;
         automatedSmokeTestForceSurvivalOreConcealment = false;
@@ -3210,6 +3487,12 @@ public sealed class ModernAtlasDialog : GuiDialog
         interfaceHidden = false;
         selectedEntityId = null;
         searchController.Clear();
+        pendingScreenshotRequest = false;
+        screenshotStatusOverride = null;
+        tileScreenshot.Cancel();
+        RestoreScreenshotCamera();
+        screenshotProgressModal?.Dispose();
+        screenshotProgressModal = null;
         activeMapLayer = AtlasMapLayer.TexturedTerrain;
         selectedOreCode = null;
         ClearOreHover();
@@ -3293,8 +3576,13 @@ public sealed class ModernAtlasDialog : GuiDialog
         creativeSettingsModal = null;
         visualLabModal?.Dispose();
         visualLabModal = null;
+        screenshotPanel?.Dispose();
+        screenshotPanel = null;
+        screenshotProgressModal?.Dispose();
+        screenshotProgressModal = null;
         unitPanel?.Dispose();
         unitPanel = null;
+        tileScreenshot.Dispose();
         base.Dispose();
     }
 
@@ -3308,6 +3596,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         performanceModal?.Dispose();
         creativeSettingsModal?.Dispose();
         visualLabModal?.Dispose();
+        screenshotPanel?.Dispose();
+        screenshotProgressModal?.Dispose();
         unitPanel?.Dispose();
         overlay = null;
         searchPanel = null;
@@ -3317,7 +3607,18 @@ public sealed class ModernAtlasDialog : GuiDialog
         performanceModal = null;
         creativeSettingsModal = null;
         visualLabModal = null;
+        screenshotPanel = null;
+        screenshotProgressModal = null;
         unitPanel = null;
+        if (tileScreenshot.Busy)
+        {
+            // A presentation recomposition cannot happen through user input
+            // while the capture modal owns the pointer, but automated tests
+            // may drive both; never leave the camera pinned to a tile.
+            tileScreenshot.Cancel();
+            RestoreScreenshotCamera();
+            pendingScreenshotRequest = false;
+        }
         ComposeOverlay();
         composedFrameWidth = capi.Render.FrameWidth;
         composedFrameHeight = capi.Render.FrameHeight;
@@ -3382,6 +3683,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         double actionX = contentX + relativeActionX;
         double compassY = contentY + 56;
         double hideUiY = contentY + (CreativeCheatSettingsAvailable ? 148 : 102);
+        double screenshotY = hideUiY + 46;
         double headerWidth = Math.Min(
             430,
             Math.Max(1, relativeActionX - 20)
@@ -3456,6 +3758,19 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "hide-ui-button",
                 AtlasButtonStyle.Dark
             )
+            .AddAtlasButton(
+                "SCREENSHOT",
+                TakeScreenshot,
+                ElementBounds.Fixed(actionX, screenshotY, 214, 44),
+                "screenshot-button",
+                AtlasButtonStyle.Dark
+            )
+            .AddDynamicText(
+                "",
+                AtlasUiStyle.DetailFont(9),
+                ElementBounds.Fixed(actionX, screenshotY + 50, 214, 60),
+                "screenshot-status"
+            )
             .Compose(false);
 
         creativeSettingsShortcut = capi.Gui.CreateCompo(
@@ -3514,6 +3829,21 @@ public sealed class ModernAtlasDialog : GuiDialog
             contentY + (SearchModeActive ? 202 : headerHeight + 22),
             Math.Min(560, Math.Max(200, relativeActionX - 36))
         );
+
+        // The screenshot panel stacks in the left column below the map-layer
+        // panel (or the search panel / header when those are hidden).
+        double screenshotPanelY = contentY + headerHeight + 30;
+        if (MapLayerControlsVisible && mapLayerPanelBounds != null)
+        {
+            screenshotPanelY = mapLayerPanelBounds.fixedY
+                + mapLayerPanelBounds.fixedHeight + 8;
+        }
+        else if (SearchModeActive && searchPanelBounds != null)
+        {
+            screenshotPanelY = searchPanelBounds.fixedY
+                + searchPanelBounds.fixedHeight + 8;
+        }
+        ComposeScreenshotPanel(contentX, screenshotPanelY);
 
         ElementBounds unitRoot = config.RenderOnScroll
             ? ElementBounds.Fixed(
@@ -3955,10 +4285,179 @@ public sealed class ModernAtlasDialog : GuiDialog
             )
             .Compose();
         ConfigureVisualLabSliders();
+
         SyncSettingsControls();
         SyncPerformanceControls();
         SyncCreativeSettingsControls();
     }
+
+    /// <summary>
+    /// Compact collapsible screenshot panel for the main atlas UI, placed in
+    /// the left column under the search and map-layer panels. Collapsed it is
+    /// a slim bar with a quick TAKE action; expanded it exposes the full
+    /// styling controls.
+    /// </summary>
+    private void ComposeScreenshotPanel(double contentX, double contentY)
+    {
+        const double panelWidth = 560;
+        if (screenshotPanelCollapsed)
+        {
+            ElementBounds root = ElementBounds.Fixed(contentX + 18, contentY, panelWidth, 52);
+            screenshotPanelBounds = root;
+            screenshotPanel = capi.Gui.CreateCompo("modernatlas-screenshot", root)
+                .AddStaticCustomDraw(
+                    ElementBounds.Fixed(0, 0, panelWidth, 52),
+                    AtlasUiStyle.DrawCard
+                )
+                .AddAtlasButton(
+                    "▸",
+                    ToggleScreenshotPanel,
+                    ElementBounds.Fixed(8, 6, 40, 40),
+                    "shot-toggle",
+                    AtlasButtonStyle.Icon
+                )
+                .AddStaticText(
+                    "SCREENSHOT",
+                    AtlasUiStyle.LabelFont(12),
+                    ElementBounds.Fixed(58, 14, 190, 24)
+                )
+                .AddDynamicText(
+                    "",
+                    AtlasUiStyle.DetailFont(9),
+                    ElementBounds.Fixed(250, 8, 196, 36),
+                    "shot-collapsed-status"
+                )
+                .AddAtlasButton(
+                    "TAKE",
+                    TakeScreenshot,
+                    ElementBounds.Fixed(450, 6, 104, 40),
+                    "shot-take",
+                    AtlasButtonStyle.Dark
+                )
+                .Compose();
+            screenshotPanel.GetDynamicText("shot-collapsed-status")
+                ?.SetNewText(BuildScreenshotCollapsedStatus());
+            return;
+        }
+
+        ElementBounds rootExpanded = ElementBounds.Fixed(contentX + 18, contentY, panelWidth, 168);
+        screenshotPanelBounds = rootExpanded;
+        screenshotPanel = capi.Gui.CreateCompo("modernatlas-screenshot", rootExpanded)
+            .AddStaticCustomDraw(
+                ElementBounds.Fixed(0, 0, panelWidth, 168),
+                AtlasUiStyle.DrawCard
+            )
+            .AddAtlasButton(
+                "▾",
+                ToggleScreenshotPanel,
+                ElementBounds.Fixed(8, 6, 40, 40),
+                "shot-toggle",
+                AtlasButtonStyle.Icon
+            )
+            .AddStaticText(
+                "SCREENSHOT",
+                AtlasUiStyle.LabelFont(12),
+                ElementBounds.Fixed(58, 14, 84, 24)
+            )
+            .AddStaticText(
+                "Scale",
+                AtlasUiStyle.DetailFont(11),
+                ElementBounds.Fixed(148, 18, 60, 24)
+            )
+            .AddAtlasChoice(
+                new[]
+                {
+                    "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+                    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20"
+                },
+                new[]
+                {
+                    "1x", "2x", "3x", "4x", "5x", "6x", "7x", "8x", "9x", "10x",
+                    "11x", "12x", "13x", "14x", "15x", "16x", "17x", "18x", "19x", "20x"
+                },
+                ScreenshotScaleIndex,
+                OnScreenshotScaleChanged,
+                ElementBounds.Fixed(208, 8, 130, 44),
+                "shot-scale"
+            )
+            .AddAtlasButton(
+                "TAKE",
+                TakeScreenshot,
+                ElementBounds.Fixed(450, 8, 104, 44),
+                "shot-take",
+                AtlasButtonStyle.Dark
+            )
+            .AddStaticText(
+                "Captures the current view as a tile grid and stitches one seamless image. The camera moves automatically and returns when done.",
+                AtlasUiStyle.DetailFont(11),
+                ElementBounds.Fixed(18, 62, 524, 60)
+            )
+            .AddDynamicText(
+                "",
+                AtlasUiStyle.DetailFont(9),
+                ElementBounds.Fixed(18, 126, 524, 36),
+                "shot-status"
+            )
+            .Compose();
+        ConfigureScreenshotSettingsControls();
+    }
+
+    private void ConfigureScreenshotSettingsControls()
+    {
+        screenshotPanel.GetAtlasChoice("shot-scale")?.SetSelectedIndex(
+            ScreenshotScaleIndex
+        );
+    }
+
+    private void SyncScreenshotSettingsControls()
+    {
+        ConfigureScreenshotSettingsControls();
+    }
+
+    private bool ToggleScreenshotPanel()
+    {
+        screenshotPanelCollapsed = !screenshotPanelCollapsed;
+        // Defer the recomposition: disposing the composer inside its own
+        // click event can crash the engine's element iteration.
+        pendingScreenshotPanelRecompose = true;
+        return true;
+    }
+
+    internal bool ScreenshotPanelExpanded => !screenshotPanelCollapsed;
+
+    private string BuildScreenshotCollapsedStatus()
+    {
+        int scale = Math.Clamp(config.ScreenshotScale, 1, 20);
+        return $"Tiled {scale}x{scale}";
+    }
+
+    private void RecomposeScreenshotPanel()
+    {
+        screenshotPanel?.Dispose();
+        screenshotPanel = null;
+        double guiScale = Math.Max(0.5, RuntimeEnv.GUIScale);
+        AtlasViewportBounds viewport = AtlasViewport;
+        double contentX = config.RenderOnScroll ? viewport.X / guiScale : 0;
+        double contentY = config.RenderOnScroll ? viewport.Y / guiScale : 0;
+        double guiWidth = viewport.Width / guiScale;
+        double relativeActionX = Math.Max(18, guiWidth - 232);
+        double headerWidth = Math.Min(430, Math.Max(1, relativeActionX - 20));
+        double headerHeight = headerWidth < 230 ? 92 : headerWidth < 390 ? 78 : 50;
+        double screenshotPanelY = contentY + headerHeight + 30;
+        if (MapLayerControlsVisible && mapLayerPanelBounds != null)
+        {
+            screenshotPanelY = mapLayerPanelBounds.fixedY
+                + mapLayerPanelBounds.fixedHeight + 8;
+        }
+        else if (SearchModeActive && searchPanelBounds != null)
+        {
+            screenshotPanelY = searchPanelBounds.fixedY
+                + searchPanelBounds.fixedHeight + 8;
+        }
+        ComposeScreenshotPanel(contentX, screenshotPanelY);
+    }
+
+    private int ScreenshotScaleIndex => Math.Clamp(config.ScreenshotScale, 1, 20) - 1;
 
     private bool OpenSettingsModal()
     {
@@ -4095,6 +4594,332 @@ public sealed class ModernAtlasDialog : GuiDialog
         saveConfig();
         SyncVisualLabControls();
         return true;
+    }
+
+    private void OnScreenshotScaleChanged(string value, bool selected)
+    {
+        if (!selected) return;
+        if (int.TryParse(value, out int scale))
+        {
+            config.ScreenshotScale = Math.Clamp(scale, 1, 20);
+            saveConfig();
+        }
+        SyncScreenshotSettingsControls();
+    }
+
+    /// <summary>
+    /// Starts the tiled capture of the current camera view. Tile zero's
+    /// camera is applied immediately; every following tile is applied after
+    /// the previous tile's frame was read back.
+    /// </summary>
+    private bool TakeScreenshot()
+    {
+        if (tileScreenshot.Busy)
+        {
+            screenshotStatusOverride = "Previous screenshot is still being processed…";
+            screenshotStatusShownUntilMilliseconds = capi.ElapsedMilliseconds + 4000;
+            return true;
+        }
+        if (atlasFrameCacheTexture?.TextureId <= 0)
+        {
+            screenshotStatusOverride = "Atlas frame is not ready yet.";
+            screenshotStatusShownUntilMilliseconds = capi.ElapsedMilliseconds + 4000;
+            return true;
+        }
+
+        int gridSize = Math.Clamp(config.ScreenshotScale, 1, 20);
+        AtlasViewportBounds viewport = AtlasViewport;
+        float viewportAspect = viewport.Width / (float)Math.Max(1, viewport.Height);
+        if (!tileScreenshot.StartCapture(
+            gridSize,
+            zoom,
+            yawDegrees,
+            pitchDegrees,
+            viewportAspect
+        ))
+        {
+            screenshotStatusOverride = "Screenshot failed to start; see the log for details.";
+            screenshotStatusShownUntilMilliseconds = capi.ElapsedMilliseconds + 4000;
+            return true;
+        }
+
+        screenshotBaselineZoom = zoom;
+        screenshotBaselineTargetZoom = targetZoom;
+        screenshotBaselineCenterX = centerX;
+        screenshotBaselineCenterY = centerY;
+        screenshotBaselineCenterZ = centerZ;
+        screenshotBaselineTargetCenterX = targetCenterX;
+        screenshotBaselineTargetCenterZ = targetCenterZ;
+        screenshotCameraSnapshotted = true;
+
+        // Pin wind, water and cloud counters to one captured frame so every
+        // tile renders identical animated surfaces and the stitched image
+        // has no moving-water, drifting-cloud or waving-vegetation seams.
+        CaptureAnimationFrame();
+        screenshotFrozenWindWaveCounter = frozenWindWaveCounter;
+        screenshotFrozenWindWaveCounterHighFrequency =
+            frozenWindWaveCounterHighFrequency;
+        screenshotFrozenWaterStillCounter = frozenWaterStillCounter;
+        screenshotFrozenWaterFlowCounter = frozenWaterFlowCounter;
+        screenshotFrozenCloudOffset = exactChunkRenderer?.GetLiveCloudOffset();
+
+        pendingScreenshotRequest = true;
+        ApplyTileCamera(0);
+        // Force a fresh world frame for every tile instead of the throttled
+        // idle interval.
+        lastAtlasWorldRenderMilliseconds = 0;
+        OpenScreenshotProgressModal();
+        soundController.PlayPageTouch();
+        capi.Logger.Notification(
+            "[ModernAtlas] Queued a {0}x{0} tiled atlas screenshot of the current view.",
+            gridSize
+        );
+        return true;
+    }
+
+    /// <summary>
+    /// Runs once per rendered atlas frame while the tile grid is captured.
+    /// Reads the Primary sub-region for the just-rendered tile, then snaps
+    /// the camera to the next tile or restores the original view after the
+    /// last one.
+    /// </summary>
+    private void AdvanceTileScreenshot()
+    {
+        if (!tileScreenshot.CaptureCurrentFrame())
+        {
+            tileScreenshot.Cancel();
+            RestoreScreenshotCamera();
+            pendingScreenshotRequest = false;
+            screenshotStatusOverride = "Screenshot failed; see the log for details.";
+            screenshotStatusShownUntilMilliseconds = capi.ElapsedMilliseconds + 4000;
+            CloseScreenshotProgressModal();
+            return;
+        }
+
+        if (tileScreenshot.CaptureActive)
+        {
+            ApplyTileCamera(tileScreenshot.CurrentTile);
+            lastAtlasWorldRenderMilliseconds = 0;
+            return;
+        }
+
+        // The last tile is stored; the background stitcher now assembles the
+        // image while the camera returns to the player's original view.
+        RestoreScreenshotCamera();
+        pendingScreenshotRequest = false;
+        capi.Logger.Notification(
+            "[ModernAtlas] Captured {0} atlas tiles at {1}; stitching in the background.",
+            tileScreenshot.TotalTiles,
+            tileScreenshot.PendingPath
+        );
+    }
+
+    private void ApplyTileCamera(int tileIndex)
+    {
+        tileScreenshot.GetTileCamera(
+            tileIndex,
+            out float tileZoom,
+            out double offsetX,
+            out double offsetZ,
+            out double offsetY
+        );
+        zoom = tileZoom;
+        targetZoom = tileZoom;
+        centerX = screenshotBaselineCenterX + offsetX;
+        centerY = screenshotBaselineCenterY + offsetY;
+        centerZ = screenshotBaselineCenterZ + offsetZ;
+        targetCenterX = centerX;
+        targetCenterZ = centerZ;
+    }
+
+    private void RestoreScreenshotCamera()
+    {
+        if (!screenshotCameraSnapshotted) return;
+        screenshotCameraSnapshotted = false;
+        zoom = screenshotBaselineZoom;
+        targetZoom = screenshotBaselineTargetZoom;
+        centerX = screenshotBaselineCenterX;
+        centerY = screenshotBaselineCenterY;
+        centerZ = screenshotBaselineCenterZ;
+        targetCenterX = screenshotBaselineTargetCenterX;
+        targetCenterZ = screenshotBaselineTargetCenterZ;
+    }
+
+    private void CancelScreenshotCapture()
+    {
+        if (tileScreenshot.Busy)
+        {
+            tileScreenshot.Cancel();
+        }
+        RestoreScreenshotCamera();
+        pendingScreenshotRequest = false;
+        CloseScreenshotProgressModal();
+    }
+
+    private void OpenScreenshotProgressModal()
+    {
+        screenshotProgressModal?.Dispose();
+        ElementBounds root = ElementBounds.Fixed(0, 0, 540, 264)
+            .WithAlignment(EnumDialogArea.CenterMiddle);
+        screenshotProgressModal = capi.Gui.CreateCompo(
+                "modernatlas-screenshot-progress",
+                root
+            )
+            .AddStaticCustomDraw(
+                ElementBounds.Fixed(0, 0, 540, 264),
+                AtlasUiStyle.DrawCard
+            )
+            .AddStaticText(
+                "SCREENSHOT",
+                AtlasUiStyle.TitleFont(20),
+                ElementBounds.Fixed(76, 24, 400, 30)
+            )
+            .AddStaticCustomDraw(
+                ElementBounds.Fixed(26, 68, 488, 2),
+                AtlasUiStyle.DrawSeparator
+            )
+            .AddDynamicText(
+                "Taking screenshots, please wait…",
+                AtlasUiStyle.DetailFont(13),
+                ElementBounds.Fixed(28, 88, 484, 64),
+                "shot-progress"
+            )
+            .AddDynamicText(
+                "",
+                AtlasUiStyle.DetailFont(10),
+                ElementBounds.Fixed(28, 158, 484, 58),
+                "shot-result"
+            )
+            .AddAtlasButton(
+                "CANCEL / CLOSE",
+                CloseScreenshotProgressModal,
+                ElementBounds.Fixed(170, 222, 200, 40),
+                "shot-modal-close",
+                AtlasButtonStyle.Dark
+            )
+            .Compose(false);
+    }
+
+    /// <summary>Cancels a running capture or dismisses the finished status.</summary>
+    private bool CloseScreenshotProgressModal()
+    {
+        if (screenshotProgressModal == null) return true;
+        if (tileScreenshot.Busy)
+        {
+            tileScreenshot.Cancel();
+            RestoreScreenshotCamera();
+            pendingScreenshotRequest = false;
+            capi.Logger.Notification(
+                "[ModernAtlas] The tiled atlas screenshot was cancelled; the camera was restored."
+            );
+        }
+        screenshotProgressModal.Dispose();
+        screenshotProgressModal = null;
+        return true;
+    }
+
+    private void UpdateScreenshotStatusText()
+    {
+        string? text;
+        if (screenshotProgressModal != null)
+        {
+            if (tileScreenshot.CaptureActive)
+            {
+                text = $"Taking screenshots, please wait… (tile {tileScreenshot.CurrentTile + 1} of {tileScreenshot.TotalTiles})";
+            }
+            else if (tileScreenshot.Busy)
+            {
+                text = "Stitching and saving the screenshot…";
+            }
+            else
+            {
+                text = "Screenshot finished.";
+            }
+        }
+        else
+        {
+            string? lastPath = tileScreenshot.LastSavedPath;
+            string? lastError = tileScreenshot.LastError;
+            if (lastPath != null)
+            {
+                // The saved location stays readable until the atlas closes or
+                // a new capture replaces it; a short toast was not readable.
+                text = FormatScreenshotStatus("Saved:", lastPath);
+            }
+            else if (lastError != null)
+            {
+                text = $"Screenshot error: {lastError}";
+            }
+            else if (capi.ElapsedMilliseconds < screenshotStatusShownUntilMilliseconds)
+            {
+                text = screenshotStatusOverride;
+            }
+            else
+            {
+                text = null;
+            }
+        }
+        overlay?.GetDynamicText("screenshot-status")?.SetNewText(text ?? "");
+
+        if (screenshotProgressModal == null) return;
+        screenshotProgressModal.GetDynamicText("shot-progress")?.SetNewText(
+            text ?? ""
+        );
+        string result = "";
+        if (!tileScreenshot.Busy)
+        {
+            if (tileScreenshot.LastSavedPath != null)
+            {
+                result = FormatScreenshotStatus("Saved:", tileScreenshot.LastSavedPath);
+            }
+            else if (tileScreenshot.LastError != null)
+            {
+                result = $"Error: {tileScreenshot.LastError}";
+            }
+        }
+        screenshotProgressModal.GetDynamicText("shot-result")?.SetNewText(result);
+    }
+
+    /// <summary>
+    /// Wraps the full file path into short lines inside the atlas button
+    /// column so the text never extends under the physical scroll roller.
+    /// </summary>
+    private static string FormatScreenshotStatus(string prefix, string path)
+    {
+        const int maximumLineLength = 36;
+        string[] wrapped = WrapScreenshotPath(path, maximumLineLength);
+        if (wrapped.Length == 0) return prefix;
+        if (wrapped.Length == 1) return $"{prefix} {wrapped[0]}";
+
+        StringBuilder builder = new(prefix);
+        builder.Append(' ');
+        builder.Append(wrapped[0]);
+        for (int i = 1; i < wrapped.Length; i++)
+        {
+            builder.Append('\n');
+            builder.Append(wrapped[i]);
+        }
+        return builder.ToString();
+    }
+
+    private static string[] WrapScreenshotPath(string path, int maximumLineLength)
+    {
+        if (string.IsNullOrEmpty(path)) return Array.Empty<string>();
+
+        List<string> lines = new();
+        string remaining = path;
+        while (remaining.Length > maximumLineLength)
+        {
+            int cut = remaining.LastIndexOf(
+                System.IO.Path.DirectorySeparatorChar,
+                maximumLineLength - 1
+            );
+            if (cut <= 0) cut = maximumLineLength;
+            lines.Add(remaining[..cut]);
+            remaining = remaining[cut..];
+        }
+        if (remaining.Length > 0) lines.Add(remaining);
+        return lines.ToArray();
     }
 
     private bool CloseUnitInspection()
@@ -4299,6 +5124,11 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private bool HandleEscape()
     {
+        if (screenshotProgressModal != null)
+        {
+            CloseScreenshotProgressModal();
+            return true;
+        }
         if (interfaceHidden)
         {
             interfaceHidden = false;
@@ -4333,6 +5163,45 @@ public sealed class ModernAtlasDialog : GuiDialog
         double selectorWidth = compact
             ? Math.Max(90, panelWidth - 36)
             : Math.Max(90, panelWidth - 160);
+        if (mapLayerPanelCollapsed)
+        {
+            ElementBounds collapsedRoot = ElementBounds.Fixed(
+                contentX + 18,
+                contentY,
+                panelWidth,
+                52
+            );
+            mapLayerPanelBounds = collapsedRoot;
+            mapLayerPanel = capi.Gui.CreateCompo(
+                    "modernatlas-map-layer",
+                    collapsedRoot
+                )
+                .AddStaticCustomDraw(
+                    ElementBounds.Fixed(0, 0, panelWidth, 52),
+                    AtlasUiStyle.DrawCard
+                )
+                .AddAtlasButton(
+                    "▸",
+                    ToggleMapLayerPanel,
+                    ElementBounds.Fixed(8, 6, 40, 40),
+                    "map-layer-toggle",
+                    AtlasButtonStyle.Icon
+                )
+                .AddStaticText(
+                    "MAP LAYER",
+                    AtlasUiStyle.LabelFont(12),
+                    ElementBounds.Fixed(58, 14, 190, 24)
+                )
+                .AddStaticText(
+                    activeMapLayer.DisplayName(),
+                    AtlasUiStyle.DetailFont(10),
+                    ElementBounds.Fixed(250, 14, Math.Max(90, panelWidth - 268), 20)
+                )
+                .Compose(false);
+            synchronizedOreCodeRevision = mapLayerTexture.OreCodeRevision;
+            return;
+        }
+
         ElementBounds root = ElementBounds.Fixed(
             contentX + 18,
             contentY,
@@ -4345,10 +5214,17 @@ public sealed class ModernAtlasDialog : GuiDialog
                 ElementBounds.Fixed(0, 0, panelWidth, height),
                 AtlasUiStyle.DrawCard
             )
+            .AddAtlasButton(
+                "▾",
+                ToggleMapLayerPanel,
+                ElementBounds.Fixed(8, 8, 40, 40),
+                "map-layer-toggle",
+                AtlasButtonStyle.Icon
+            )
             .AddStaticText(
                 "MAP LAYER",
                 AtlasUiStyle.LabelFont(12),
-                ElementBounds.Fixed(18, 17, 124, 24)
+                ElementBounds.Fixed(58, 17, 124, 24)
             )
             .AddDropDown(
                 AtlasMapLayerInfo.Values,
@@ -4408,6 +5284,15 @@ public sealed class ModernAtlasDialog : GuiDialog
         synchronizedOreCodeRevision = mapLayerTexture.OreCodeRevision;
     }
 
+    private bool ToggleMapLayerPanel()
+    {
+        mapLayerPanelCollapsed = !mapLayerPanelCollapsed;
+        // Defer the recomposition: disposing the composer inside its own
+        // click event can crash the engine's element iteration.
+        pendingMapLayerPanelRecompose = true;
+        return true;
+    }
+
     private void RecomposeMapLayerPanel()
     {
         mapLayerPanel?.Dispose();
@@ -4428,6 +5313,22 @@ public sealed class ModernAtlasDialog : GuiDialog
             contentY + (SearchModeActive ? 202 : headerHeight + 22),
             Math.Min(560, Math.Max(200, relativeActionX - 36))
         );
+        // The map-layer panel height depends on the active layer. Reposition
+        // the screenshot panel so the two panels never overlap.
+        screenshotPanel?.Dispose();
+        screenshotPanel = null;
+        double screenshotPanelY = contentY + headerHeight + 30;
+        if (MapLayerControlsVisible && mapLayerPanelBounds != null)
+        {
+            screenshotPanelY = mapLayerPanelBounds.fixedY
+                + mapLayerPanelBounds.fixedHeight + 8;
+        }
+        else if (SearchModeActive && searchPanelBounds != null)
+        {
+            screenshotPanelY = searchPanelBounds.fixedY
+                + searchPanelBounds.fixedHeight + 8;
+        }
+        ComposeScreenshotPanel(contentX, screenshotPanelY);
         SyncMapLayerDropdown();
     }
 
@@ -5035,58 +5936,114 @@ public sealed class ModernAtlasDialog : GuiDialog
         AtlasViewportBounds viewport = AtlasViewport;
         float aspect = viewport.Width / (float)Math.Max(1, viewport.Height);
         float farPlane = Math.Max(2000, GameViewDistance * 6);
-        Mat4f.Ortho(projection, -zoom * aspect, zoom * aspect, -zoom, zoom, 0.1f, farPlane);
+        bool captureProjection = pendingScreenshotRequest;
+        float verticalHalfExtent = zoom;
+        float horizontalHalfExtent = zoom * aspect;
+        if (captureProjection)
+        {
+            // Tile capture: cover the tile's world area with square world
+            // pixels in Primary, then crop the sub-region on readback. In
+            // scroll presentation the map viewport is taller than the window
+            // aspect, so the vertical half-extent grows accordingly.
+            verticalHalfExtent = zoom * tileScreenshot.ProjectionVerticalFactor;
+            horizontalHalfExtent = verticalHalfExtent
+                * (render.FrameWidth / (float)Math.Max(1, render.FrameHeight));
+        }
+        Mat4f.Ortho(
+            projection,
+            -horizontalHalfExtent,
+            horizontalHalfExtent,
+            -verticalHalfExtent,
+            verticalHalfExtent,
+            0.1f,
+            farPlane
+        );
         float yaw = yawDegrees * GameMath.DEG2RAD;
         float pitch = pitchDegrees * GameMath.DEG2RAD;
         DefaultShaderUniforms uniforms = capi.Render.ShaderUniforms;
-        float animationOffset = capi.IsSinglePlayer && capi.IsGamePaused
-            ? atlasAnimationSeconds
-            : 0;
-        float windWaveCounter = config.AnimationsEnabled
-            ? uniforms.WindWaveCounter + animationOffset
-            : frozenWindWaveCounter;
-        float windWaveCounterHighFrequency = config.AnimationsEnabled
-            ? uniforms.WindWaveCounterHighFreq + animationOffset
-            : frozenWindWaveCounterHighFrequency;
-        float waterStillCounter = config.AnimationsEnabled
-            ? uniforms.WaterStillCounter + animationOffset
-            : frozenWaterStillCounter;
-        float waterFlowCounter = config.AnimationsEnabled
-            ? uniforms.WaterFlowCounter + animationOffset
-            : frozenWaterFlowCounter;
-
-        bool rendered = exactChunkRenderer?.Render(
-            deltaTime,
-            projection,
-            centerX,
-            centerY,
-            centerZ,
-            yaw,
-            pitch,
-            GameViewDistance,
-            SurfaceSafetyEnabled,
-            SurvivalOreConcealmentEnabled,
-            SurfaceSafetyEnabled ? surfaceHeightTexture : null,
-            mapLayerTexture,
-            EffectiveMapLayerOpacity,
-            0,
-            config.PerformanceLightingEnabled,
-            config.HideVegetation,
-            Math.Clamp(config.AtlasExposurePercent, 50, 150) / 100f,
-            Math.Clamp(config.CaveMaskBrightnessPercent, 50, 150) / 100f,
-            windWaveCounter,
-            windWaveCounterHighFrequency,
-            waterStillCounter,
-            waterFlowCounter,
-            config.CloudsEnabled,
-            config.LiveLightingEnabled,
-            config.FixedSunHour,
-            config.AnimationsEnabled && capi.IsSinglePlayer && capi.IsGamePaused
+        float animationOffset = !captureProjection
+            && capi.IsSinglePlayer
+            && capi.IsGamePaused
+                ? atlasAnimationSeconds
+                : 0;
+        // Every tile must render identical wind, water and cloud counters so
+        // the stitched image has no animated seams.
+        float windWaveCounter = captureProjection
+            ? screenshotFrozenWindWaveCounter
+            : config.AnimationsEnabled
+                ? uniforms.WindWaveCounter + animationOffset
+                : frozenWindWaveCounter;
+        float windWaveCounterHighFrequency = captureProjection
+            ? screenshotFrozenWindWaveCounterHighFrequency
+            : config.AnimationsEnabled
+                ? uniforms.WindWaveCounterHighFreq + animationOffset
+                : frozenWindWaveCounterHighFrequency;
+        float waterStillCounter = captureProjection
+            ? screenshotFrozenWaterStillCounter
+            : config.AnimationsEnabled
+                ? uniforms.WaterStillCounter + animationOffset
+                : frozenWaterStillCounter;
+        float waterFlowCounter = captureProjection
+            ? screenshotFrozenWaterFlowCounter
+            : config.AnimationsEnabled
+                ? uniforms.WaterFlowCounter + animationOffset
+                : frozenWaterFlowCounter;
+        float renderAnimationOffset = !captureProjection
+            && config.AnimationsEnabled
+            && capi.IsSinglePlayer
+            && capi.IsGamePaused
                 ? atlasRealDeltaTime
-                : 0,
-            visibleEntityPolicy,
-            false
-        ) == true;
+                : 0;
+
+        // The tiled capture hides the local player's own model so the stitched
+        // photo shows the map without the photographer's character (and its
+        // hands). Restore the flag even when the render throws.
+        if (exactChunkRenderer != null)
+        {
+            exactChunkRenderer.HideLocalPlayerModel = captureProjection;
+        }
+        bool rendered;
+        try
+        {
+            rendered = exactChunkRenderer?.Render(
+                deltaTime,
+                projection,
+                centerX,
+                centerY,
+                centerZ,
+                yaw,
+                pitch,
+                GameViewDistance,
+                SurfaceSafetyEnabled,
+                SurvivalOreConcealmentEnabled,
+                SurfaceSafetyEnabled ? surfaceHeightTexture : null,
+                mapLayerTexture,
+                EffectiveMapLayerOpacity,
+                0,
+                config.PerformanceLightingEnabled,
+                config.HideVegetation,
+                Math.Clamp(config.AtlasExposurePercent, 50, 150) / 100f,
+                Math.Clamp(config.CaveMaskBrightnessPercent, 50, 150) / 100f,
+                windWaveCounter,
+                windWaveCounterHighFrequency,
+                waterStillCounter,
+                waterFlowCounter,
+                config.CloudsEnabled,
+                config.LiveLightingEnabled,
+                config.FixedSunHour,
+                renderAnimationOffset,
+                captureProjection ? screenshotFrozenCloudOffset : null,
+                visibleEntityPolicy,
+                false
+            ) == true;
+        }
+        finally
+        {
+            if (exactChunkRenderer != null)
+            {
+                exactChunkRenderer.HideLocalPlayerModel = false;
+            }
+        }
         render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
         return rendered;
     }

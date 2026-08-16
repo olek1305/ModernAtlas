@@ -478,6 +478,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         bool liveLightingEnabled,
         int fixedSunHour,
         float pausedCloudAnimationDeltaTime,
+        Vec3f? frozenCloudOffset,
         ModernAtlasServerPolicy entityPolicy,
         bool blitToDefault
     )
@@ -734,6 +735,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 waterFlowCounter,
                 cloudsEnabled,
                 pausedCloudAnimationDeltaTime,
+                frozenCloudOffset,
                 hideUndergroundCaves,
                 concealSurvivalOres,
                 hideVegetation,
@@ -1257,6 +1259,34 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             return primary.ColorTextureIds is { Length: > 0 }
                 ? primary.ColorTextureIds[0]
                 : 0;
+        }
+    }
+
+    /// <summary>
+    /// Transient per-frame flag set by the tiled screenshot capture: hides
+    /// the local player's own model (including its hands) from the atlas
+    /// entity stage so the stitched photo is free of the photographer's
+    /// character. Reset after every atlas draw.
+    /// </summary>
+    public bool HideLocalPlayerModel
+    {
+        get => entityModelRenderer.HideLocalPlayerModel;
+        set => entityModelRenderer.HideLocalPlayerModel = value;
+    }
+
+    /// <summary>
+    /// Live native cloud drift offset. The tiled screenshot pipeline freezes
+    /// this value so every captured tile renders identical cloud shapes.
+    /// </summary>
+    public Vec3f? GetLiveCloudOffset()
+    {
+        try
+        {
+            return cloudRenderer?.GetLiveOffset();
+        }
+        catch
+        {
+            return null;
         }
     }
 
@@ -2189,6 +2219,7 @@ void main()
         float waterFlowCounter,
         bool cloudsEnabled,
         float pausedCloudAnimationDeltaTime,
+        Vec3f? frozenCloudOffset,
         bool hideUndergroundCaves,
         bool concealSurvivalOres,
         bool hideVegetation,
@@ -2289,7 +2320,8 @@ void main()
                     projection,
                     view,
                     pausedCloudAnimationDeltaTime,
-                    true
+                    true,
+                    frozenCloudOffset
                 );
             }
             if (blitToDefault)
@@ -2300,7 +2332,9 @@ void main()
                     cloudRenderer?.Render(
                         projection,
                         view,
-                        pausedCloudAnimationDeltaTime
+                        pausedCloudAnimationDeltaTime,
+                        false,
+                        frozenCloudOffset
                     );
                 }
             }
