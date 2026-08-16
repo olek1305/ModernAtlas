@@ -364,13 +364,14 @@ the product scope when the atlas itself is correct.
   `finally` block while the renderer is still valid.
 - The screenshot feature is a tiled camera-grid capture, not a styled
   re-render. `AtlasTiledScreenshot` divides the current view into an
-  `ScreenshotScale` grid (1x-20x, every integer step), re-renders the exact
+  `ScreenshotScale` grid (1x-8x, every integer step), re-renders the exact
   world for every tile with a zoomed and offset camera, reads the Primary
   sub-region per tile and stitches one seamless top-down PNG on a background
-  thread. High scales can capture hundreds of tiles across several seconds;
-  the stitched output is bounded by a pixel budget (about 36 megapixels) so
-  extreme grids cannot exhaust memory, and every tile is downsampled to that
-  budget before it is stored. A
+  thread. The stitched output is bounded by a pixel budget (about 100
+  megapixels) so extreme grids cannot exhaust memory, every tile is
+  downsampled to that budget before it is stored, and the PNG is written
+  band by band through `AtlasPngStreamWriter` so the whole RGB image is
+  never buffered at once. A
   `CANCEL / CLOSE` progress modal owns input while the capture, stitch and
   save run; Escape cancels the capture and restores the camera. The camera
   baseline (zoom, X/Y/Z centers) is snapshotted, snapped per tile and

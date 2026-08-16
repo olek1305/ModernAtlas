@@ -32,7 +32,7 @@ public sealed class ModernAtlasConfig
     public int CaveMaskBrightnessPercent { get; set; } = 100;
 
     /// <summary>
-    /// Tiled screenshot grid size (1-20): the current view is captured as an
+    /// Tiled screenshot grid size (1-8): the current view is captured as an
     /// N-by-N camera grid and stitched into one high-resolution image.
     /// </summary>
     public int ScreenshotScale { get; set; } = 2;

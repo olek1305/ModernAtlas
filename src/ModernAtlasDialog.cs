@@ -1870,7 +1870,7 @@ public sealed class ModernAtlasDialog : GuiDialog
                 automatedScreenshotCaptureRequested = pendingScreenshotRequest;
                 capi.Logger.Notification(
                     "[ModernAtlas] Automated smoke test queued a {0}x{0} tiled atlas screenshot.",
-                    Math.Clamp(config.ScreenshotScale, 1, 20)
+                    Math.Clamp(config.ScreenshotScale, 1, 8)
                 );
             }
         }
@@ -4365,15 +4365,10 @@ public sealed class ModernAtlasDialog : GuiDialog
                 ElementBounds.Fixed(148, 18, 60, 24)
             )
             .AddAtlasChoice(
+                new[] { "1", "2", "3", "4", "5", "6", "7", "8" },
                 new[]
                 {
-                    "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
-                    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20"
-                },
-                new[]
-                {
-                    "1x", "2x", "3x", "4x", "5x", "6x", "7x", "8x", "9x", "10x",
-                    "11x", "12x", "13x", "14x", "15x", "16x", "17x", "18x", "19x", "20x"
+                    "1x", "2x", "3x", "4x", "5x", "6x", "7x", "8x"
                 },
                 ScreenshotScaleIndex,
                 OnScreenshotScaleChanged,
@@ -4427,7 +4422,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private string BuildScreenshotCollapsedStatus()
     {
-        int scale = Math.Clamp(config.ScreenshotScale, 1, 20);
+        int scale = Math.Clamp(config.ScreenshotScale, 1, 8);
         return $"Tiled {scale}x{scale}";
     }
 
@@ -4457,7 +4452,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         ComposeScreenshotPanel(contentX, screenshotPanelY);
     }
 
-    private int ScreenshotScaleIndex => Math.Clamp(config.ScreenshotScale, 1, 20) - 1;
+    private int ScreenshotScaleIndex => Math.Clamp(config.ScreenshotScale, 1, 8) - 1;
 
     private bool OpenSettingsModal()
     {
@@ -4601,7 +4596,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (!selected) return;
         if (int.TryParse(value, out int scale))
         {
-            config.ScreenshotScale = Math.Clamp(scale, 1, 20);
+            config.ScreenshotScale = Math.Clamp(scale, 1, 8);
             saveConfig();
         }
         SyncScreenshotSettingsControls();
@@ -4627,7 +4622,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             return true;
         }
 
-        int gridSize = Math.Clamp(config.ScreenshotScale, 1, 20);
+        int gridSize = Math.Clamp(config.ScreenshotScale, 1, 8);
         AtlasViewportBounds viewport = AtlasViewport;
         float viewportAspect = viewport.Width / (float)Math.Max(1, viewport.Height);
         if (!tileScreenshot.StartCapture(

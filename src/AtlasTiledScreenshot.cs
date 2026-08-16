@@ -25,7 +25,13 @@ namespace ModernAtlas;
 internal sealed class AtlasTiledScreenshot : IDisposable
 {
     /// <summary>Upper bound for the stitched output so extreme scales cannot exhaust memory.</summary>
-    private const long MaximumStitchedPixels = 36_000_000;
+    /// <summary>
+    /// Upper bound for the stitched output. With the band-streamed encoder
+    /// the raw image is never held in memory, so higher scales may keep
+    /// their full tile resolution longer before the budget downsamples
+    /// them. The tile store is bounded by budget * 4 bytes (about 400 MB).
+    /// </summary>
+    private const long MaximumStitchedPixels = 100_000_000;
 
     private readonly ICoreClientAPI capi;
     private readonly object stateLock = new();
@@ -191,7 +197,7 @@ internal sealed class AtlasTiledScreenshot : IDisposable
             if (captureActive || busy) return false;
         }
 
-        gridSize = Math.Clamp(requestedGridSize, 1, 20);
+        gridSize = Math.Clamp(requestedGridSize, 1, 8);
         baselineZoom = Math.Max(1f, zoom);
         baselineYawDegrees = yawDegrees;
         baselinePitchDegrees = pitchDegrees;
@@ -523,17 +529,23 @@ internal sealed class AtlasTiledScreenshot : IDisposable
                 string? failure = null;
                 try
                 {
-                    byte[] stitched = StitchTopDown();
                     lock (stateLock)
                     {
                         if (generation != capturedGeneration) return;
                     }
-                    AtlasPngEncoder.SavePng(
-                        stitched,
-                        stitchedWidth() + 2 * marginOutX(),
-                        stitchedHeight() + 2 * marginOutY(),
-                        path
-                    );
+                    int outputWidth = stitchedWidth() + 2 * marginOutX();
+                    int outputHeight = stitchedHeight() + 2 * marginOutY();
+                    // The PNG is written band by band so the whole RGB image
+                    // is never buffered in memory; only the downsampled tile
+                    // store plus one small band exist at any time.
+                    using (AtlasPngStreamWriter writer = new(
+                        path,
+                        outputWidth,
+                        outputHeight
+                    ))
+                    {
+                        StitchToWriter(writer, outputWidth, outputHeight);
+                    }
                     savedPath = path;
                 }
                 catch (Exception exception)
@@ -546,7 +558,16 @@ internal sealed class AtlasTiledScreenshot : IDisposable
                     if (generation != capturedGeneration)
                     {
                         // A newer capture or a cancellation superseded this
-                        // encode; the state is owned by the new run.
+                        // encode; remove the partially written file and keep
+                        // the state owned by the new run.
+                        try
+                        {
+                            if (File.Exists(path)) File.Delete(path);
+                        }
+                        catch
+                        {
+                            // Best-effort cleanup of the abandoned PNG.
+                        }
                         return;
                     }
                     busy = false;
@@ -614,16 +635,21 @@ internal sealed class AtlasTiledScreenshot : IDisposable
     }
 
     /// <summary>
-    /// Assembles all tiles into one top-down RGB image. Each tile is stored
-    /// bottom-up with an overlap margin on every shared edge. Inside the
-    /// overlap the two neighbouring tiles are linearly crossfaded, so the
-    /// sub-pixel drift between separately positioned cameras blends into an
-    /// invisible seam instead of a hard cut. The outer margins stay in the
-    /// image so the composite covers exactly the world area of the live
-    /// view and nothing at the picture edges is cropped. The output row
-    /// order is tile row 0 (top of the original view) first.
+    /// Assembles all tiles into one top-down RGB image and streams it into
+    /// the PNG writer band by band. Each tile is stored bottom-up with an
+    /// overlap margin on every shared edge. Inside the overlap the two
+    /// neighbouring tiles are linearly crossfaded, so the sub-pixel drift
+    /// between separately positioned cameras blends into an invisible seam
+    /// instead of a hard cut. The outer margins stay in the image so the
+    /// composite covers exactly the world area of the live view and nothing
+    /// at the picture edges is cropped. The output row order is tile row 0
+    /// (top of the original view) first.
     /// </summary>
-    private byte[] StitchTopDown()
+    private void StitchToWriter(
+        AtlasPngStreamWriter writer,
+        int outWidth,
+        int outHeight
+    )
     {
         byte[][] capturedTiles = tiles
             ?? throw new InvalidOperationException("No tiles were captured.");
@@ -634,75 +660,84 @@ internal sealed class AtlasTiledScreenshot : IDisposable
         int overlap = Math.Max(1, (int)Math.Round(margin * downsampleScale));
         int marginX = (storedTileWidth - tileOutWidth) / 2;
         int marginY = (storedTileHeight - tileOutHeight) / 2;
-        int outWidth = stitchedWidth() + 2 * marginX;
-        int outHeight = stitchedHeight() + 2 * marginY;
 
-        byte[] raw = new byte[checked(outWidth * outHeight * 3)];
-        int outputOffset = 0;
-        for (int y = 0; y < outHeight; y++)
+        const int bandRows = 256;
+        byte[] band = new byte[checked((outWidth * 3 + 1) * bandRows)];
+        for (int bandStart = 0; bandStart < outHeight; bandStart += bandRows)
         {
-            int shiftedY = y - marginY;
-            int tileRow = Math.Clamp(shiftedY / tileOutHeight, 0, gridSize - 1);
-            int withinY = shiftedY - tileRow * tileOutHeight;
-            // GL ReadPixels returns bottom-up rows: the top of the image is
-            // the last row of the stored tile.
-            int sourceRow = storedTileHeight - 1 - (marginY + withinY);
-            float yBlend = 0f;
-            bool blendRow = withinY >= tileOutHeight - overlap
-                && tileRow + 1 < gridSize;
-            if (blendRow)
+            int bandHeight = Math.Min(bandRows, outHeight - bandStart);
+            int offset = 0;
+            for (int row = 0; row < bandHeight; row++)
             {
-                yBlend = (withinY - (tileOutHeight - overlap) + 0.5f) / overlap;
-                yBlend = Math.Clamp(yBlend, 0f, 1f);
-            }
-            int blendSourceRow = storedTileHeight - 1 - (marginY + withinY - tileOutHeight);
-            for (int x = 0; x < outWidth; x++)
-            {
-                int shiftedX = x - marginX;
-                int tileCol = Math.Clamp(shiftedX / tileOutWidth, 0, gridSize - 1);
-                int withinX = shiftedX - tileCol * tileOutWidth;
-                int sourceOffset =
-                    (sourceRow * storedTileWidth + marginX + withinX) * 4;
-                byte[] tile = capturedTiles[tileRow * gridSize + tileCol];
-
-                float r = tile[sourceOffset + 2];
-                float g = tile[sourceOffset + 1];
-                float b = tile[sourceOffset];
-                if (withinX >= tileOutWidth - overlap
-                    && tileCol + 1 < gridSize)
-                {
-                    // Crossfade into the right neighbour inside the shared
-                    // horizontal overlap.
-                    float xBlend = Math.Clamp(
-                        (withinX - (tileOutWidth - overlap) + 0.5f) / overlap,
-                        0f,
-                        1f
-                    );
-                    byte[] next = capturedTiles[tileRow * gridSize + tileCol + 1];
-                    int nextOffset =
-                        (sourceRow * storedTileWidth
-                            + marginX + withinX - tileOutWidth) * 4;
-                    r += (next[nextOffset + 2] - r) * xBlend;
-                    g += (next[nextOffset + 1] - g) * xBlend;
-                    b += (next[nextOffset] - b) * xBlend;
-                }
+                int y = bandStart + row;
+                int shiftedY = y - marginY;
+                int tileRow = Math.Clamp(shiftedY / tileOutHeight, 0, gridSize - 1);
+                int withinY = shiftedY - tileRow * tileOutHeight;
+                // GL ReadPixels returns bottom-up rows: the top of the image
+                // is the last row of the stored tile.
+                int sourceRow = storedTileHeight - 1 - (marginY + withinY);
+                float yBlend = 0f;
+                bool blendRow = withinY >= tileOutHeight - overlap
+                    && tileRow + 1 < gridSize;
                 if (blendRow)
                 {
-                    // Crossfade into the bottom neighbour inside the shared
-                    // vertical overlap.
-                    byte[] bottom = capturedTiles[(tileRow + 1) * gridSize + tileCol];
-                    int bottomOffset =
-                        (blendSourceRow * storedTileWidth + marginX + withinX) * 4;
-                    r += (bottom[bottomOffset + 2] - r) * yBlend;
-                    g += (bottom[bottomOffset + 1] - g) * yBlend;
-                    b += (bottom[bottomOffset] - b) * yBlend;
+                    yBlend = (withinY - (tileOutHeight - overlap) + 0.5f) / overlap;
+                    yBlend = Math.Clamp(yBlend, 0f, 1f);
                 }
-                raw[outputOffset++] = (byte)Math.Clamp((int)MathF.Round(r), 0, 255);
-                raw[outputOffset++] = (byte)Math.Clamp((int)MathF.Round(g), 0, 255);
-                raw[outputOffset++] = (byte)Math.Clamp((int)MathF.Round(b), 0, 255);
+                int blendSourceRow =
+                    storedTileHeight - 1 - (marginY + withinY - tileOutHeight);
+
+                band[offset++] = 0; // filter: None
+                for (int x = 0; x < outWidth; x++)
+                {
+                    int shiftedX = x - marginX;
+                    int tileCol = Math.Clamp(shiftedX / tileOutWidth, 0, gridSize - 1);
+                    int withinX = shiftedX - tileCol * tileOutWidth;
+                    int sourceOffset =
+                        (sourceRow * storedTileWidth + marginX + withinX) * 4;
+                    byte[] tile = capturedTiles[tileRow * gridSize + tileCol];
+
+                    float r = tile[sourceOffset + 2];
+                    float g = tile[sourceOffset + 1];
+                    float b = tile[sourceOffset];
+                    if (withinX >= tileOutWidth - overlap
+                        && tileCol + 1 < gridSize)
+                    {
+                        // Crossfade into the right neighbour inside the
+                        // shared horizontal overlap.
+                        float xBlend = Math.Clamp(
+                            (withinX - (tileOutWidth - overlap) + 0.5f) / overlap,
+                            0f,
+                            1f
+                        );
+                        byte[] next =
+                            capturedTiles[tileRow * gridSize + tileCol + 1];
+                        int nextOffset =
+                            (sourceRow * storedTileWidth
+                                + marginX + withinX - tileOutWidth) * 4;
+                        r += (next[nextOffset + 2] - r) * xBlend;
+                        g += (next[nextOffset + 1] - g) * xBlend;
+                        b += (next[nextOffset] - b) * xBlend;
+                    }
+                    if (blendRow)
+                    {
+                        // Crossfade into the bottom neighbour inside the
+                        // shared vertical overlap.
+                        byte[] bottom =
+                            capturedTiles[(tileRow + 1) * gridSize + tileCol];
+                        int bottomOffset =
+                            (blendSourceRow * storedTileWidth + marginX + withinX) * 4;
+                        r += (bottom[bottomOffset + 2] - r) * yBlend;
+                        g += (bottom[bottomOffset + 1] - g) * yBlend;
+                        b += (bottom[bottomOffset] - b) * yBlend;
+                    }
+                    band[offset++] = (byte)Math.Clamp((int)MathF.Round(r), 0, 255);
+                    band[offset++] = (byte)Math.Clamp((int)MathF.Round(g), 0, 255);
+                    band[offset++] = (byte)Math.Clamp((int)MathF.Round(b), 0, 255);
+                }
             }
+            writer.WriteBand(band, offset);
         }
-        return raw;
     }
 
     public void Dispose()
@@ -809,19 +844,8 @@ internal static class AtlasPngEncoder
         buffer[offset + 3] = (byte)(value & 0xff);
     }
 
-    private static uint Crc32(byte[] type, byte[] data)
-    {
-        uint crc = 0xffffffff;
-        foreach (byte value in type)
-        {
-            crc = CrcTable[(crc ^ value) & 0xff] ^ (crc >> 8);
-        }
-        foreach (byte value in data)
-        {
-            crc = CrcTable[(crc ^ value) & 0xff] ^ (crc >> 8);
-        }
-        return crc ^ 0xffffffff;
-    }
+    private static uint Crc32(byte[] type, byte[] data) =>
+        AtlasPngCrc.Crc32(type, data);
 
     private static uint Adler32(byte[] data)
     {
@@ -833,6 +857,164 @@ internal static class AtlasPngEncoder
             b = (b + a) % 65521;
         }
         return (b << 16) | a;
+    }
+}
+
+/// <summary>
+/// Minimal streaming PNG writer. Scanlines (filter: None, truecolor RGB)
+/// arrive band by band and are compressed through one continuous zlib stream
+/// that is emitted as multiple IDAT chunks, so arbitrarily large stitched
+/// images never need a full uncompressed buffer. The zlib header leads the
+/// first IDAT chunk and the Adler-32 checksum trails the last one.
+/// </summary>
+internal sealed class AtlasPngStreamWriter : IDisposable
+{
+    private readonly FileStream output;
+    private readonly DeflateStream deflater;
+    private readonly MemoryStream compressed = new();
+    private uint adlerA = 1;
+    private uint adlerB = 0;
+    private bool zlibHeaderWritten;
+    private bool disposed;
+
+    public AtlasPngStreamWriter(string path, int width, int height)
+    {
+        output = new FileStream(
+            path,
+            FileMode.Create,
+            FileAccess.Write,
+            FileShare.None
+        );
+        WriteSignature(output);
+        byte[] header = new byte[13];
+        WriteInt32(header, 0, width);
+        WriteInt32(header, 4, height);
+        header[8] = 8; // bit depth
+        header[9] = 2; // color type: truecolor RGB
+        header[10] = 0; // compression
+        header[11] = 0; // filter
+        header[12] = 0; // interlace
+        WriteChunk(output, "IHDR", header);
+        deflater = new DeflateStream(
+            compressed,
+            CompressionLevel.Optimal,
+            leaveOpen: true
+        );
+    }
+
+    /// <summary>Appends one band of scanlines (filter byte + RGB row each).</summary>
+    public void WriteBand(byte[] rawBand, int length)
+    {
+        if (disposed) throw new ObjectDisposedException(nameof(AtlasPngStreamWriter));
+
+        int index = 0;
+        while (index < length)
+        {
+            int chunk = Math.Min(5552, length - index);
+            for (int i = 0; i < chunk; i++)
+            {
+                adlerA += rawBand[index + i];
+                adlerB += adlerA;
+            }
+            adlerA %= 65521;
+            adlerB %= 65521;
+            index += chunk;
+        }
+
+        compressed.SetLength(0);
+        deflater.Write(rawBand, 0, length);
+        deflater.Flush();
+        byte[] payload = compressed.ToArray();
+        if (!zlibHeaderWritten)
+        {
+            byte[] withHeader = new byte[checked(payload.Length + 2)];
+            withHeader[0] = 0x78;
+            withHeader[1] = 0x9c;
+            System.Buffer.BlockCopy(payload, 0, withHeader, 2, payload.Length);
+            WriteChunk(output, "IDAT", withHeader);
+            zlibHeaderWritten = true;
+        }
+        else
+        {
+            WriteChunk(output, "IDAT", payload);
+        }
+    }
+
+    public void Dispose()
+    {
+        if (disposed) return;
+        disposed = true;
+        try
+        {
+            compressed.SetLength(0);
+            // Emits the final deflate block into the shared buffer.
+            deflater.Dispose();
+            byte[] tail = compressed.ToArray();
+            byte[] withAdler = new byte[checked(tail.Length + 4)];
+            System.Buffer.BlockCopy(tail, 0, withAdler, 0, tail.Length);
+            withAdler[tail.Length] = (byte)(adlerB >> 8);
+            withAdler[tail.Length + 1] = (byte)adlerB;
+            withAdler[tail.Length + 2] = (byte)(adlerA >> 8);
+            withAdler[tail.Length + 3] = (byte)adlerA;
+            WriteChunk(output, "IDAT", withAdler);
+            WriteChunk(output, "IEND", Array.Empty<byte>());
+        }
+        finally
+        {
+            output.Dispose();
+        }
+    }
+
+    private static void WriteSignature(Stream output)
+    {
+        output.WriteByte(0x89);
+        output.WriteByte(0x50); // P
+        output.WriteByte(0x4e); // N
+        output.WriteByte(0x47); // G
+        output.WriteByte(0x0d);
+        output.WriteByte(0x0a);
+        output.WriteByte(0x1a);
+        output.WriteByte(0x0a);
+    }
+
+    private static void WriteChunk(Stream output, string type, byte[] data)
+    {
+        byte[] lengthBytes = new byte[4];
+        WriteInt32(lengthBytes, 0, data.Length);
+        output.Write(lengthBytes, 0, 4);
+        byte[] typeBytes = System.Text.Encoding.ASCII.GetBytes(type);
+        output.Write(typeBytes, 0, 4);
+        output.Write(data, 0, data.Length);
+        uint crc = AtlasPngCrc.Crc32(typeBytes, data);
+        byte[] crcBytes = new byte[4];
+        WriteInt32(crcBytes, 0, (int)crc);
+        output.Write(crcBytes, 0, 4);
+    }
+
+    private static void WriteInt32(byte[] buffer, int offset, int value)
+    {
+        buffer[offset] = (byte)((value >> 24) & 0xff);
+        buffer[offset + 1] = (byte)((value >> 16) & 0xff);
+        buffer[offset + 2] = (byte)((value >> 8) & 0xff);
+        buffer[offset + 3] = (byte)(value & 0xff);
+    }
+}
+
+/// <summary>Shared CRC-32 table for the PNG encoders.</summary>
+internal static class AtlasPngCrc
+{
+    public static uint Crc32(byte[] type, byte[] data)
+    {
+        uint crc = 0xffffffff;
+        foreach (byte value in type)
+        {
+            crc = CrcTable[(crc ^ value) & 0xff] ^ (crc >> 8);
+        }
+        foreach (byte value in data)
+        {
+            crc = CrcTable[(crc ^ value) & 0xff] ^ (crc >> 8);
+        }
+        return crc ^ 0xffffffff;
     }
 
     private static readonly uint[] CrcTable = BuildCrcTable();
