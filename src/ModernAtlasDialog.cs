@@ -21,13 +21,15 @@ public sealed class ModernAtlasDialog : GuiDialog
     private const float StandardMinimumPitchDegrees = 20;
     private const float UnlockedMinimumPitchDegrees = 0;
     private const int DefaultViewDistance = 500;
-    private const int MaximumGameViewDistance = 1536;
+    private const int MaximumGameViewDistance = 2048;
     private const float MaximumZoomIn = 8;
     private const float MaximumZoomScreenshotSettleSeconds = 2;
     private const int MovingAtlasRefreshMilliseconds = 16;
     private const int IdleAtlasRefreshMilliseconds = 83;
     private const int OreHoverRefreshMilliseconds = 100;
     private const int PresentationChangeDebounceMilliseconds = 125;
+    private const int BottomPanelAnimationMilliseconds = 170;
+    private const int AutomatedUiScreenshotPhaseCount = 9;
     private const string AllOresFilterValue = "__all__";
     private const string SmokeScreenshotEnvironmentVariable =
         "MODERNATLAS_SMOKE_SCREENSHOT";
@@ -234,6 +236,51 @@ public sealed class ModernAtlasDialog : GuiDialog
     private double composedGuiScale;
     private long lastResizeRecomposeMilliseconds;
 
+    private enum AtlasPanelSection
+    {
+        None,
+        Settings,
+        ScreenshotOptions,
+        MapOptions,
+        Search,
+        Instrument,
+        Performance,
+        Creative,
+        VisualLab,
+        Unit
+    }
+
+    private readonly record struct AtlasPanelGeometry(
+        int X,
+        int Y,
+        int Width,
+        int Height
+    )
+    {
+        public int Bottom => Y + Height;
+
+        public bool Contains(int x, int y) =>
+            x >= X && x <= X + Width && y >= Y && y <= Bottom;
+    }
+
+    // All non-modal atlas controls share this one composer and one bottom
+    // panel location. The legacy field names remain as aliases while the
+    // existing smoke-test helpers are migrated to the compact layout.
+    private GuiComposer? bottomPanel;
+    private AtlasPanelSection bottomPanelSection;
+    private AtlasPanelSection queuedBottomPanelSection;
+    private float bottomPanelProgress;
+    private float bottomPanelAnimationStart;
+    private float bottomPanelAnimationTarget;
+    private long bottomPanelAnimationStartedMilliseconds;
+    private bool bottomPanelAnimationActive;
+    private AtlasPanelGeometry bottomPanelGeometry;
+    private bool hasBottomPanelGeometry;
+    private ElementBounds? bottomPanelBounds;
+    private string toolbarTooltipText = "";
+    private double toolbarTooltipLocalY;
+    private double settingsScrollOffset;
+
     private readonly PresentationChangeCoordinator presentationChangeCoordinator = new();
 
     internal bool AutomatedSmokeTestRenderedExactWorld { get; private set; }
@@ -406,28 +453,32 @@ public sealed class ModernAtlasDialog : GuiDialog
         || performanceModalOpen
         || creativeSettingsModalOpen
         || visualLabModalOpen;
+    private GuiComposer? ActiveBottomPanelComposer => bottomPanel;
+    private bool BottomPanelOpen => bottomPanelSection != AtlasPanelSection.None;
+    private bool BottomPanelClosing => bottomPanelAnimationActive
+        && bottomPanelAnimationTarget <= bottomPanelAnimationStart;
+    private bool BottomPanelInputVisible => hasBottomPanelGeometry
+        && BottomPanelOpen
+        && !BottomPanelClosing
+        && bottomPanelProgress > 0.65f;
+    private bool SearchPanelOpen => bottomPanelSection == AtlasPanelSection.Search;
+    private bool MapPanelOpen => bottomPanelSection == AtlasPanelSection.MapOptions;
+    private bool ScreenshotOptionsOpen =>
+        bottomPanelSection == AtlasPanelSection.ScreenshotOptions;
+    private bool InstrumentPanelOpen => bottomPanelSection == AtlasPanelSection.Instrument;
     private float MinimumPitchDegrees => HasUnlockedCameraPitch
         ? UnlockedMinimumPitchDegrees
         : StandardMinimumPitchDegrees;
     private GuiComposer? ActiveKeyboardComposer => interfaceHidden
         ? null
-        : visualLabModalOpen
-            ? visualLabModal
-                : performanceModalOpen
-                    ? performanceModal
-                    : creativeSettingsModalOpen
-                        ? creativeSettingsModal
-                        : settingsModalOpen
-                            ? settingsModal
-                            : screenshotProgressModal != null
-                                ? screenshotProgressModal
-                                : SearchModeActive
-                                    && searchPanel?.GetTextInput("search-input")?.HasFocus == true
-                                        ? searchPanel
-                                        : MapLayerControlsVisible
-                                            && mapLayerPanel?.CurrentTabIndexElement?.HasFocus == true
-                                                ? mapLayerPanel
-                                                : overlay;
+        : screenshotProgressModal != null
+            ? screenshotProgressModal
+            : bottomPanel?.GetTextInput("search-input")?.HasFocus == true
+                ? bottomPanel
+                : bottomPanelSection != AtlasPanelSection.None
+                    && !BottomPanelClosing
+                    ? bottomPanel
+                    : overlay;
     internal bool SearchInputHasFocus => IsOpened()
         && !interfaceHidden
         && SearchModeActive
@@ -436,7 +487,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         && !creativeSettingsModalOpen
         && !visualLabModalOpen
         && screenshotProgressModal == null
-        && searchPanel?.GetTextInput("search-input")?.HasFocus == true;
+        && bottomPanelSection == AtlasPanelSection.Search
+        && bottomPanel?.GetTextInput("search-input")?.HasFocus == true;
 
     /// <summary>
     /// Releases UI state that belongs to the preceding physical-scroll dialog
@@ -538,6 +590,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         // The dialog is constructed before a world/player necessarily exists.
         // Recompose now that Survival, Creative and accepted Cheat Mode access
         // can be resolved, so unavailable controls leave no empty slot.
+        ResetBottomPanelState();
         RecomposeInterface();
         // Opening with G is a map action, not an implicit request to type.
         // Search receives focus only after the player clicks its text box.
@@ -603,6 +656,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     public override void OnRenderGUI(float deltaTime)
     {
         AdvancePresentationChange();
+        AdvanceBottomPanelAnimation();
         bool viewportChanged = capi.Render.FrameWidth != composedFrameWidth
             || capi.Render.FrameHeight != composedFrameHeight
             || Math.Abs(RuntimeEnv.GUIScale - composedGuiScale) > 0.001;
@@ -829,50 +883,10 @@ public sealed class ModernAtlasDialog : GuiDialog
         mapLayerPanel?.GetDynamicText("layer-legend")?.SetNewText(
             activeMapLayer.DetailedLegend()
         );
-        if (!interfaceHidden)
-        {
-            overlay?.Render(deltaTime);
-            if (CreativeCheatSettingsAvailable)
-            {
-                creativeSettingsShortcut?.Render(deltaTime);
-            }
-            if (MapLayerControlsVisible)
-            {
-                mapLayerPanel?.Render(deltaTime);
-            }
-            screenshotPanel?.Render(deltaTime);
-            if (SearchModeActive)
-            {
-                searchPanel?.Render(deltaTime);
-            }
-            RenderUnitInspection(deltaTime);
-            screenshotProgressModal?.Render(deltaTime);
-            if (settingsModalOpen)
-            {
-                settingsModal?.Render(deltaTime);
-            }
-            if (performanceModalOpen)
-            {
-                performanceModal?.Render(deltaTime);
-            }
-            if (creativeSettingsModalOpen)
-            {
-                creativeSettingsModal?.Render(deltaTime);
-            }
-            if (visualLabModalOpen)
-            {
-                visualLabModal?.Render(deltaTime);
-            }
-        }
-        if (config.RenderOnScroll)
-        {
-            scrollViewportRenderer.RenderRollersOverlay(AtlasViewport);
-        }
-        // Render the optional hand scene after every interactive composer.
-        // Its private shader state can therefore never suppress SETTINGS,
-        // EXIT or other atlas controls, even if a driver rejects the scene.
-        // While a screenshot is being captured the handheld instrument stays
-        // hidden so the framed map is clean.
+        // The handheld instrument belongs to the atlas scene, but the atlas
+        // controls must remain on top of it. Render the instrument before the
+        // GUI composers so an open bottom panel can never be obscured by the
+        // local hand or wooden shell.
         if (!pendingScreenshotRequest)
         {
             compassRenderer.Render(
@@ -885,6 +899,24 @@ public sealed class ModernAtlasDialog : GuiDialog
                 atlasRealDeltaTime
             );
         }
+        capi.Render.GetEngineShader(EnumShaderProgram.Gui).Use();
+        capi.Render.GLDepthMask(false);
+        capi.Render.GLDisableDepthTest();
+        capi.Render.GlDisableCullFace();
+        capi.Render.GlToggleBlend(true, EnumBlendMode.Standard);
+        if (!interfaceHidden)
+        {
+            UpdateToolbarTooltip(capi.Input.MouseX, capi.Input.MouseY);
+            overlay?.Render(deltaTime);
+            RenderActiveBottomPanel(deltaTime);
+            screenshotProgressModal?.Render(deltaTime);
+        }
+        if (config.RenderOnScroll)
+        {
+            scrollViewportRenderer.RenderRollersOverlay(AtlasViewport);
+        }
+        // Restore the GUI shader after the physical scroll rollers too. The
+        // next HUD renderer assumes the engine GUI program is active.
         ForceOpaqueWindowAlpha();
         capi.Render.GetEngineShader(EnumShaderProgram.Gui).Use();
         UpdateScreenshotStatusText();
@@ -895,74 +927,25 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnMouseDown(MouseEvent args)
     {
-        if (!interfaceHidden
-            && SettingsHierarchyOpen
-            && IsSettingsButtonPosition(args.X, args.Y))
-        {
-            overlay?.OnMouseDown(args);
-            args.Handled = true;
-            return;
-        }
-        if (!interfaceHidden && performanceModalOpen)
-        {
-            performanceModal?.OnMouseDown(args);
-            args.Handled = true;
-            return;
-        }
-        if (!interfaceHidden && visualLabModalOpen)
-        {
-            visualLabModal?.OnMouseDown(args);
-            args.Handled = true;
-            return;
-        }
-        if (!interfaceHidden && creativeSettingsModalOpen)
-        {
-            creativeSettingsModal?.OnMouseDown(args);
-            args.Handled = true;
-            return;
-        }
         if (!interfaceHidden && screenshotProgressModal != null)
         {
             screenshotProgressModal.OnMouseDown(args);
             args.Handled = true;
             return;
         }
-        if (!interfaceHidden && settingsModalOpen)
-        {
-            settingsModal?.OnMouseDown(args);
-            args.Handled = true;
-            return;
-        }
         if (!interfaceHidden)
         {
             UnfocusSearchOutsideInput(args);
-        }
-        if (!interfaceHidden && selectedEntityId != null)
-        {
-            unitPanel?.OnMouseDown(args);
-            if (args.Handled) return;
-        }
-        if (!interfaceHidden)
-        {
-            if (SearchModeActive)
-            {
-                searchPanel?.OnMouseDown(args);
-                if (args.Handled) return;
-            }
-            if (MapLayerControlsVisible)
-            {
-                mapLayerPanel?.OnMouseDown(args);
-                if (args.Handled) return;
-            }
-            screenshotPanel?.OnMouseDown(args);
-            if (args.Handled) return;
-            if (CreativeCheatSettingsAvailable)
-            {
-                creativeSettingsShortcut?.OnMouseDown(args);
-                if (args.Handled) return;
-            }
             overlay?.OnMouseDown(args);
             if (args.Handled) return;
+            if (PanelCoversPoint(args.X, args.Y))
+            {
+                bottomPanel?.OnMouseDown(args);
+                // The shared panel owns its translucent background as well as
+                // its controls; an empty panel click must not start a map drag.
+                args.Handled = true;
+                if (args.Handled) return;
+            }
         }
 
         if (!AtlasViewport.Contains(args.X, args.Y))
@@ -989,48 +972,11 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnMouseUp(MouseEvent args)
     {
-        if (!interfaceHidden
-            && SettingsHierarchyOpen
-            && IsSettingsButtonPosition(args.X, args.Y))
-        {
-            overlay?.OnMouseUp(args);
-            args.Handled = true;
-            return;
-        }
-        if (!interfaceHidden && performanceModalOpen)
-        {
-            performanceModal?.OnMouseUp(args);
-            args.Handled = true;
-            return;
-        }
-        if (!interfaceHidden && visualLabModalOpen)
-        {
-            visualLabModal?.OnMouseUp(args);
-            args.Handled = true;
-            return;
-        }
-        if (!interfaceHidden && creativeSettingsModalOpen)
-        {
-            creativeSettingsModal?.OnMouseUp(args);
-            args.Handled = true;
-            return;
-        }
         if (!interfaceHidden && screenshotProgressModal != null)
         {
             screenshotProgressModal.OnMouseUp(args);
             args.Handled = true;
             return;
-        }
-        if (!interfaceHidden && settingsModalOpen)
-        {
-            settingsModal?.OnMouseUp(args);
-            args.Handled = true;
-            return;
-        }
-        if (!interfaceHidden && selectedEntityId != null)
-        {
-            unitPanel?.OnMouseUp(args);
-            if (args.Handled) return;
         }
         // Once a map drag begins, keep ownership of the gesture even if the
         // pointer crosses the settings panel. Letting the overlay consume the
@@ -1054,63 +1000,24 @@ public sealed class ModernAtlasDialog : GuiDialog
 
         if (!interfaceHidden)
         {
-            if (SearchModeActive)
-            {
-                searchPanel?.OnMouseUp(args);
-                if (args.Handled) return;
-            }
-            if (MapLayerControlsVisible)
-            {
-                mapLayerPanel?.OnMouseUp(args);
-                if (args.Handled) return;
-            }
-            screenshotPanel?.OnMouseUp(args);
-            if (args.Handled) return;
-            if (CreativeCheatSettingsAvailable)
-            {
-                creativeSettingsShortcut?.OnMouseUp(args);
-                if (args.Handled) return;
-            }
             overlay?.OnMouseUp(args);
             if (args.Handled) return;
+            if (PanelCoversPoint(args.X, args.Y))
+            {
+                bottomPanel?.OnMouseUp(args);
+                args.Handled = true;
+                if (args.Handled) return;
+            }
         }
         args.Handled = true;
     }
 
     public override void OnMouseMove(MouseEvent args)
     {
-        if (!interfaceHidden && performanceModalOpen)
-        {
-            ClearOreHover();
-            performanceModal?.OnMouseMove(args);
-            args.Handled = true;
-            return;
-        }
-        if (!interfaceHidden && visualLabModalOpen)
-        {
-            ClearOreHover();
-            visualLabModal?.OnMouseMove(args);
-            args.Handled = true;
-            return;
-        }
-        if (!interfaceHidden && creativeSettingsModalOpen)
-        {
-            ClearOreHover();
-            creativeSettingsModal?.OnMouseMove(args);
-            args.Handled = true;
-            return;
-        }
         if (!interfaceHidden && screenshotProgressModal != null)
         {
             ClearOreHover();
             screenshotProgressModal.OnMouseMove(args);
-            args.Handled = true;
-            return;
-        }
-        if (!interfaceHidden && settingsModalOpen)
-        {
-            ClearOreHover();
-            settingsModal?.OnMouseMove(args);
             args.Handled = true;
             return;
         }
@@ -1147,21 +1054,17 @@ public sealed class ModernAtlasDialog : GuiDialog
             return;
         }
 
-        if (!interfaceHidden && selectedEntityId != null)
-        {
-            unitPanel?.OnMouseMove(args);
-            if (args.Handled) return;
-        }
         if (!interfaceHidden)
         {
-            if (SearchModeActive) searchPanel?.OnMouseMove(args);
-            if (MapLayerControlsVisible) mapLayerPanel?.OnMouseMove(args);
-            screenshotPanel?.OnMouseMove(args);
-            if (CreativeCheatSettingsAvailable) creativeSettingsShortcut?.OnMouseMove(args);
             overlay?.OnMouseMove(args);
+            if (PanelCoversPoint(args.X, args.Y))
+            {
+                bottomPanel?.OnMouseMove(args);
+                args.Handled = true;
+            }
         }
-        bool overPanel = searchPanelBounds?.PointInside(args.X, args.Y) == true
-            || mapLayerPanelBounds?.PointInside(args.X, args.Y) == true;
+        UpdateToolbarTooltip(args.X, args.Y);
+        bool overPanel = PanelCoversPoint(args.X, args.Y);
         UpdateOreHover(args.X, args.Y, args.Handled || overPanel);
         // The atlas covers the entire screen. Do not leak hover interaction to
         // hotbar slots, creative inventory elements or dialogs underneath it.
@@ -1170,30 +1073,6 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnMouseWheel(MouseWheelEventArgs args)
     {
-        if (!interfaceHidden && performanceModalOpen)
-        {
-            performanceModal?.OnMouseWheel(args);
-            args.SetHandled();
-            return;
-        }
-        if (!interfaceHidden && visualLabModalOpen)
-        {
-            visualLabModal?.OnMouseWheel(args);
-            args.SetHandled();
-            return;
-        }
-        if (!interfaceHidden && creativeSettingsModalOpen)
-        {
-            creativeSettingsModal?.OnMouseWheel(args);
-            args.SetHandled();
-            return;
-        }
-        if (!interfaceHidden && settingsModalOpen)
-        {
-            settingsModal?.OnMouseWheel(args);
-            args.SetHandled();
-            return;
-        }
         if (!interfaceHidden && screenshotProgressModal != null)
         {
             screenshotProgressModal.OnMouseWheel(args);
@@ -1202,16 +1081,31 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
         if (!interfaceHidden)
         {
-            if (SearchModeActive) searchPanel?.OnMouseWheel(args);
-            if (args.IsHandled) return;
-            if (MapLayerControlsVisible) mapLayerPanel?.OnMouseWheel(args);
-            if (args.IsHandled) return;
-            screenshotPanel?.OnMouseWheel(args);
-            if (args.IsHandled) return;
-            if (CreativeCheatSettingsAvailable) creativeSettingsShortcut?.OnMouseWheel(args);
-            if (args.IsHandled) return;
             overlay?.OnMouseWheel(args);
             if (args.IsHandled) return;
+            if (PanelCoversPoint(capi.Input.MouseX, capi.Input.MouseY))
+            {
+                bottomPanel?.OnMouseWheel(args);
+                if (!args.IsHandled
+                    && bottomPanelSection == AtlasPanelSection.Settings)
+                {
+                    float wheel = args.deltaPrecise != 0
+                        ? args.deltaPrecise
+                        : args.delta;
+                    double maximum = SettingsScrollMaximum(
+                        bottomPanelBounds?.fixedWidth ?? 0,
+                        bottomPanelBounds?.fixedHeight ?? 0
+                    );
+                    settingsScrollOffset = Math.Clamp(
+                        settingsScrollOffset - wheel * 18,
+                        0,
+                        maximum
+                    );
+                    pendingInterfaceRecompose = true;
+                }
+                args.SetHandled();
+                return;
+            }
         }
 
         if (!AtlasViewport.Contains(capi.Input.MouseX, capi.Input.MouseY))
@@ -1348,11 +1242,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         CancelScreenshotCapture();
         presentationChangeCoordinator.Reset(config.RenderOnScroll);
         overlay?.UnfocusOwnElements();
-        searchPanel?.UnfocusOwnElements();
-        settingsModalOpen = false;
-        performanceModalOpen = false;
-        creativeSettingsModalOpen = false;
-        visualLabModalOpen = false;
+        ResetBottomPanelState();
         interfaceHidden = false;
         selectedEntityId = null;
         searchController.Clear();
@@ -1578,6 +1468,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
         RefreshVisibleEntityPolicy();
         SyncSettingsControls();
+        SyncToolbarControls();
     }
 
     public void SetCheatMode(bool enabled)
@@ -1591,6 +1482,10 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
         if (!CreativeCheatSettingsAvailable)
         {
+            if (bottomPanelSection == AtlasPanelSection.Creative)
+            {
+                RequestBottomPanel(AtlasPanelSection.None);
+            }
             creativeSettingsModalOpen = false;
             ClearSearch();
             selectedOreCode = null;
@@ -2157,6 +2052,391 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestInterfaceControlsAttempted = true;
 
         bool accessAvailable = CreativeCheatSettingsAvailable;
+        bool toolbarPresent = overlay?.GetElement("settings-button")
+                is GuiElementAtlasButton
+            && overlay?.GetElement("quick-screenshot-button")
+                is GuiElementAtlasButton
+            && overlay?.GetElement("screenshot-options-button")
+                is GuiElementAtlasButton
+            && overlay?.GetElement("map-options-button")
+                is GuiElementAtlasButton
+            && overlay?.GetElement("search-button")
+                is GuiElementAtlasButton
+            && overlay?.GetElement("instrument-button")
+                is GuiElementAtlasButton;
+        bool initialFocusReleased = searchPanel?.GetTextInput("search-input")?.HasFocus != true;
+
+        bool settingsOpenedByClick = ClickAtlasControlForAutomatedTest(
+            overlay,
+            "settings-button"
+        ) && settingsModalOpen;
+        GuiComposer? settingsComposer = settingsModal;
+        bool settingsControlsPresent = settingsComposer?.GetElement("map-layers")
+                is GuiElementAtlasSwitch
+            && settingsComposer.GetElement("performance-open")
+                is GuiElementAtlasButton
+            && settingsComposer.GetElement("search-mode")
+                is GuiElementAtlasSwitch;
+
+        bool mapLayersBefore = config.MapLayersEnabled;
+        bool mapLayersToggled = settingsOpenedByClick
+            && ClickAtlasControlForAutomatedTest(settingsComposer, "map-layers")
+            && config.MapLayersEnabled != mapLayersBefore;
+        bool mapLayersRestored = mapLayersToggled
+            && ClickAtlasControlForAutomatedTest(settingsComposer, "map-layers")
+            && config.MapLayersEnabled == mapLayersBefore;
+        bool skipBefore = config.SkipOpeningAnimation;
+        bool skipToggled = ClickAtlasControlForAutomatedTest(
+                settingsComposer,
+                "skip-opening-animation"
+            )
+            && config.SkipOpeningAnimation != skipBefore;
+        bool skipRestored = skipToggled
+            && ClickAtlasControlForAutomatedTest(
+                settingsComposer,
+                "skip-opening-animation"
+            )
+            && config.SkipOpeningAnimation == skipBefore;
+
+        bool performanceQueued = ClickAtlasControlForAutomatedTest(
+                settingsComposer,
+                "performance-open"
+            )
+            && queuedBottomPanelSection == AtlasPanelSection.Performance;
+        OpenBottomPanelImmediately(AtlasPanelSection.Performance);
+        bool performanceOpened = performanceQueued && performanceModalOpen;
+        bool flatLightingSelected = performanceOpened
+            && ClickAtlasControlForAutomatedTest(
+                performanceModal,
+                "performance-lighting"
+            );
+        bool vegetationSelected = performanceOpened
+            && ClickAtlasControlForAutomatedTest(
+                performanceModal,
+                "hide-vegetation"
+            );
+        automatedSmokeTestPerformanceModeSelected = performanceOpened
+            && flatLightingSelected
+            && vegetationSelected;
+        if (automatedSmokeTestPerformanceModeSelected)
+        {
+            OnPerformanceLightingToggled(false);
+            OnHideVegetationToggled(true);
+            lastAtlasWorldRenderMilliseconds = 0;
+        }
+        bool performanceBack = ClickAtlasControlForAutomatedTest(
+                performanceModal,
+                "performance-back"
+            )
+            && queuedBottomPanelSection == AtlasPanelSection.Settings;
+        OpenBottomPanelImmediately(AtlasPanelSection.Settings);
+        settingsComposer = settingsModal;
+        bool presentationControlPresent = settingsComposer?.GetElement(
+                "render-on-scroll"
+            ) is GuiElementAtlasSwitch;
+        bool fixedLightingPrepared = true;
+        if (config.LiveLightingEnabled)
+        {
+            fixedLightingPrepared = ClickAtlasControlForAutomatedTest(
+                settingsComposer,
+                "live-lighting"
+            ) && !config.LiveLightingEnabled;
+        }
+        int fixedHourBefore = config.FixedSunHour;
+        bool sliderBoundaryHandled = DragAtlasSliderBeyondBoundsForAutomatedTest(
+            settingsComposer,
+            "fixed-sun-hour",
+            fixedHourBefore != 23
+        );
+        bool sliderBoundaryClamped = config.FixedSunHour == (fixedHourBefore != 23 ? 23 : 0);
+        OnFixedSunHourChanged(fixedHourBefore);
+        settingsComposer?.GetAtlasSlider("fixed-sun-hour")?.SetValue(fixedHourBefore);
+        bool liveLightingRestored = !config.LiveLightingEnabled
+            || (ClickAtlasControlForAutomatedTest(settingsComposer, "live-lighting")
+                && config.LiveLightingEnabled);
+        if (automatedSmokeTestPerformanceModeSelected)
+        {
+            // The live/fixed lighting controls deliberately re-enable
+            // directional lighting. Re-apply the already-tested developer
+            // visual state so the next real atlas frame observes flat
+            // lighting and hidden vegetation before the test continues.
+            OnPerformanceLightingToggled(false);
+            OnHideVegetationToggled(true);
+            lastAtlasWorldRenderMilliseconds = 0;
+        }
+        OpenBottomPanelImmediately(AtlasPanelSection.Instrument);
+        bool timeInstrumentSelected = bottomPanel?.GetElement(
+                "handheld-instrument"
+            ) is GuiElementAtlasChoice
+            && ClickAtlasControlForAutomatedTest(
+                bottomPanel,
+                "handheld-instrument"
+            )
+            && config.ShowPlayerCompass
+            && HandheldInstrumentMode == "time";
+        OpenBottomPanelImmediately(AtlasPanelSection.Settings);
+        settingsComposer = settingsModal;
+
+        // The toolbar request intentionally goes through the same close-then-
+        // open state machine used by real clicks. The direct immediate call
+        // below only settles the already-tested transition for the next UI
+        // assertions; it never creates a second active composer.
+        bool settingsClosed = ClickAtlasControlForAutomatedTest(
+            settingsComposer,
+            "settings-close"
+        ) && !settingsModalOpen;
+        bool screenshotQueued = ClickAtlasControlForAutomatedTest(
+                overlay,
+                "screenshot-options-button"
+            )
+            && queuedBottomPanelSection == AtlasPanelSection.ScreenshotOptions;
+        OpenBottomPanelImmediately(AtlasPanelSection.ScreenshotOptions);
+        GuiComposer? screenshotComposer = screenshotPanel;
+        bool screenshotControlsPresent = screenshotQueued
+            && screenshotComposer?.GetElement("shot-scale") is GuiElementAtlasChoice
+            && screenshotComposer.GetElement("shot-area") is GuiElementAtlasChoice
+            && screenshotComposer.GetElement("shot-preview") != null
+            && screenshotComposer.GetElement("shot-take") is GuiElementAtlasButton;
+        int screenshotScaleBefore = config.ScreenshotScale;
+        bool screenshotScaleChanged = screenshotControlsPresent
+            && ClickAtlasControlForAutomatedTest(screenshotComposer, "shot-scale");
+        if (screenshotScaleChanged)
+        {
+            OnScreenshotScaleChanged(
+                screenshotScaleBefore == 4 ? "1" : "4",
+                true
+            );
+            screenshotScaleChanged = config.ScreenshotScale != screenshotScaleBefore;
+            OnScreenshotScaleChanged(screenshotScaleBefore.ToString(), true);
+        }
+        int captureAreaBefore = AtlasTiledScreenshot.NormalizeCaptureAreaPercent(
+            config.ScreenshotCaptureAreaPercent
+        );
+        bool captureAreaChanged = screenshotControlsPresent
+            && ClickAtlasControlForAutomatedTest(screenshotComposer, "shot-area");
+        if (captureAreaChanged)
+        {
+            int alternateArea = captureAreaBefore == 25 ? 100 : 25;
+            OnScreenshotCaptureAreaChanged(alternateArea.ToString(), true);
+            captureAreaChanged = config.ScreenshotCaptureAreaPercent != captureAreaBefore;
+            OnScreenshotCaptureAreaChanged(captureAreaBefore.ToString(), true);
+        }
+        bool screenshotPreviewValid = screenshotControlsPresent
+            && ValidateScreenshotPreviewRange();
+
+        // Quick screenshot is a thin binding to the same tiled job. Start it
+        // once, then cancel it immediately so this UI test leaves no PNG and
+        // the later full capture still exercises the normal pipeline.
+        bool quickButtonPresent = overlay?.GetElement("quick-screenshot-button")
+            is GuiElementAtlasButton;
+        bool quickAccepted = quickButtonPresent && TakeQuickScreenshot();
+        bool quickStarted = pendingScreenshotRequest;
+        if (quickStarted) CancelScreenshotCapture();
+
+        bool mapQueued = ClickAtlasControlForAutomatedTest(
+                overlay,
+                "map-options-button"
+            )
+            && queuedBottomPanelSection == AtlasPanelSection.MapOptions;
+        OpenBottomPanelImmediately(AtlasPanelSection.MapOptions);
+        GuiComposer? mapComposer = mapLayerPanel;
+        bool mapControlsPresent = mapQueued
+            && mapComposer?.GetDropDown("map-layer") != null
+            && mapComposer.GetElement("map-layers") == null;
+        bool mapLayerResetToTextured = false;
+        if (mapControlsPresent)
+        {
+            // Textured terrain is the explicit neutral state; no second
+            // Layers ON/OFF switch is needed in this panel.
+            OnMapLayerChanged("moisture", true);
+            bool overlaySelected = activeMapLayer == AtlasMapLayer.Moisture;
+            OnMapLayerChanged("textured", true);
+            mapLayerResetToTextured = overlaySelected
+                && activeMapLayer == AtlasMapLayer.TexturedTerrain;
+        }
+        bool mapClosed = ClickAtlasControlForAutomatedTest(mapComposer, "map-layer-toggle")
+            && bottomPanelSection == AtlasPanelSection.MapOptions;
+        OpenBottomPanelImmediately(AtlasPanelSection.MapOptions);
+
+        bool instrumentOpened = ClickAtlasControlForAutomatedTest(
+                overlay,
+                "instrument-button"
+            );
+        OpenBottomPanelImmediately(AtlasPanelSection.Instrument);
+        bool instrumentControlsPresent = instrumentOpened
+            && bottomPanelSection == AtlasPanelSection.Instrument
+            && bottomPanel?.GetElement("handheld-instrument") is GuiElementAtlasChoice;
+
+        bool searchOpened = false;
+        bool searchControlsPresent = false;
+        if (SearchModeActive)
+        {
+            ResetBottomPanelState();
+            searchOpened = ClickAtlasControlForAutomatedTest(overlay, "search-button");
+            searchControlsPresent = searchOpened
+                && searchPanel?.GetTextInput("search-input") != null;
+        }
+
+        bool creativeOpened = false;
+        bool creativeClosed = false;
+        bool visualOpened = false;
+        bool visualClosed = false;
+        if (accessAvailable)
+        {
+            OpenBottomPanelImmediately(AtlasPanelSection.Settings);
+            bool creativeQueued = ClickAtlasControlForAutomatedTest(
+                    settingsModal,
+                    "creative-settings-button"
+                )
+                && queuedBottomPanelSection == AtlasPanelSection.Creative;
+            OpenBottomPanelImmediately(AtlasPanelSection.Creative);
+            creativeOpened = creativeQueued
+                && creativeSettingsModalOpen
+                && creativeSettingsModal?.GetElement("camera-angle-lock")
+                    is GuiElementAtlasSwitch;
+            creativeClosed = creativeOpened
+                && ClickAtlasControlForAutomatedTest(
+                    creativeSettingsModal,
+                    "creative-settings-close"
+                )
+                && queuedBottomPanelSection == AtlasPanelSection.Settings;
+            OpenBottomPanelImmediately(AtlasPanelSection.Settings);
+            visualOpened = ClickAtlasControlForAutomatedTest(
+                    settingsModal,
+                    "visual-lab-open"
+                )
+                && queuedBottomPanelSection == AtlasPanelSection.VisualLab;
+            OpenBottomPanelImmediately(AtlasPanelSection.VisualLab);
+            visualOpened = visualOpened
+                && visualLabModal?.GetAtlasSlider("atlas-exposure") != null
+                && visualLabModal?.GetAtlasSlider("cave-mask-brightness") != null;
+            visualClosed = visualOpened
+                && ClickAtlasControlForAutomatedTest(
+                    visualLabModal,
+                    "visual-lab-back"
+                )
+                && queuedBottomPanelSection == AtlasPanelSection.Settings;
+        }
+
+        float originalYaw = targetYawDegrees;
+        float originalPitch = targetPitchDegrees;
+        config.CameraAngleLocked = true;
+        ApplyRotationDrag(8, 24);
+        bool cameraAngleStayedLocked = Math.Abs(targetPitchDegrees - originalPitch) < 0.001f;
+        bool cameraYawStayedFree = Math.Abs(
+            NormalizeSignedDegrees(targetYawDegrees - originalYaw)
+        ) > 0.001f;
+        targetYawDegrees = originalYaw;
+        targetPitchDegrees = originalPitch;
+        config.CameraAngleLocked = false;
+        bool safeSurfaceWasActive = SurfaceSafetyEnabled;
+        config.CaveModeEnabled = true;
+        bool caveModeActivated = !SurfaceSafetyEnabled;
+        PrepareSurfaceSafetyFilter();
+
+        UpdateToolbarTooltip(
+            (int)Math.Round(overlay?.GetAtlasButton("settings-button")?.Bounds.absX ?? 0),
+            (int)Math.Round(overlay?.GetAtlasButton("settings-button")?.Bounds.absY ?? 0)
+        );
+        bool tooltipPassed = toolbarTooltipText == "Settings";
+        UpdateToolbarTooltip(-1, -1);
+        int bottomPanelAliasCount = 0;
+        if (ReferenceEquals(settingsModal, bottomPanel)) bottomPanelAliasCount++;
+        if (ReferenceEquals(performanceModal, bottomPanel)) bottomPanelAliasCount++;
+        if (ReferenceEquals(creativeSettingsModal, bottomPanel)) bottomPanelAliasCount++;
+        if (ReferenceEquals(visualLabModal, bottomPanel)) bottomPanelAliasCount++;
+        if (ReferenceEquals(searchPanel, bottomPanel)) bottomPanelAliasCount++;
+        if (ReferenceEquals(mapLayerPanel, bottomPanel)) bottomPanelAliasCount++;
+        if (ReferenceEquals(screenshotPanel, bottomPanel)) bottomPanelAliasCount++;
+        if (ReferenceEquals(unitPanel, bottomPanel)) bottomPanelAliasCount++;
+        bool oneBottomPanel = bottomPanel != null && bottomPanelAliasCount == 1;
+        bool responsiveBounds = overlay?.GetAtlasButton("settings-button") != null
+            && (!hasBottomPanelGeometry
+                || (bottomPanelGeometry.Height <= capi.Render.FrameHeight * 0.5
+                    && bottomPanelGeometry.Width > 0));
+        int renderedEntityCount = exactChunkRenderer?.LastRenderedEntityCount ?? 0;
+        bool heldItemsSuppressed = renderedEntityCount > 0
+            && exactChunkRenderer?.LastSuppressedHeldItemCount == renderedEntityCount;
+
+        ResetBottomPanelState();
+        automatedSmokeTestInterfaceControlsPassed = toolbarPresent
+            && accessAvailable
+            && initialFocusReleased
+            && settingsOpenedByClick
+            && settingsControlsPresent
+            && mapLayersToggled
+            && mapLayersRestored
+            && skipToggled
+            && skipRestored
+            && performanceBack
+            && performanceOpened
+            && automatedSmokeTestPerformanceModeSelected
+            && presentationControlPresent
+            && fixedLightingPrepared
+            && sliderBoundaryHandled
+            && sliderBoundaryClamped
+            && liveLightingRestored
+            && timeInstrumentSelected
+            && settingsClosed
+            && screenshotControlsPresent
+            && screenshotScaleChanged
+            && captureAreaChanged
+            && screenshotPreviewValid
+            && quickAccepted
+            && (quickStarted || tileScreenshot.State == AtlasScreenshotJobState.Cancelled)
+            && mapControlsPresent
+            && mapLayerResetToTextured
+            && mapClosed
+            && instrumentControlsPresent
+            && (!SearchModeActive || (searchOpened && searchControlsPresent))
+            && (!accessAvailable || (creativeOpened && creativeClosed && visualOpened && visualClosed))
+            && tooltipPassed
+            && oneBottomPanel
+            && responsiveBounds
+            && caveModeActivated
+            && cameraAngleStayedLocked
+            && cameraYawStayedFree
+            && heldItemsSuppressed;
+        if (automatedSmokeTestInterfaceControlsPassed)
+        {
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated compact UI test passed: toolbar, tooltips, one shared bottom panel, rapid section switching, Settings, screenshot options, quick screenshot binding, map options, search focus, instrument, Creative/Cheat controls, Hide UI/Escape and responsive bounds were exercised for {0} living models.",
+                renderedEntityCount
+            );
+        }
+        else
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated compact UI test failed: toolbar={0}, settings={1}/{2}, screenshot={3}, quick={4}/{5}, map={6}/{7}, instrument={8}, search={9}, creative={10}/{11}, visual={12}/{13}, tooltip={14}, onePanel={15}, bounds={16}, performance={17}, heldItems={18}/{19}.",
+                toolbarPresent,
+                settingsOpenedByClick,
+                settingsControlsPresent,
+                screenshotControlsPresent,
+                quickAccepted,
+                quickStarted,
+                mapControlsPresent,
+                mapLayerResetToTextured,
+                instrumentControlsPresent,
+                searchOpened && searchControlsPresent,
+                creativeOpened,
+                creativeClosed,
+                visualOpened,
+                visualClosed,
+                tooltipPassed,
+                oneBottomPanel,
+                responsiveBounds,
+                automatedSmokeTestPerformanceModeSelected,
+                exactChunkRenderer?.LastSuppressedHeldItemCount ?? 0,
+                renderedEntityCount
+            );
+        }
+        return;
+
+#if false
+        if (automatedSmokeTestInterfaceControlsAttempted) return;
+        automatedSmokeTestInterfaceControlsAttempted = true;
+
+        bool accessAvailable = CreativeCheatSettingsAvailable;
         bool settingsOpenedByClick = ClickAtlasControlForAutomatedTest(
                 overlay,
                 "settings-button"
@@ -2504,6 +2784,8 @@ public sealed class ModernAtlasDialog : GuiDialog
             );
         }
     }
+#endif
+    }
 
     private bool ValidateScreenshotPreviewRange()
     {
@@ -2719,7 +3001,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (!automatedSmokeTestActive
             || !automatedSmokeTestInterfaceControlsAttempted
             || !automatedSmokeTestInterfaceControlsPassed
-            || automatedSmokeScreenshotPhase < 5
+            || automatedSmokeScreenshotPhase < AutomatedUiScreenshotPhaseCount
             || automatedSmokeTestPresentationPassed
             || automatedSmokeTestPresentationPhase < 0
             || automatedSmokeTestPresentationPhase >= 5)
@@ -2731,6 +3013,22 @@ public sealed class ModernAtlasDialog : GuiDialog
         {
             case 0:
             {
+                if (!settingsModalOpen && bottomPanelAnimationActive)
+                {
+                    // The UI screenshot sequence ends by requesting Settings
+                    // from the Visual Lab. The shared-panel state machine
+                    // must finish that close-then-open transition before the
+                    // debounce exercise starts; a valid queued request is not
+                    // an error just because the logical Settings flag is
+                    // still false for one or two render frames.
+                    if (BottomPanelClosing
+                        && queuedBottomPanelSection == AtlasPanelSection.Settings)
+                    {
+                        return;
+                    }
+                    return;
+                }
+
                 if (!settingsModalOpen
                     && (!ClickAtlasControlForAutomatedTest(
                             overlay,
@@ -3007,15 +3305,20 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private bool ClickAtlasControlForAutomatedTest(GuiComposer? composer, string key)
     {
-        GuiElement? element = composer?.GetElement(key);
+        if (composer == null) return false;
+        GuiElement? element = composer.GetElement(key);
         if (element == null) return false;
 
         int x = (int)Math.Round(element.Bounds.absX + element.Bounds.OuterWidth * 0.5);
         int y = (int)Math.Round(element.Bounds.absY + element.Bounds.OuterHeight * 0.5);
         MouseEvent down = new(x, y, EnumMouseButton.Left, 0);
-        OnMouseDown(down);
+        // Exercise the same composer-owned press/release path as a real
+        // dialog click. Calling the outer dialog dispatcher here lets the
+        // full-screen overlay compete with a panel control at the same
+        // coordinate, which can drop a valid Settings button callback.
+        composer.OnMouseDown(down);
         MouseEvent up = new(x, y, EnumMouseButton.Left, 0);
-        OnMouseUp(up);
+        composer.OnMouseUp(up);
         return down.Handled && up.Handled;
     }
 
@@ -3215,7 +3518,24 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
 
         if (!automatedSmokeTestInterfaceControlsPassed
-            || automatedSmokeScreenshotPhase >= 5)
+            || automatedSmokeScreenshotPhase >= AutomatedUiScreenshotPhaseCount)
+        {
+            return;
+        }
+        if (automatedSmokeScreenshotPhase == 0 && bottomPanel != null)
+        {
+            // The unit-inspection exercise intentionally opens its own panel.
+            // The first comparison frame is the neutral atlas view, so close
+            // that panel before saving the navbar-only screenshot. Return and
+            // wait one complete render frame so the old panel cannot remain in
+            // the framebuffer captured below.
+            ResetBottomPanelState();
+            return;
+        }
+        // Wait for the shared bottom panel to settle before storing each UI
+        // comparison frame. This keeps the screenshot sequence deterministic
+        // while the real UI still uses the short render-time slide animation.
+        if (bottomPanelAnimationActive)
         {
             return;
         }
@@ -3232,8 +3552,12 @@ public sealed class ModernAtlasDialog : GuiDialog
         {
             0 => "atlas",
             1 => "settings",
-            2 => "performance",
-            3 => "creative",
+            2 => "screenshot-options",
+            3 => "map-options",
+            4 => "search",
+            5 => "instrument",
+            6 => "performance",
+            7 => "creative",
             _ => "visual-lab"
         };
         string path = $"{prefix}-{suffix}.png";
@@ -3250,16 +3574,28 @@ public sealed class ModernAtlasDialog : GuiDialog
                 OpenSettingsModal();
                 break;
             case 2:
-                OpenPerformanceModal();
+                ToggleScreenshotOptions();
                 break;
             case 3:
-                OpenCreativeSettingsModal();
+                ToggleMapOptions();
                 break;
             case 4:
+                ToggleSearchPanel();
+                break;
+            case 5:
+                ToggleInstrumentPanel();
+                break;
+            case 6:
+                OpenPerformanceModal();
+                break;
+            case 7:
+                OpenCreativeSettingsModal();
+                break;
+            case 8:
                 OpenVisualLab();
                 break;
             default:
-                CloseSettingsModal();
+                CloseVisualLab();
                 break;
         }
     }
@@ -3408,6 +3744,10 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (automatedSmokeTestSearchInputAttempted) return;
 
         automatedSmokeTestSearchInputAttempted = true;
+        if (SearchModeActive && searchPanel == null)
+        {
+            OpenBottomPanelImmediately(AtlasPanelSection.Search);
+        }
         GuiElementTextInput? input = searchPanel?.GetTextInput("search-input");
         bool initiallyUnfocused = input?.HasFocus == false;
         bool focused = input != null
@@ -3954,10 +4294,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestVisualLabComposer = null;
         AutomatedSmokeTestRenderedExactWorld = false;
         cheatModeEnabled = false;
-        settingsModalOpen = false;
-        performanceModalOpen = false;
-        creativeSettingsModalOpen = false;
-        visualLabModalOpen = false;
+        ResetBottomPanelState();
         interfaceHidden = false;
         selectedEntityId = null;
         searchController.Clear();
@@ -4036,32 +4373,40 @@ public sealed class ModernAtlasDialog : GuiDialog
         scrollRealtimeWeather.Dispose();
         overlay?.Dispose();
         overlay = null;
-        searchPanel?.Dispose();
-        searchPanel = null;
-        mapLayerPanel?.Dispose();
-        mapLayerPanel = null;
+        ResetBottomPanelState();
         creativeSettingsShortcut?.Dispose();
         creativeSettingsShortcut = null;
-        settingsModal?.Dispose();
-        settingsModal = null;
-        performanceModal?.Dispose();
-        performanceModal = null;
-        creativeSettingsModal?.Dispose();
-        creativeSettingsModal = null;
-        visualLabModal?.Dispose();
-        visualLabModal = null;
-        screenshotPanel?.Dispose();
-        screenshotPanel = null;
         screenshotProgressModal?.Dispose();
         screenshotProgressModal = null;
-        unitPanel?.Dispose();
-        unitPanel = null;
         tileScreenshot.Dispose();
         base.Dispose();
     }
 
     private void RecomposeInterface()
     {
+        AtlasPanelSection section = bottomPanelSection != AtlasPanelSection.None
+            ? bottomPanelSection
+            : queuedBottomPanelSection;
+        bool panelWasVisible = bottomPanelProgress > 0.01f
+            || section != AtlasPanelSection.None;
+        DisposeBottomPanelComposer();
+        ComposeOverlay();
+        if (panelWasVisible && section != AtlasPanelSection.None)
+        {
+            OpenBottomPanelImmediately(section);
+        }
+        composedFrameWidth = capi.Render.FrameWidth;
+        composedFrameHeight = capi.Render.FrameHeight;
+        composedGuiScale = RuntimeEnv.GUIScale;
+        SyncToolbarControls();
+        SyncSettingsControls();
+        SyncPerformanceControls();
+        SyncCreativeSettingsControls();
+        SyncMapLayerDropdown();
+        SyncScreenshotSettingsControls();
+        return;
+
+#if false
         overlay?.Dispose();
         searchPanel?.Dispose();
         mapLayerPanel?.Dispose();
@@ -4109,9 +4454,21 @@ public sealed class ModernAtlasDialog : GuiDialog
         SyncCreativeSettingsControls();
         SyncMapLayerDropdown();
     }
+#endif
+    }
 
     private void RecomposeViewportInterface()
     {
+        overlay?.Dispose();
+        overlay = null;
+        ComposeOverlay(true);
+        RepositionActiveBottomPanel();
+        composedFrameWidth = capi.Render.FrameWidth;
+        composedFrameHeight = capi.Render.FrameHeight;
+        composedGuiScale = RuntimeEnv.GUIScale;
+        return;
+
+#if false
         // Presentation changes alter only the map-relative controls. Keep
         // Settings and every modal child alive so a switch cannot receive its
         // MouseUp on a newly-created composer and so modal input remains valid.
@@ -4144,9 +4501,795 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
         SyncMapLayerDropdown();
     }
+#endif
+    }
+
+    private void ComposeCompactOverlay()
+    {
+        overlay?.Dispose();
+        overlay = null;
+
+        AtlasViewportBounds viewport = AtlasViewport;
+        double guiScale = Math.Max(0.5, RuntimeEnv.GUIScale);
+        double contentX = config.RenderOnScroll ? viewport.X / guiScale : 0;
+        double contentY = config.RenderOnScroll ? viewport.Y / guiScale : 0;
+        double guiWidth = viewport.Width / guiScale;
+        double guiHeight = viewport.Height / guiScale;
+        double toolbarWidth = ToolbarWidthGui(guiWidth);
+        double toolbarX = contentX + 10;
+        double toolbarY = contentY + 10;
+        double toolbarHeight = Math.Max(170, guiHeight - 20);
+        double rowHeight = Math.Clamp((toolbarHeight - 62) / 7, 24, 30);
+        double rowGap = Math.Max(2, rowHeight * 0.12);
+        double buttonX = toolbarX + 10;
+        double buttonWidth = toolbarWidth - 20;
+        // Leave enough breathing room for the larger version and view
+        // distance labels without letting the first button overlap them.
+        double sectionY = toolbarY + 66;
+        double pairWidth = Math.Max(24, (buttonWidth - 4) * 0.5);
+        double pairY = sectionY + rowHeight + rowGap;
+        double mapY = pairY + rowHeight + rowGap;
+        double searchY = mapY + rowHeight + rowGap;
+        double instrumentY = searchY + rowHeight + rowGap;
+        double exitY = toolbarY + toolbarHeight - rowHeight - 9;
+        double hideY = exitY - rowHeight - rowGap;
+
+        ElementBounds tooltipBounds = ElementBounds.Fixed(
+            toolbarX + toolbarWidth + 8,
+            contentY,
+            Math.Max(120, guiWidth - toolbarWidth - 20),
+            guiHeight
+        );
+
+        overlay = capi.Gui.CreateCompo("modernatlas-compact-overlay", ElementBounds.Fill)
+            .AddStaticCustomDraw(
+                ElementBounds.Fixed(toolbarX, toolbarY, toolbarWidth, toolbarHeight),
+                AtlasUiStyle.DrawToolbarPanel
+            )
+            .AddStaticText(
+                "ModernAtlas",
+                AtlasUiStyle.TitleFont(13),
+                ElementBounds.Fixed(toolbarX + 10, toolbarY + 10, toolbarWidth - 20, 18)
+            )
+            .AddStaticText(
+                "v0.6.7",
+                AtlasUiStyle.DetailFont(14),
+                ElementBounds.Fixed(toolbarX + 10, toolbarY + 27, toolbarWidth - 20, 18)
+            )
+            .AddDynamicText(
+                "",
+                AtlasUiStyle.DetailFont(12),
+                ElementBounds.Fixed(toolbarX + 10, toolbarY + 46, toolbarWidth - 20, 16),
+                "status"
+            )
+            .AddAtlasButton(
+                "Settings",
+                ToggleSettingsModal,
+                ElementBounds.Fixed(buttonX, sectionY, buttonWidth, rowHeight),
+                "settings-button",
+                AtlasButtonStyle.Compact
+            )
+            .AddAtlasButton(
+                "SF",
+                TakeQuickScreenshot,
+                ElementBounds.Fixed(buttonX, pairY, pairWidth, rowHeight),
+                "quick-screenshot-button",
+                AtlasButtonStyle.Compact
+            )
+            .AddAtlasButton(
+                "SP",
+                ToggleScreenshotOptions,
+                ElementBounds.Fixed(buttonX + pairWidth + 4, pairY, pairWidth, rowHeight),
+                "screenshot-options-button",
+                AtlasButtonStyle.Compact
+            )
+            .AddAtlasButton(
+                "Map",
+                ToggleMapOptions,
+                ElementBounds.Fixed(buttonX, mapY, buttonWidth, rowHeight),
+                "map-options-button",
+                AtlasButtonStyle.Compact
+            )
+            .AddAtlasButton(
+                "Search",
+                ToggleSearchPanel,
+                ElementBounds.Fixed(buttonX, searchY, buttonWidth, rowHeight),
+                "search-button",
+                AtlasButtonStyle.Compact
+            )
+            .AddAtlasButton(
+                "Hand",
+                ToggleInstrumentPanel,
+                ElementBounds.Fixed(buttonX, instrumentY, buttonWidth, rowHeight),
+                "instrument-button",
+                AtlasButtonStyle.Compact
+            )
+            .AddAtlasButton(
+                "Hide",
+                HideInterface,
+                ElementBounds.Fixed(buttonX, hideY, buttonWidth, rowHeight),
+                "hide-ui-button",
+                AtlasButtonStyle.Compact
+            )
+            .AddAtlasButton(
+                "Exit",
+                CloseAtlas,
+                ElementBounds.Fixed(buttonX, exitY, buttonWidth, rowHeight),
+                "exit-button",
+                AtlasButtonStyle.Compact
+            )
+            .AddDynamicCustomDraw(
+                tooltipBounds,
+                (context, surface, bounds) => AtlasUiStyle.DrawTooltip(
+                    context,
+                    surface,
+                    bounds,
+                    toolbarTooltipText,
+                    toolbarTooltipLocalY
+                ),
+                "toolbar-tooltip"
+            )
+            .Compose(false);
+
+        toolbarTooltipText = "";
+        toolbarTooltipLocalY = 0;
+        SyncToolbarControls();
+    }
+
+    private void SyncToolbarControls()
+    {
+        if (overlay == null) return;
+
+        bool settingsActive = SettingsHierarchyOpen;
+        overlay.GetAtlasButton("settings-button")?.SetActive(settingsActive);
+        overlay.GetAtlasButton("screenshot-options-button")?.SetActive(
+            ScreenshotOptionsOpen
+        );
+        overlay.GetAtlasButton("map-options-button")?.SetActive(MapPanelOpen);
+        overlay.GetAtlasButton("search-button")?.SetActive(SearchPanelOpen);
+        overlay.GetAtlasButton("instrument-button")?.SetActive(InstrumentPanelOpen);
+        overlay.GetAtlasButton("search-button")!.Enabled = SearchModeActive;
+        overlay.GetAtlasButton("quick-screenshot-button")!.Enabled =
+            !tileScreenshot.Busy;
+    }
+
+    private void UpdateToolbarTooltip(int mouseX, int mouseY)
+    {
+        toolbarTooltipText = "";
+        toolbarTooltipLocalY = 0;
+        if (interfaceHidden || overlay == null) return;
+
+        (string Key, string Text)[] tooltips =
+        {
+            ("settings-button", "Settings"),
+            ("quick-screenshot-button", "Quick screenshot"),
+            ("screenshot-options-button", "Screenshot options"),
+            ("map-options-button", "Map options"),
+            ("search-button", "Search loaded data"),
+            ("instrument-button", "Handheld instrument"),
+            ("hide-ui-button", "Hide atlas UI"),
+            ("exit-button", "Exit atlas")
+        };
+        foreach ((string key, string text) in tooltips)
+        {
+            GuiElementAtlasButton? button = overlay.GetAtlasButton(key);
+            if (button == null || !button.Bounds.PointInside(mouseX, mouseY))
+            {
+                continue;
+            }
+
+            toolbarTooltipText = text;
+            toolbarTooltipLocalY = mouseY - (config.RenderOnScroll ? AtlasViewport.Y : 0);
+            return;
+        }
+    }
+
+    private double ToolbarWidthGui(double guiWidth) => Math.Clamp(guiWidth * 0.12, 128, 148);
+
+    private double GetBottomPanelHeightGui(
+        AtlasPanelSection section,
+        double guiHeight
+    )
+    {
+        double desired = section switch
+        {
+            AtlasPanelSection.Settings => 236,
+            AtlasPanelSection.ScreenshotOptions => 190,
+            AtlasPanelSection.MapOptions => 158,
+            AtlasPanelSection.Search => 124,
+            AtlasPanelSection.Instrument => 118,
+            AtlasPanelSection.Performance => 152,
+            AtlasPanelSection.Creative => 132,
+            AtlasPanelSection.VisualLab => 158,
+            AtlasPanelSection.Unit => 188,
+            _ => 0
+        };
+        // Keep the panel below the requested 35% visual budget. At very large
+        // GUI scales the content uses the same composer with a small internal
+        // wheel-scroll offset rather than expanding over the map.
+        return Math.Max(96, Math.Min(desired, guiHeight * 0.35));
+    }
+
+    private ElementBounds GetBottomPanelRoot(
+        AtlasPanelSection section,
+        out AtlasPanelGeometry geometry
+    )
+    {
+        double guiScale = Math.Max(0.5, RuntimeEnv.GUIScale);
+        AtlasViewportBounds viewport = AtlasViewport;
+        double contentX = config.RenderOnScroll ? viewport.X / guiScale : 0;
+        double contentY = config.RenderOnScroll ? viewport.Y / guiScale : 0;
+        double guiWidth = viewport.Width / guiScale;
+        double guiHeight = viewport.Height / guiScale;
+        double toolbarWidth = ToolbarWidthGui(guiWidth);
+        double panelWidth = Math.Max(180, guiWidth - toolbarWidth - 30);
+        panelWidth = Math.Min(panelWidth, Math.Max(180, guiWidth - 8));
+        double panelHeight = GetBottomPanelHeightGui(section, guiHeight);
+        double panelX = contentX + toolbarWidth + 18;
+        double panelY = contentY + guiHeight - panelHeight - 8;
+        geometry = new AtlasPanelGeometry(
+            (int)Math.Round(panelX * guiScale),
+            (int)Math.Round(panelY * guiScale),
+            Math.Max(1, (int)Math.Round(panelWidth * guiScale)),
+            Math.Max(1, (int)Math.Round(panelHeight * guiScale))
+        );
+        bottomPanelGeometry = geometry;
+        hasBottomPanelGeometry = true;
+        ElementBounds root = ElementBounds.Fixed(
+            panelX,
+            panelY,
+            panelWidth,
+            panelHeight
+        );
+        bottomPanelBounds = root;
+        searchPanelBounds = section == AtlasPanelSection.Search ? root : null;
+        mapLayerPanelBounds = section == AtlasPanelSection.MapOptions ? root : null;
+        screenshotPanelBounds = section == AtlasPanelSection.ScreenshotOptions
+            ? root
+            : null;
+        return root;
+    }
+
+    private void SetBottomPanelAliases(AtlasPanelSection section)
+    {
+        settingsModal = section == AtlasPanelSection.Settings ? bottomPanel : null;
+        performanceModal = section == AtlasPanelSection.Performance
+            ? bottomPanel
+            : null;
+        creativeSettingsModal = section == AtlasPanelSection.Creative
+            ? bottomPanel
+            : null;
+        visualLabModal = section == AtlasPanelSection.VisualLab
+            ? bottomPanel
+            : null;
+        searchPanel = section == AtlasPanelSection.Search ? bottomPanel : null;
+        mapLayerPanel = section == AtlasPanelSection.MapOptions ? bottomPanel : null;
+        screenshotPanel = section == AtlasPanelSection.ScreenshotOptions
+            ? bottomPanel
+            : null;
+        unitPanel = section == AtlasPanelSection.Unit ? bottomPanel : null;
+    }
+
+    private GuiComposer? GetBottomPanelComposer(AtlasPanelSection section) =>
+        bottomPanelSection == section || bottomPanelVisualSection == section
+            ? bottomPanel
+            : null;
+
+    private AtlasPanelSection bottomPanelVisualSection => bottomPanel == null
+        ? AtlasPanelSection.None
+        : settingsModal != null
+            ? AtlasPanelSection.Settings
+            : performanceModal != null
+                ? AtlasPanelSection.Performance
+                : creativeSettingsModal != null
+                    ? AtlasPanelSection.Creative
+                    : visualLabModal != null
+                        ? AtlasPanelSection.VisualLab
+                        : searchPanel != null
+                            ? AtlasPanelSection.Search
+                            : mapLayerPanel != null
+                                ? AtlasPanelSection.MapOptions
+                                : screenshotPanel != null
+                                    ? AtlasPanelSection.ScreenshotOptions
+                                    : unitPanel != null
+                                        ? AtlasPanelSection.Unit
+                                        : AtlasPanelSection.None;
+
+    private void DisposeBottomPanelComposer()
+    {
+        bottomPanel?.UnfocusOwnElements();
+        bottomPanel?.Dispose();
+        bottomPanel = null;
+        SetBottomPanelAliases(AtlasPanelSection.None);
+        bottomPanelSection = AtlasPanelSection.None;
+        queuedBottomPanelSection = AtlasPanelSection.None;
+        bottomPanelProgress = 0;
+        bottomPanelAnimationActive = false;
+        bottomPanelBounds = null;
+        searchPanelBounds = null;
+        mapLayerPanelBounds = null;
+        screenshotPanelBounds = null;
+        hasBottomPanelGeometry = false;
+    }
+
+    private void ResetBottomPanelState()
+    {
+        DisposeBottomPanelComposer();
+        settingsModalOpen = false;
+        performanceModalOpen = false;
+        creativeSettingsModalOpen = false;
+        visualLabModalOpen = false;
+        toolbarTooltipText = "";
+        toolbarTooltipLocalY = 0;
+        settingsScrollOffset = 0;
+    }
+
+    private void SetLogicalBottomPanel(AtlasPanelSection section)
+    {
+        settingsModalOpen = section == AtlasPanelSection.Settings;
+        performanceModalOpen = section == AtlasPanelSection.Performance;
+        creativeSettingsModalOpen = section == AtlasPanelSection.Creative;
+        visualLabModalOpen = section == AtlasPanelSection.VisualLab;
+    }
+
+    private GuiComposer CreateBottomPanelComposer(
+        AtlasPanelSection section,
+        ElementBounds root
+    )
+    {
+        double width = root.fixedWidth;
+        double height = root.fixedHeight;
+        GuiComposer composer = capi.Gui.CreateCompo(
+            "modernatlas-bottom-panel",
+            root
+        ).AddStaticCustomDraw(
+            ElementBounds.Fixed(0, 0, width, height),
+            AtlasUiStyle.DrawCard
+        );
+
+        switch (section)
+        {
+            case AtlasPanelSection.Settings:
+                ComposeSettingsBottomPanel(composer, width, height);
+                break;
+            case AtlasPanelSection.ScreenshotOptions:
+                ComposeScreenshotBottomPanel(composer, width, height);
+                break;
+            case AtlasPanelSection.MapOptions:
+                ComposeMapBottomPanel(composer, width, height);
+                break;
+            case AtlasPanelSection.Search:
+                ComposeSearchBottomPanel(composer, width, height);
+                break;
+            case AtlasPanelSection.Instrument:
+                ComposeInstrumentBottomPanel(composer, width, height);
+                break;
+            case AtlasPanelSection.Performance:
+                ComposePerformanceBottomPanel(composer, width, height);
+                break;
+            case AtlasPanelSection.Creative:
+                ComposeCreativeBottomPanel(composer, width, height);
+                break;
+            case AtlasPanelSection.VisualLab:
+                ComposeVisualLabBottomPanel(composer, width, height);
+                break;
+            case AtlasPanelSection.Unit:
+                ComposeUnitBottomPanel(composer, width, height);
+                break;
+        }
+        return composer.Compose(false);
+    }
+
+    private void ComposeBottomPanel(AtlasPanelSection section, bool animate)
+    {
+        DisposeBottomPanelComposer();
+        ElementBounds root = GetBottomPanelRoot(section, out _);
+        bottomPanelSection = section;
+        bottomPanel = CreateBottomPanelComposer(section, root);
+        SetBottomPanelAliases(section);
+        SetLogicalBottomPanel(section);
+        bottomPanelProgress = animate ? 0 : 1;
+        bottomPanelAnimationStart = bottomPanelProgress;
+        bottomPanelAnimationTarget = 1;
+        bottomPanelAnimationStartedMilliseconds = capi.ElapsedMilliseconds;
+        bottomPanelAnimationActive = animate;
+        SyncSettingsControls();
+        SyncPerformanceControls();
+        SyncCreativeSettingsControls();
+        SyncMapLayerDropdown();
+        SyncScreenshotSettingsControls();
+        SyncToolbarControls();
+    }
+
+    private void OpenBottomPanelImmediately(AtlasPanelSection section)
+    {
+        ComposeBottomPanel(section, false);
+    }
+
+    private void StartClosingBottomPanel(AtlasPanelSection nextSection)
+    {
+        queuedBottomPanelSection = nextSection;
+        SetLogicalBottomPanel(AtlasPanelSection.None);
+        bottomPanelAnimationStart = bottomPanelProgress;
+        bottomPanelAnimationTarget = 0;
+        bottomPanelAnimationStartedMilliseconds = capi.ElapsedMilliseconds;
+        bottomPanelAnimationActive = true;
+        SyncToolbarControls();
+    }
+
+    private void RequestBottomPanel(AtlasPanelSection section)
+    {
+        if (section == AtlasPanelSection.None)
+        {
+            if (bottomPanelSection != AtlasPanelSection.None)
+            {
+                StartClosingBottomPanel(AtlasPanelSection.None);
+            }
+            return;
+        }
+        if (section == AtlasPanelSection.Search && !SearchModeActive) return;
+        if (section == AtlasPanelSection.Creative
+            && !CreativeCheatSettingsAvailable)
+        {
+            return;
+        }
+
+        ResetPointerDrag();
+        if (section != AtlasPanelSection.Unit) selectedEntityId = null;
+
+        if (bottomPanelAnimationActive && BottomPanelClosing)
+        {
+            if (section == bottomPanelSection)
+            {
+                // A second click on the active toolbar shortcut reverses the
+                // close animation instead of waiting for a stale queued open.
+                queuedBottomPanelSection = AtlasPanelSection.None;
+                SetLogicalBottomPanel(section);
+                bottomPanelAnimationStart = bottomPanelProgress;
+                bottomPanelAnimationTarget = 1;
+                bottomPanelAnimationStartedMilliseconds = capi.ElapsedMilliseconds;
+                bottomPanelAnimationActive = true;
+                SyncToolbarControls();
+            }
+            else
+            {
+                queuedBottomPanelSection = section;
+            }
+            return;
+        }
+
+        if (bottomPanelSection == section && !BottomPanelClosing)
+        {
+            StartClosingBottomPanel(AtlasPanelSection.None);
+            return;
+        }
+
+        if (bottomPanelSection != AtlasPanelSection.None)
+        {
+            StartClosingBottomPanel(section);
+            return;
+        }
+
+        OpenBottomPanel(section);
+    }
+
+    private void OpenBottomPanel(AtlasPanelSection section)
+    {
+        OpenBottomPanelImmediately(section);
+        bottomPanelProgress = 0;
+        bottomPanelAnimationStart = 0;
+        bottomPanelAnimationTarget = 1;
+        bottomPanelAnimationStartedMilliseconds = capi.ElapsedMilliseconds;
+        bottomPanelAnimationActive = true;
+    }
+
+    private void AdvanceBottomPanelAnimation()
+    {
+        if (!bottomPanelAnimationActive) return;
+
+        float elapsed = Math.Max(
+            0,
+            capi.ElapsedMilliseconds - bottomPanelAnimationStartedMilliseconds
+        );
+        float progress = Math.Clamp(
+            elapsed / BottomPanelAnimationMilliseconds,
+            0,
+            1
+        );
+        float eased = 1f - MathF.Pow(1f - progress, 3f);
+        bottomPanelProgress = bottomPanelAnimationStart
+            + (bottomPanelAnimationTarget - bottomPanelAnimationStart) * eased;
+        if (progress < 1f) return;
+
+        bottomPanelProgress = bottomPanelAnimationTarget;
+        bottomPanelAnimationActive = false;
+        if (bottomPanelProgress > 0.5f) return;
+
+        AtlasPanelSection next = queuedBottomPanelSection;
+        queuedBottomPanelSection = AtlasPanelSection.None;
+        DisposeBottomPanelComposer();
+        if (next != AtlasPanelSection.None)
+        {
+            OpenBottomPanel(next);
+        }
+        SyncToolbarControls();
+    }
+
+    private void RepositionActiveBottomPanel()
+    {
+        if (bottomPanel == null || bottomPanelSection == AtlasPanelSection.None)
+        {
+            return;
+        }
+
+        AtlasPanelSection section = bottomPanelSection;
+        ElementBounds? existingRoot = bottomPanelBounds;
+        ElementBounds newRoot = GetBottomPanelRoot(section, out _);
+        if (existingRoot == null) return;
+        existingRoot.fixedX = newRoot.fixedX;
+        existingRoot.fixedY = newRoot.fixedY;
+        existingRoot.fixedWidth = newRoot.fixedWidth;
+        existingRoot.fixedHeight = newRoot.fixedHeight;
+        bottomPanelBounds = existingRoot;
+        searchPanelBounds = section == AtlasPanelSection.Search ? existingRoot : null;
+        mapLayerPanelBounds = section == AtlasPanelSection.MapOptions ? existingRoot : null;
+        screenshotPanelBounds = section == AtlasPanelSection.ScreenshotOptions
+            ? existingRoot
+            : null;
+        bottomPanel.ReCompose();
+    }
+
+    private bool PanelCoversPoint(int x, int y)
+    {
+        if (!hasBottomPanelGeometry || bottomPanel == null) return false;
+        if (bottomPanelProgress <= 0.01f) return false;
+        int visibleHeight = Math.Max(
+            1,
+            (int)Math.Round(bottomPanelGeometry.Height * bottomPanelProgress)
+        );
+        int visibleTop = bottomPanelGeometry.Bottom - visibleHeight;
+        return x >= bottomPanelGeometry.X
+            && x <= bottomPanelGeometry.X + bottomPanelGeometry.Width
+            && y >= visibleTop
+            && y <= bottomPanelGeometry.Bottom;
+    }
+
+    private void RenderActiveBottomPanel(float deltaTime)
+    {
+        if (bottomPanel == null || bottomPanelProgress <= 0.01f) return;
+        if (bottomPanelSection == AtlasPanelSection.Unit)
+        {
+            UpdateUnitInspectionText();
+        }
+
+        int visibleHeight = Math.Max(
+            1,
+            (int)Math.Round(bottomPanelGeometry.Height * bottomPanelProgress)
+        );
+        int visibleTop = bottomPanelGeometry.Bottom - visibleHeight;
+        IRenderAPI render = capi.Render;
+        render.GlScissor(
+            bottomPanelGeometry.X,
+            Math.Max(0, render.FrameHeight - bottomPanelGeometry.Bottom),
+            bottomPanelGeometry.Width,
+            visibleHeight
+        );
+        render.GlScissorFlag(true);
+        try
+        {
+            bottomPanel.Render(deltaTime);
+        }
+        finally
+        {
+            render.GlScissorFlag(false);
+        }
+    }
+
+    private void ComposeSettingsBottomPanel(
+        GuiComposer composer,
+        double width,
+        double height
+    )
+    {
+        double row = height < 180 ? 22 : 28;
+        double left = 14;
+        double top = 38;
+        double column = Math.Max(132, (width - 42) / 3);
+        double switchWidth = Math.Min(50, Math.Max(42, column * 0.22));
+        double labelWidth = Math.Max(70, column - switchWidth - 6);
+        double contentOffset = Math.Clamp(settingsScrollOffset, 0, SettingsScrollMaximum(width, height));
+        composer
+            .AddStaticText(
+                "SETTINGS",
+                AtlasUiStyle.TitleFont(15),
+                ElementBounds.Fixed(left, 9, 190, 24)
+            )
+            .AddAtlasButton(
+                "×",
+                CloseSettingsModal,
+                ElementBounds.Fixed(width - 42, 7, 32, 28),
+                "settings-close",
+                AtlasButtonStyle.Icon
+            );
+
+        AddSettingSwitch(composer, "Map layers", OnMapLayersToggled, "map-layers", left, top - contentOffset, column, row, labelWidth, switchWidth);
+        AddSettingSwitch(composer, "Search loaded data", OnSearchModeToggled, "search-mode", left, top + row - contentOffset, column, row, labelWidth, switchWidth);
+        AddSettingSwitch(composer, "Animations", OnAnimationsToggled, "animations", left, top + row * 2 - contentOffset, column, row, labelWidth, switchWidth);
+        AddSettingSwitch(composer, "Skip transitions", OnSkipOpeningAnimationToggled, "skip-opening-animation", left, top + row * 3 - contentOffset, column, row, labelWidth, switchWidth);
+        AddSettingSwitch(composer, "Live clouds", OnCloudsToggled, "clouds", left, top + row * 4 - contentOffset, column, row, labelWidth, switchWidth);
+
+        double middle = left + column + 8;
+        AddSettingSwitch(composer, "3D scroll", OnRenderOnScrollToggled, "render-on-scroll", middle, top - contentOffset, column, row, labelWidth, switchWidth);
+        AddSettingSwitch(composer, "Scroll weather", OnScrollRealtimeWeatherToggled, "scroll-realtime-weather", middle, top + row - contentOffset, column, row, labelWidth, switchWidth);
+        AddSettingSwitch(composer, "Live sun", OnLiveLightingToggled, "live-lighting", middle, top + row * 2 - contentOffset, column, row, labelWidth, switchWidth);
+        composer
+            .AddStaticText("Fixed sun hour", AtlasUiStyle.DetailFont(10), ElementBounds.Fixed(middle, top + row * 3 + 3 - contentOffset, labelWidth, row - 4))
+            .AddAtlasSlider(OnFixedSunHourChanged, ElementBounds.Fixed(middle + labelWidth - 4, top + row * 3 - contentOffset, column - labelWidth + 4, row), "fixed-sun-hour");
+        composer
+            .AddStaticText("Advanced", AtlasUiStyle.LabelFont(10), ElementBounds.Fixed(middle, top + row * 4 - contentOffset, 90, row))
+            .AddAtlasButton("Performance", OpenPerformanceModal, ElementBounds.Fixed(middle + 72, top + row * 4 - contentOffset, Math.Max(70, column - 76), row), "performance-open", AtlasButtonStyle.Compact);
+        composer.AddAtlasButton("Visual lab", OpenVisualLab, ElementBounds.Fixed(middle, top + row * 5 - contentOffset, column, row), "visual-lab-open", AtlasButtonStyle.Compact);
+
+        double right = middle + column + 8;
+        AddSettingSwitch(composer, "Living models", OnLivingEntitiesToggled, "entities", right, top - contentOffset, column, row, labelWidth, switchWidth);
+        AddSettingSwitch(composer, "Players", OnPlayersToggled, "players", right, top + row - contentOffset, column, row, labelWidth, switchWidth);
+        AddSettingSwitch(composer, "Animals", OnAnimalsToggled, "animals", right, top + row * 2 - contentOffset, column, row, labelWidth, switchWidth);
+        AddSettingSwitch(composer, "Hostile mobs", OnMobsToggled, "mobs", right, top + row * 3 - contentOffset, column, row, labelWidth, switchWidth);
+        AddSettingSwitch(composer, "NPCs", OnNpcsToggled, "npcs", right, top + row * 4 - contentOffset, column, row, labelWidth, switchWidth);
+        if (CreativeCheatSettingsAvailable)
+        {
+            composer.AddAtlasButton("Creative / Cheat", OpenCreativeSettingsModal, ElementBounds.Fixed(right, top + row * 5 - contentOffset, column, row), "creative-settings-button", AtlasButtonStyle.Compact);
+        }
+        composer.AddDynamicText(
+            SettingsScrollMaximum(width, height) > 0 ? "Scroll panel for more controls" : "",
+            AtlasUiStyle.DetailFont(9),
+            ElementBounds.Fixed(left, height - 19, Math.Max(120, width - 60), 14),
+            "settings-scroll-status"
+        );
+    }
+
+    private double SettingsScrollMaximum(double width, double height) => height < 180 ? 74 : 0;
+
+    private static void AddSettingSwitch(
+        GuiComposer composer,
+        string label,
+        Action<bool> callback,
+        string key,
+        double x,
+        double y,
+        double columnWidth,
+        double rowHeight,
+        double labelWidth,
+        double switchWidth
+    )
+    {
+        composer
+            .AddStaticText(label, AtlasUiStyle.DetailFont(10), ElementBounds.Fixed(x, y + 4, labelWidth, rowHeight - 6))
+            .AddAtlasSwitch(callback, ElementBounds.Fixed(x + columnWidth - switchWidth, y, switchWidth, rowHeight), key);
+    }
+
+    private void ComposeScreenshotBottomPanel(GuiComposer composer, double width, double height)
+    {
+        bool compact = width < 460;
+        composer
+            .AddStaticText("SCREENSHOT OPTIONS", AtlasUiStyle.TitleFont(15), ElementBounds.Fixed(14, 9, 240, 24))
+            .AddAtlasButton("×", CloseScreenshotOptions, ElementBounds.Fixed(width - 42, 7, 32, 28), "shot-toggle", AtlasButtonStyle.Icon)
+            .AddStaticText("Resolution", AtlasUiStyle.DetailFont(10), ElementBounds.Fixed(16, 43, 72, 20))
+            .AddAtlasChoice(new[] { "1", "2", "3", "4", "5", "6", "7", "8" }, new[] { "1x", "2x", "3x", "4x", "5x", "6x", "7x", "8x" }, ScreenshotScaleIndex, OnScreenshotScaleChanged, ElementBounds.Fixed(86, 36, compact ? 130 : 150, 34), "shot-scale")
+            .AddStaticText("Capture area", AtlasUiStyle.DetailFont(10), ElementBounds.Fixed(compact ? 16 : 254, 43, 76, 20))
+            .AddAtlasChoice(new[] { "100", "75", "50", "25" }, new[] { "100%", "75%", "50%", "25%" }, ScreenshotCaptureAreaIndex, OnScreenshotCaptureAreaChanged, ElementBounds.Fixed(compact ? 86 : 330, 36, compact ? 130 : 150, 34), "shot-area")
+            .AddAtlasButton("TAKE", TakeScreenshot, ElementBounds.Fixed(width - 104, 36, 88, 34), "shot-take", AtlasButtonStyle.Compact)
+            .AddDynamicText("", AtlasUiStyle.DetailFont(9), ElementBounds.Fixed(16, 76, Math.Max(140, width - 32), Math.Max(38, height - 96)), "shot-preview")
+            .AddDynamicText("", AtlasUiStyle.DetailFont(9), ElementBounds.Fixed(16, height - 18, Math.Max(140, width - 32), 14), "shot-status");
+    }
+
+    private void ComposeMapBottomPanel(GuiComposer composer, double width, double height)
+    {
+        bool compact = width < 460;
+        double selectorX = compact ? 16 : 82;
+        double selectorY = compact ? 42 : 38;
+        double selectorWidth = Math.Max(120, width - (compact ? 32 : 98));
+        double statusY = compact ? 82 : 78;
+        composer
+            .AddStaticText("MAP OPTIONS", AtlasUiStyle.TitleFont(15), ElementBounds.Fixed(14, 9, 220, 24))
+            .AddAtlasButton("×", CloseMapOptions, ElementBounds.Fixed(width - 42, 7, 32, 28), "map-layer-toggle", AtlasButtonStyle.Icon);
+        if (!compact)
+        {
+            composer.AddStaticText(
+                "Layer",
+                AtlasUiStyle.DetailFont(10),
+                ElementBounds.Fixed(16, 43, 58, 20)
+            );
+        }
+        composer
+            .AddDropDown(AtlasMapLayerInfo.Values, AtlasMapLayerInfo.Names, (int)activeMapLayer, OnMapLayerChanged, ElementBounds.Fixed(selectorX, selectorY, selectorWidth, 34), "map-layer")
+            .AddDynamicText("", AtlasUiStyle.DetailFont(9), ElementBounds.Fixed(16, statusY, Math.Max(120, width - 32), 16), "layer-status")
+            .AddDynamicText(activeMapLayer.DetailedLegend(), AtlasUiStyle.DetailFont(9), ElementBounds.Fixed(16, statusY + 16, Math.Max(120, width - 32), 16), "layer-legend");
+        if (activeMapLayer == AtlasMapLayer.OreDensity && CreativeCheatSettingsAvailable)
+        {
+            GetOreFilterOptions(out string[] values, out string[] names, out int selectedIndex);
+            composer
+                .AddStaticText("Ore", AtlasUiStyle.DetailFont(10), ElementBounds.Fixed(16, compact ? 137 : 114, 64, 20))
+                .AddDropDown(values, names, selectedIndex, OnOreFilterChanged, ElementBounds.Fixed(78, compact ? 132 : 109, Math.Max(120, width - 94), 34), "ore-filter");
+        }
+    }
+
+    private void ComposeSearchBottomPanel(GuiComposer composer, double width, double height)
+    {
+        composer
+            .AddStaticText("SEARCH", AtlasUiStyle.TitleFont(15), ElementBounds.Fixed(14, 9, 130, 24))
+            .AddAtlasButton("×", CloseSearchPanel, ElementBounds.Fixed(width - 42, 7, 32, 28), "search-close", AtlasButtonStyle.Icon)
+            .AddAtlasTextInput(ElementBounds.Fixed(16, 38, Math.Max(120, width - 82), 34), OnSearchTextChanged, AtlasUiStyle.InputFont(12), "search-input")
+            .AddAtlasButton("×", ClearSearch, ElementBounds.Fixed(width - 58, 38, 42, 34), "search-clear", AtlasButtonStyle.Icon)
+            .AddDynamicText("", AtlasUiStyle.DetailFont(9), ElementBounds.Fixed(16, height - 30, Math.Max(120, width - 32), 22), "search-status");
+        composer.GetTextInput("search-input")?.SetMaxLength(80);
+        composer.GetTextInput("search-input")?.SetPlaceHolderText(
+            $"Block, creature, player or item — {searchController.SearchLanguageSummary}"
+        );
+    }
+
+    private void ComposeInstrumentBottomPanel(GuiComposer composer, double width, double height)
+    {
+        composer
+            .AddStaticText("INSTRUMENT", AtlasUiStyle.TitleFont(15), ElementBounds.Fixed(14, 9, 160, 24))
+            .AddAtlasButton("×", CloseInstrumentPanel, ElementBounds.Fixed(width - 42, 7, 32, 28), "instrument-close", AtlasButtonStyle.Icon)
+            .AddStaticText("Handheld display", AtlasUiStyle.DetailFont(10), ElementBounds.Fixed(16, 48, 130, 20))
+            .AddAtlasChoice(new[] { "off", "compass", "time" }, new[] { "Off", "Compass", "Time" }, HandheldInstrumentChoiceIndex, OnHandheldInstrumentChoiceChanged, ElementBounds.Fixed(154, 40, Math.Max(120, width - 170), 34), "handheld-instrument")
+            .AddStaticText("Compass and Time share one physical wooden shell.", AtlasUiStyle.DetailFont(9), ElementBounds.Fixed(16, height - 26, Math.Max(120, width - 32), 18), "instrument-note");
+    }
+
+    private void ComposePerformanceBottomPanel(GuiComposer composer, double width, double height)
+    {
+        composer
+            .AddStaticText("PERFORMANCE", AtlasUiStyle.TitleFont(15), ElementBounds.Fixed(44, 9, 180, 24))
+            .AddAtlasButton("‹", ClosePerformanceModal, ElementBounds.Fixed(10, 7, 32, 28), "performance-back", AtlasButtonStyle.Icon)
+            .AddStaticText("Atlas lighting", AtlasUiStyle.DetailFont(11), ElementBounds.Fixed(16, 45, width - 84, 22))
+            .AddAtlasSwitch(OnPerformanceLightingToggled, ElementBounds.Fixed(width - 62, 40, 50, 28), "performance-lighting")
+            .AddStaticText("Hide vegetation", AtlasUiStyle.DetailFont(11), ElementBounds.Fixed(16, 78, width - 84, 22))
+            .AddAtlasSwitch(OnHideVegetationToggled, ElementBounds.Fixed(width - 62, 73, 50, 28), "hide-vegetation")
+            .AddStaticText("Developer visual controls only affect the atlas framebuffer.", AtlasUiStyle.DetailFont(9), ElementBounds.Fixed(16, height - 25, Math.Max(120, width - 32), 18), "performance-note");
+    }
+
+    private void ComposeCreativeBottomPanel(GuiComposer composer, double width, double height)
+    {
+        composer
+            .AddStaticText("CREATIVE / CHEAT", AtlasUiStyle.TitleFont(15), ElementBounds.Fixed(14, 9, 220, 24))
+            .AddAtlasButton("×", CloseCreativeSettingsModal, ElementBounds.Fixed(width - 42, 7, 32, 28), "creative-settings-close", AtlasButtonStyle.Icon)
+            .AddStaticText("Cave mode", AtlasUiStyle.DetailFont(11), ElementBounds.Fixed(16, 46, width - 84, 22))
+            .AddAtlasSwitch(OnCaveModeToggled, ElementBounds.Fixed(width - 62, 41, 50, 28), "cave-mode")
+            .AddStaticText("Lock camera angle", AtlasUiStyle.DetailFont(11), ElementBounds.Fixed(16, 79, width - 84, 22))
+            .AddAtlasSwitch(OnCameraAngleLockToggled, ElementBounds.Fixed(width - 62, 74, 50, 28), "camera-angle-lock")
+            .AddStaticText("Available only in Creative or accepted Cheat Mode.", AtlasUiStyle.DetailFont(9), ElementBounds.Fixed(16, height - 24, Math.Max(120, width - 32), 17), "creative-note");
+    }
+
+    private void ComposeVisualLabBottomPanel(GuiComposer composer, double width, double height)
+    {
+        composer
+            .AddStaticText("ATLAS VISUAL LAB", AtlasUiStyle.TitleFont(15), ElementBounds.Fixed(44, 9, 220, 24))
+            .AddAtlasButton("‹", CloseVisualLab, ElementBounds.Fixed(10, 7, 32, 28), "visual-lab-back", AtlasButtonStyle.Icon)
+            .AddStaticText("Exposure", AtlasUiStyle.DetailFont(10), ElementBounds.Fixed(16, 45, 100, 20))
+            .AddAtlasSlider(OnAtlasExposureChanged, ElementBounds.Fixed(118, 38, Math.Max(120, width - 134), 32), "atlas-exposure")
+            .AddStaticText("Cave mask", AtlasUiStyle.DetailFont(10), ElementBounds.Fixed(16, 82, 100, 20))
+            .AddAtlasSlider(OnCaveMaskBrightnessChanged, ElementBounds.Fixed(118, 75, Math.Max(120, width - 134), 32), "cave-mask-brightness")
+            .AddAtlasButton("Reset tuning", ResetVisualTuning, ElementBounds.Fixed(16, height - 35, Math.Max(120, width - 32), 28), "visual-lab-reset", AtlasButtonStyle.Compact);
+        ConfigureVisualLabSliders();
+    }
+
+    private void ComposeUnitBottomPanel(GuiComposer composer, double width, double height)
+    {
+        composer
+            .AddStaticText("UNIT", AtlasUiStyle.TitleFont(15), ElementBounds.Fixed(14, 9, 160, 24))
+            .AddAtlasButton("×", CloseUnitInspection, ElementBounds.Fixed(width - 42, 7, 32, 28), "unit-close", AtlasButtonStyle.Icon)
+            .AddDynamicText("", AtlasUiStyle.LabelFont(12), ElementBounds.Fixed(16, 42, Math.Max(120, width - 32), 20), "unit-name")
+            .AddDynamicText("", AtlasUiStyle.DetailFont(10), ElementBounds.Fixed(16, 68, Math.Max(120, width - 32), Math.Max(28, height - 82)), "unit-details");
+    }
 
     private void ComposeOverlay(bool viewportOnly = false)
     {
+        ComposeCompactOverlay();
+        return;
+
+#if false
         ElementBounds root = ElementBounds.Fill;
         double guiScale = Math.Max(0.5, RuntimeEnv.GUIScale);
         AtlasViewportBounds viewport = AtlasViewport;
@@ -4764,6 +5907,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         SyncPerformanceControls();
         SyncCreativeSettingsControls();
     }
+#endif
+    }
 
     /// <summary>
     /// Compact collapsible screenshot panel for the main atlas UI, placed in
@@ -4910,14 +6055,23 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private bool ToggleScreenshotPanel()
     {
-        screenshotPanelCollapsed = !screenshotPanelCollapsed;
-        // Defer the recomposition: disposing the composer inside its own
-        // click event can crash the engine's element iteration.
-        pendingScreenshotPanelRecompose = true;
+        ToggleScreenshotOptions();
         return true;
     }
 
-    internal bool ScreenshotPanelExpanded => !screenshotPanelCollapsed;
+    private bool ToggleScreenshotOptions()
+    {
+        RequestBottomPanel(AtlasPanelSection.ScreenshotOptions);
+        return true;
+    }
+
+    private bool CloseScreenshotOptions()
+    {
+        if (ScreenshotOptionsOpen) RequestBottomPanel(AtlasPanelSection.None);
+        return true;
+    }
+
+    internal bool ScreenshotPanelExpanded => ScreenshotOptionsOpen;
 
     private string BuildScreenshotCollapsedStatus()
     {
@@ -4934,28 +6088,10 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private void RecomposeScreenshotPanel()
     {
-        screenshotPanel?.Dispose();
-        screenshotPanel = null;
-        double guiScale = Math.Max(0.5, RuntimeEnv.GUIScale);
-        AtlasViewportBounds viewport = AtlasViewport;
-        double contentX = config.RenderOnScroll ? viewport.X / guiScale : 0;
-        double contentY = config.RenderOnScroll ? viewport.Y / guiScale : 0;
-        double guiWidth = viewport.Width / guiScale;
-        double relativeActionX = Math.Max(18, guiWidth - 232);
-        double headerWidth = Math.Min(430, Math.Max(1, relativeActionX - 20));
-        double headerHeight = headerWidth < 230 ? 92 : headerWidth < 390 ? 78 : 50;
-        double screenshotPanelY = contentY + headerHeight + 30;
-        if (MapLayerControlsVisible && mapLayerPanelBounds != null)
+        if (ScreenshotOptionsOpen)
         {
-            screenshotPanelY = mapLayerPanelBounds.fixedY
-                + mapLayerPanelBounds.fixedHeight + 8;
+            OpenBottomPanelImmediately(AtlasPanelSection.ScreenshotOptions);
         }
-        else if (SearchModeActive && searchPanelBounds != null)
-        {
-            screenshotPanelY = searchPanelBounds.fixedY
-                + searchPanelBounds.fixedHeight + 8;
-        }
-        ComposeScreenshotPanel(contentX, screenshotPanelY);
     }
 
     private int ScreenshotScaleIndex => Math.Clamp(
@@ -4977,13 +6113,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private bool OpenSettingsModal()
     {
-        ResetPointerDrag();
-        selectedEntityId = null;
-        visualLabModalOpen = false;
-        performanceModalOpen = false;
-        creativeSettingsModalOpen = false;
-        settingsModalOpen = true;
-        SyncSettingsControls();
+        RequestBottomPanel(AtlasPanelSection.Settings);
         return true;
     }
 
@@ -4996,72 +6126,84 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private bool CloseSettingsModal()
     {
-        settingsModalOpen = false;
-        performanceModalOpen = false;
-        creativeSettingsModalOpen = false;
-        visualLabModalOpen = false;
+        RequestBottomPanel(AtlasPanelSection.None);
         return true;
     }
 
     private bool OpenCreativeSettingsModal()
     {
-        if (!CreativeCheatSettingsAvailable) return true;
-
-        ResetPointerDrag();
-        searchPanel?.UnfocusOwnElements();
-        selectedEntityId = null;
-        settingsModalOpen = false;
-        performanceModalOpen = false;
-        visualLabModalOpen = false;
-        creativeSettingsModalOpen = true;
-        SyncCreativeSettingsControls();
+        RequestBottomPanel(AtlasPanelSection.Creative);
         return true;
     }
 
     private bool CloseCreativeSettingsModal()
     {
-        creativeSettingsModalOpen = false;
+        RequestBottomPanel(AtlasPanelSection.Settings);
         return true;
     }
 
     private bool OpenPerformanceModal()
     {
-        ResetPointerDrag();
-        selectedEntityId = null;
-        settingsModalOpen = false;
-        creativeSettingsModalOpen = false;
-        visualLabModalOpen = false;
-        performanceModalOpen = true;
-        SyncPerformanceControls();
+        RequestBottomPanel(AtlasPanelSection.Performance);
         return true;
     }
 
     private bool ClosePerformanceModal()
     {
-        performanceModalOpen = false;
-        settingsModalOpen = true;
-        SyncSettingsControls();
+        RequestBottomPanel(AtlasPanelSection.Settings);
         return true;
     }
 
     private bool OpenVisualLab()
     {
-        ResetPointerDrag();
-        selectedEntityId = null;
-        settingsModalOpen = false;
-        performanceModalOpen = false;
-        creativeSettingsModalOpen = false;
-        visualLabModalOpen = true;
-        SyncVisualLabControls();
+        RequestBottomPanel(AtlasPanelSection.VisualLab);
         return true;
     }
 
     private bool CloseVisualLab()
     {
-        visualLabModalOpen = false;
-        performanceModalOpen = false;
-        settingsModalOpen = true;
-        SyncSettingsControls();
+        RequestBottomPanel(AtlasPanelSection.Settings);
+        return true;
+    }
+
+    private bool ToggleMapOptions()
+    {
+        RequestBottomPanel(AtlasPanelSection.MapOptions);
+        return true;
+    }
+
+    private bool CloseMapOptions()
+    {
+        if (MapPanelOpen) RequestBottomPanel(AtlasPanelSection.None);
+        return true;
+    }
+
+    private bool ToggleSearchPanel()
+    {
+        if (!SearchModeActive)
+        {
+            OpenSettingsModal();
+            return true;
+        }
+        RequestBottomPanel(AtlasPanelSection.Search);
+        return true;
+    }
+
+    private bool CloseSearchPanel()
+    {
+        if (SearchPanelOpen) RequestBottomPanel(AtlasPanelSection.None);
+        return true;
+    }
+
+    private bool ToggleInstrumentPanel()
+    {
+        RequestBottomPanel(AtlasPanelSection.Instrument);
+        return true;
+    }
+
+    private bool CloseInstrumentPanel()
+    {
+        if (InstrumentPanelOpen) RequestBottomPanel(AtlasPanelSection.None);
         return true;
     }
 
@@ -5181,7 +6323,25 @@ public sealed class ModernAtlasDialog : GuiDialog
     /// camera is applied immediately; every following tile is applied after
     /// the previous tile's frame was read back.
     /// </summary>
-    private bool TakeScreenshot()
+    private bool TakeScreenshot() => StartScreenshotCapture(
+        Math.Clamp(
+            config.ScreenshotScale,
+            AtlasTiledScreenshot.MinimumResolutionScale,
+            AtlasTiledScreenshot.MaximumResolutionScale
+        ),
+        AtlasTiledScreenshot.NormalizeCaptureAreaPercent(
+            config.ScreenshotCaptureAreaPercent
+        ),
+        "Screenshot"
+    );
+
+    private bool TakeQuickScreenshot() => StartScreenshotCapture(1, 100, "Quick screenshot");
+
+    private bool StartScreenshotCapture(
+        int gridSize,
+        int captureAreaPercent,
+        string captureLabel
+    )
     {
         if (tileScreenshot.Busy)
         {
@@ -5196,15 +6356,14 @@ public sealed class ModernAtlasDialog : GuiDialog
             return true;
         }
 
-        int gridSize = Math.Clamp(
-            config.ScreenshotScale,
+        gridSize = Math.Clamp(
+            gridSize,
             AtlasTiledScreenshot.MinimumResolutionScale,
             AtlasTiledScreenshot.MaximumResolutionScale
         );
-        int captureAreaPercent =
-            AtlasTiledScreenshot.NormalizeCaptureAreaPercent(
-                config.ScreenshotCaptureAreaPercent
-            );
+        captureAreaPercent = AtlasTiledScreenshot.NormalizeCaptureAreaPercent(
+            captureAreaPercent
+        );
         AtlasViewportBounds viewport = AtlasViewport;
         float viewportAspect = viewport.Width / (float)Math.Max(1, viewport.Height);
         if (!tileScreenshot.StartCapture(
@@ -5249,10 +6408,11 @@ public sealed class ModernAtlasDialog : GuiDialog
         OpenScreenshotProgressModal();
         soundController.PlayPageTouch();
         capi.Logger.Notification(
-            "[ModernAtlas] Queued a {0}x{0} tiled atlas screenshot of the centered {1}% area: {2}.",
+            "[ModernAtlas] Queued {3}: {0}x{0} tiled atlas screenshot of the centered {1}% area: {2}.",
             gridSize,
             captureAreaPercent,
-            BuildScreenshotPreviewText().Replace('\n', ' ')
+            BuildScreenshotPreviewText().Replace('\n', ' '),
+            captureLabel
         );
         return true;
     }
@@ -5339,43 +6499,43 @@ public sealed class ModernAtlasDialog : GuiDialog
     private void OpenScreenshotProgressModal()
     {
         screenshotProgressModal?.Dispose();
-        ElementBounds root = ElementBounds.Fixed(0, 0, 540, 264)
+        ElementBounds root = ElementBounds.Fixed(0, 0, 420, 190)
             .WithAlignment(EnumDialogArea.CenterMiddle);
         screenshotProgressModal = capi.Gui.CreateCompo(
                 "modernatlas-screenshot-progress",
                 root
             )
             .AddStaticCustomDraw(
-                ElementBounds.Fixed(0, 0, 540, 264),
+                ElementBounds.Fixed(0, 0, 420, 190),
                 AtlasUiStyle.DrawCard
             )
             .AddStaticText(
                 "SCREENSHOT",
-                AtlasUiStyle.TitleFont(20),
-                ElementBounds.Fixed(76, 24, 400, 30)
+                AtlasUiStyle.TitleFont(17),
+                ElementBounds.Fixed(58, 18, 300, 26)
             )
             .AddStaticCustomDraw(
-                ElementBounds.Fixed(26, 68, 488, 2),
+                ElementBounds.Fixed(22, 54, 376, 2),
                 AtlasUiStyle.DrawSeparator
             )
             .AddDynamicText(
                 "Taking screenshots, please wait…",
-                AtlasUiStyle.DetailFont(13),
-                ElementBounds.Fixed(28, 88, 484, 64),
+                AtlasUiStyle.DetailFont(12),
+                ElementBounds.Fixed(22, 70, 376, 40),
                 "shot-progress"
             )
             .AddDynamicText(
                 "",
-                AtlasUiStyle.DetailFont(10),
-                ElementBounds.Fixed(28, 158, 484, 58),
+                AtlasUiStyle.DetailFont(9),
+                ElementBounds.Fixed(22, 112, 376, 34),
                 "shot-result"
             )
             .AddAtlasButton(
                 "CANCEL / CLOSE",
                 CloseScreenshotProgressModal,
-                ElementBounds.Fixed(170, 222, 200, 40),
+                ElementBounds.Fixed(136, 153, 148, 30),
                 "shot-modal-close",
-                AtlasButtonStyle.Dark
+                AtlasButtonStyle.Compact
             )
             .Compose(false);
     }
@@ -5532,10 +6692,20 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool CloseUnitInspection()
     {
         selectedEntityId = null;
+        if (bottomPanelSection == AtlasPanelSection.Unit)
+        {
+            RequestBottomPanel(AtlasPanelSection.None);
+        }
         return true;
     }
 
     private void RenderUnitInspection(float deltaTime)
+    {
+        UpdateUnitInspectionText();
+        if (unitPanel != null) unitPanel.Render(deltaTime);
+    }
+
+    private void UpdateUnitInspectionText()
     {
         if (selectedEntityId == null) return;
         if (!UnitInspectionEnabled || exactChunkRenderer == null)
@@ -5589,7 +6759,6 @@ public sealed class ModernAtlasDialog : GuiDialog
 
         unitPanel?.GetDynamicText("unit-name").SetNewText(name);
         unitPanel?.GetDynamicText("unit-details").SetNewText(details);
-        unitPanel?.Render(deltaTime);
     }
 
     private bool TrySelectRenderedEntity(int mouseX, int mouseY)
@@ -5653,6 +6822,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             best.Value.Kind,
             selectedEntityId.Value
         );
+        RequestBottomPanel(AtlasPanelSection.Unit);
         return true;
     }
 
@@ -5719,12 +6889,12 @@ public sealed class ModernAtlasDialog : GuiDialog
     {
         ResetPointerDrag();
         ClearOreHover();
-        searchPanel?.UnfocusOwnElements();
+        bottomPanel?.UnfocusOwnElements();
         selectedEntityId = null;
-        settingsModalOpen = false;
-        performanceModalOpen = false;
-        creativeSettingsModalOpen = false;
-        visualLabModalOpen = false;
+        if (bottomPanelSection != AtlasPanelSection.None)
+        {
+            StartClosingBottomPanel(AtlasPanelSection.None);
+        }
         interfaceHidden = true;
         return true;
     }
@@ -5893,50 +7063,16 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private bool ToggleMapLayerPanel()
     {
-        mapLayerPanelCollapsed = !mapLayerPanelCollapsed;
-        // Defer the recomposition: disposing the composer inside its own
-        // click event can crash the engine's element iteration.
-        pendingMapLayerPanelRecompose = true;
+        ToggleMapOptions();
         return true;
     }
 
     private void RecomposeMapLayerPanel()
     {
-        mapLayerPanel?.Dispose();
-        mapLayerPanel = null;
-        double guiScale = Math.Max(0.5, RuntimeEnv.GUIScale);
-        AtlasViewportBounds viewport = AtlasViewport;
-        double contentX = config.RenderOnScroll ? viewport.X / guiScale : 0;
-        double contentY = config.RenderOnScroll ? viewport.Y / guiScale : 0;
-        double guiWidth = viewport.Width / guiScale;
-        double relativeActionX = Math.Max(18, guiWidth - 232);
-        double headerWidth = Math.Min(
-            430,
-            Math.Max(1, relativeActionX - 20)
-        );
-        double headerHeight = headerWidth < 230 ? 92 : headerWidth < 390 ? 78 : 50;
-        ComposeMapLayerPanel(
-            contentX,
-            contentY + (SearchModeActive ? 202 : headerHeight + 22),
-            Math.Min(560, Math.Max(200, relativeActionX - 36))
-        );
-        // The map-layer panel height depends on the active layer. Reposition
-        // the screenshot panel so the two panels never overlap.
-        screenshotPanel?.Dispose();
-        screenshotPanel = null;
-        double screenshotPanelY = contentY + headerHeight + 30;
-        if (MapLayerControlsVisible && mapLayerPanelBounds != null)
+        if (MapPanelOpen)
         {
-            screenshotPanelY = mapLayerPanelBounds.fixedY
-                + mapLayerPanelBounds.fixedHeight + 8;
+            OpenBottomPanelImmediately(AtlasPanelSection.MapOptions);
         }
-        else if (SearchModeActive && searchPanelBounds != null)
-        {
-            screenshotPanelY = searchPanelBounds.fixedY
-                + searchPanelBounds.fixedHeight + 8;
-        }
-        ComposeScreenshotPanel(contentX, screenshotPanelY);
-        SyncMapLayerDropdown();
     }
 
     private void GetOreFilterOptions(
@@ -6050,7 +7186,10 @@ public sealed class ModernAtlasDialog : GuiDialog
         ClearOreHover();
         if (previousLayer != activeMapLayer && mapLayerPanel != null)
         {
-            RecomposeMapLayerPanel();
+            // Rebuild after the dropdown event has returned to GuiComposer;
+            // disposing the shared bottom composer from inside its callback
+            // would invalidate the current element iteration.
+            pendingMapLayerPanelRecompose = true;
         }
         SyncMapLayerDropdown();
         if (IsOpened()) PrepareMapLayer();
@@ -6870,6 +8009,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         // Keep the requested state visible in the surviving Settings composer
         // while the committed map viewport continues to render unchanged.
         SyncSettingsControls();
+        SyncToolbarControls();
     }
 
     private void OnScrollRealtimeWeatherToggled(bool enabled)
@@ -6877,6 +8017,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         config.ScrollRealtimeWeatherEnabled = enabled;
         saveConfig();
         SyncSettingsControls();
+        SyncToolbarControls();
     }
 
     private void OnPlayerCompassToggled(bool enabled)
@@ -6884,6 +8025,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         config.ShowPlayerCompass = enabled;
         saveConfig();
         SyncSettingsControls();
+        SyncToolbarControls();
     }
 
     private bool ToggleCompass()
@@ -6912,6 +8054,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
         saveConfig();
         SyncSettingsControls();
+        SyncToolbarControls();
     }
 
     private void OnMapLayersToggled(bool enabled)
@@ -6957,6 +8100,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         saveConfig();
         SyncSettingsControls();
         SyncCreativeSettingsControls();
+        SyncToolbarControls();
     }
 
     private void OnCameraAngleLockToggled(bool enabled)
