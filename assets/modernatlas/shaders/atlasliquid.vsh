@@ -21,9 +21,11 @@ out vec2 uvSize;
 out float stillFrameWeight;
 out vec2 flowVectorf;
 out vec3 absoluteWorldPosition;
+out vec3 normalIn;
 flat out vec2 uvBase;
 flat out int waterFlags;
 
+#include vertexflagbits.ash
 #include noise3d.ash
 #include colormap.vsh
 
@@ -32,13 +34,12 @@ void main(void)
     vec4 worldPos = vec4(xyz + origin, 1.0);
     absoluteWorldPosition = worldPos.xyz + playerpos.xyz;
     gl_Position = projectionMatrix * modelViewMatrix * worldPos;
-    // Give the liquid surface deterministic depth priority without changing
-    // its world-space height or making it camera-relative. Contained liquids
-    // must keep their real depth so barrel and bucket walls occlude them.
-    if ((waterFlagsIn & 2) != 0)
-    {
-        gl_Position.z -= 0.0005 * gl_Position.w;
-    }
+    // Keep the completed engine liquid mesh at its true world depth. A
+    // clip-space bias is not a fixed block-space offset under the atlas's
+    // orthographic projection and can move a water face in front of raised
+    // soil, walls, or container rims. Hardware depth testing must resolve
+    // those intersections from the actual mesh positions.
+    normalIn = unpackNormal(renderFlags);
     uv = uvIn;
     uvSize = vec2((waterFlagsIn >> 10) & 0xff, (waterFlagsIn >> 18) & 0xff)
         / 255.0 * blockTextureSize;

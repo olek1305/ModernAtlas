@@ -28,6 +28,7 @@ in vec2 uvSize;
 in float stillFrameWeight;
 in vec2 flowVectorf;
 in vec3 absoluteWorldPosition;
+in vec3 normalIn;
 flat in vec2 uvBase;
 flat in int waterFlags;
 
@@ -90,12 +91,20 @@ void main(void)
     }
 
     bool isLava = (waterFlags & (1 << 27)) != 0;
-    float speed = isLava ? waterFlowCounter * 0.1 : waterFlowCounter;
+    // Match the engine liquid contract for side faces without importing its
+    // camera-dependent warp or shadow/Fresnel path. Vertical faces use the
+    // same native counter, with the normal-dependent cadence used by the
+    // registered liquid material; downward-facing UV flow is reversed.
+    float normalVariation = max(0.0, 0.9 - abs(normalIn.y));
+    float speed = isLava
+        ? waterFlowCounter * 0.1 * (1.0 + 5.0 * normalVariation)
+        : waterFlowCounter * (1.0 + 5.0 * normalVariation);
     float flowSpeed = length(flowVectorf);
     vec4 color;
     if (flowSpeed > 0.001)
     {
         vec2 flow = normalize(flowVectorf) * flowSpeed;
+        if (normalIn.y < 0.0) flow *= -1.0;
         vec2 offset = clamp(
             mod((uv - uvBase) + flow * speed * blockTextureSize, blockTextureSize),
             vec2(1.0) / textureAtlasSize,
@@ -133,6 +142,14 @@ void main(void)
         // while matching the neutral, shaded appearance of its container.
         color.rgb *= 0.58;
         color.a *= 0.78;
+    }
+    if (!isLava && normalIn.y < 0.5)
+    {
+        // The engine's liquid shader intentionally subdues vertical and
+        // underside faces. Preserve the authored top-surface alpha while
+        // preventing the two triangles of every exposed side quad from
+        // becoming opaque cyan wedges at atlas distance.
+        color.a *= 0.3333333;
     }
     if (!isLava)
     {
