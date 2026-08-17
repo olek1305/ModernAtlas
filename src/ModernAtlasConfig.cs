@@ -38,6 +38,13 @@ public sealed class ModernAtlasConfig
     public int ScreenshotScale { get; set; } = 2;
 
     /// <summary>
+    /// Linear capture area as a percentage of the current atlas view. The
+    /// supported choices are 100, 75, 50 and 25; the selected area is always
+    /// centered and does not change the saved image dimensions.
+    /// </summary>
+    public int ScreenshotCaptureAreaPercent { get; set; } = 100;
+
+    /// <summary>
     /// Stores the player's explicit spoiler decision per save without writing
     /// anything to the Vintage Story save or map database.
     /// </summary>
