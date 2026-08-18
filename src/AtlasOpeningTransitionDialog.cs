@@ -295,6 +295,13 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     {
         if (finishing) return;
 
+        IRenderAPI renderStateApi = capi.Render;
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(
+            renderStateApi
+        );
+        try
+        {
+
         // On the first Survival GUI frame the normal world has completed its
         // ordinary render, while this transition deliberately skipped its
         // Opaque-stage arms and scroll. Capture that pristine frame before
@@ -337,6 +344,25 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
                 "[ModernAtlas] The opening transition timed out while preparing atlas resources."
             );
             QueueFinish(false);
+        }
+        }
+        finally
+        {
+            try
+            {
+                renderState.RestoreGuiHandoff();
+            }
+            finally
+            {
+                try
+                {
+                    renderStateApi.GetEngineShader(EnumShaderProgram.Gui).Use();
+                }
+                catch
+                {
+                    // GUI teardown can invalidate the engine program.
+                }
+            }
         }
     }
 
@@ -639,8 +665,12 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         );
 
         float[] projection = projectionOverride ?? render.CurrentProjectionMatrix;
+        bool remoteWorldScroll = remotePose != null;
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
 
         float[] parent;
+        try
+        {
         if (remotePose is RemoteScrollPose pose)
         {
             float handDistance = Distance(pose.LeftHand, pose.RightHand);
@@ -666,7 +696,6 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         render.CurrentActiveShader?.Stop();
         shader.Use();
         shader.UniformMatrix("projectionMatrix", projection);
-        bool remoteWorldScroll = remotePose != null;
         render.GLDepthMask(remoteWorldScroll && visible >= 0.96f);
         if (remoteWorldScroll)
         {
@@ -788,21 +817,36 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         finally
         {
             shader.Stop();
-            render.GlEnableCullFace();
-            render.GLEnableDepthTest();
-            render.GLDepthMask(true);
-            render.GlToggleBlend(false, EnumBlendMode.Standard);
-            if (!remoteWorldScroll && projectionOverride != null)
-            {
-                // Late GUI renderers following this dialog (notably the
-                // crosshair) expect the engine GUI shader to remain active.
-                render.GetEngineShader(EnumShaderProgram.Gui).Use();
-            }
         }
 
         rolledScrollRendered |= elapsed < UnrollStartSeconds + 0.18f;
         openScrollRendered |= unroll >= 0.78f;
         return true;
+        }
+        finally
+        {
+            if (remoteWorldScroll)
+            {
+                renderState.RestoreWorldOpaqueHandoff();
+            }
+            else
+            {
+                renderState.RestoreGuiHandoff();
+                if (projectionOverride != null)
+                {
+                    // Late GUI renderers following this dialog (notably the
+                    // crosshair) expect the engine GUI shader to remain active.
+                    try
+                    {
+                        render.GetEngineShader(EnumShaderProgram.Gui).Use();
+                    }
+                    catch
+                    {
+                        // The GUI program can be invalid during world leave.
+                    }
+                }
+            }
+        }
     }
 
     private void RenderFirstPersonArms(
@@ -1274,20 +1318,37 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         );
         if (entry <= 0 || solidTexture.TextureId <= 0) return;
 
-        capi.Render.CurrentActiveShader?.Stop();
-        capi.Render.GetEngineShader(EnumShaderProgram.Gui).Use();
-        capi.Render.GLDepthMask(false);
-        capi.Render.GLDisableDepthTest();
-        capi.Render.GlToggleBlend(true, EnumBlendMode.Standard);
-        capi.Render.Render2DTexture(
-            solidTexture.TextureId,
-            0,
-            0,
-            capi.Render.FrameWidth,
-            capi.Render.FrameHeight,
-            98,
-            new Vec4f(0.72f, 0.78f, 0.68f, entry)
-        );
+        IRenderAPI render = capi.Render;
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
+        try
+        {
+            render.CurrentActiveShader?.Stop();
+            render.GetEngineShader(EnumShaderProgram.Gui).Use();
+            render.GLDepthMask(false);
+            render.GLDisableDepthTest();
+            render.GlToggleBlend(true, EnumBlendMode.Standard);
+            render.Render2DTexture(
+                solidTexture.TextureId,
+                0,
+                0,
+                render.FrameWidth,
+                render.FrameHeight,
+                98,
+                new Vec4f(0.72f, 0.78f, 0.68f, entry)
+            );
+        }
+        finally
+        {
+            renderState.RestoreGuiHandoff();
+            try
+            {
+                render.GetEngineShader(EnumShaderProgram.Gui).Use();
+            }
+            catch
+            {
+                // GUI teardown can invalidate the engine program.
+            }
+        }
     }
 
     private void RefreshSeraphForearmMeshes()

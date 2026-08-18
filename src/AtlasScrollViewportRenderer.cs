@@ -34,13 +34,16 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
     )
     {
         IRenderAPI render = capi.Render;
-        SetCanonicalGuiState(render);
-        if (!EnsureMeshes()) return;
-        IShaderProgram? shader = shaderProvider();
-        if (shader == null || shader.Disposed || sheetMesh == null || cylinderMesh == null)
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
+        try
         {
-            return;
-        }
+            SetCanonicalGuiState(render);
+            if (!EnsureMeshes()) return;
+            IShaderProgram? shader = shaderProvider();
+            if (shader == null || shader.Disposed || sheetMesh == null || cylinderMesh == null)
+            {
+                return;
+            }
 
         float frameHeight = Math.Max(1, render.FrameHeight);
         float aspect = render.FrameWidth / frameHeight;
@@ -132,7 +135,11 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
         finally
         {
             shader.Stop();
-            SetCanonicalGuiState(render);
+        }
+        }
+        finally
+        {
+            renderState.RestoreGuiHandoff(false);
         }
     }
 
@@ -158,6 +165,9 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
 
         float[] projection = Mat4f.Create();
         Mat4f.Ortho(projection, -aspect, aspect, -1f, 1f, -4f, 4f);
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
+        try
+        {
         render.CurrentActiveShader?.Stop();
         render.CurrentFrameBuffer = null;
         render.GLDisableDepthTest();
@@ -177,6 +187,11 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
             shader.Stop();
             render.GLDepthMask(true);
             render.GlToggleBlend(false, EnumBlendMode.Standard);
+        }
+        }
+        finally
+        {
+            renderState.RestoreGuiHandoff(false);
         }
     }
 
@@ -208,6 +223,9 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
         Mat4f.Ortho(projection, -aspect, aspect, -1f, 1f, -4f, 4f);
         AtlasViewportBounds clip = viewport.Inset(AtlasContentClipInsetPixels);
 
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
+        try
+        {
         render.CurrentActiveShader?.Stop();
         render.CurrentFrameBuffer = null;
         render.GLDisableDepthTest();
@@ -263,11 +281,19 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
             render.GLEnableDepthTest();
             render.GlToggleBlend(false, EnumBlendMode.Standard);
         }
+        }
+        finally
+        {
+            renderState.RestoreGuiHandoff(false);
+        }
     }
 
     public void RenderAtlasFullscreen(int atlasTextureId)
     {
         IRenderAPI render = capi.Render;
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
+        try
+        {
         SetCanonicalGuiState(render);
         if (!EnsureMeshes() || sheetMesh == null) return;
         IShaderProgram? shader = shaderProvider();
@@ -303,7 +329,11 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
         finally
         {
             shader.Stop();
-            SetCanonicalGuiState(render);
+        }
+        }
+        finally
+        {
+            renderState.RestoreGuiHandoff(false);
         }
     }
 

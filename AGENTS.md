@@ -31,6 +31,17 @@ the product scope when the atlas itself is correct.
 
 ## Rendering scope
 
+- ModernAtlas must never manipulate ordinary world rendering, chunk loading,
+  chunk visibility, render distance, world textures, world materials, lighting,
+  fog, color, opacity or appearance. Treat all Vintage Story world and client
+  data as read-only input obtained through the public API or narrowly isolated
+  compatibility adapters. Rendering filters, shader uniforms, texture
+  substitutions, camera changes and visual effects may affect only the atlas
+  framebuffer while the atlas is being drawn, and every temporarily changed
+  engine value must be restored in `finally` before ordinary world rendering
+  resumes. Increasing or decreasing the atlas view must never request chunks,
+  alter the game's `viewDistance`, delay normal chunk presentation or leave an
+  atlas shader path enabled in the world renderer.
 - Render world blocks and their actual block shapes and textures.
 - Support blocks registered by other mods through the public Vintage Story
   block and texture-atlas APIs. Do not hard-code only vanilla block IDs.

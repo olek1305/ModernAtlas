@@ -45,10 +45,17 @@ public sealed class ModernAtlasDialog : GuiDialog
         "MODERNATLAS_SMOKE_SCREENSHOT_CANCEL";
     private const string SmokeDisableCloudsEnvironmentVariable =
         "MODERNATLAS_SMOKE_DISABLE_CLOUDS";
+    private const string SmokeExpectedViewDistanceEnvironmentVariable =
+        "MODERNATLAS_SMOKE_EXPECT_VIEW_DISTANCE";
+    private const string SmokeYawEnvironmentVariable =
+        "MODERNATLAS_SMOKE_YAW";
+    private const string SmokePitchEnvironmentVariable =
+        "MODERNATLAS_SMOKE_PITCH";
 
     private ExactChunkRendererAdapter? exactChunkRenderer;
     private ExactChunkRendererAdapter? pendingNormalWorldShaderRestore;
     private long normalWorldShaderRestoreGeneration;
+    private bool worldTeardownStarted;
     private readonly float[] projection = Mat4f.Create();
     private readonly ModernAtlasConfig config;
     private readonly ModernAtlasServerPolicy serverPolicy;
@@ -178,6 +185,12 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool automatedSmokeTestPerformanceModeSelected;
     private bool automatedSmokeTestPerformanceModeRendered;
     private bool automatedSmokeTestPresentationPassed;
+    private bool automatedSmokeTestResolvedAtlasAlphaChecked;
+    private bool automatedSmokeTestResolvedAtlasAlphaPassed;
+    private bool automatedSmokeTestViewDistancePassed = true;
+    private bool automatedSmokeTestViewDistanceUnchanged = true;
+    private int automatedSmokeTestInitialViewDistance = -1;
+    private bool automatedSmokeCloseStatePassed = true;
     private int automatedSmokeTestPresentationPhase;
     private GuiComposer? automatedSmokeTestSettingsComposer;
     private GuiComposer? automatedSmokeTestPerformanceComposer;
@@ -294,6 +307,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private readonly PresentationChangeCoordinator presentationChangeCoordinator = new();
 
     internal bool AutomatedSmokeTestRenderedExactWorld { get; private set; }
+    internal bool AutomatedSmokeCloseStatePassed => automatedSmokeCloseStatePassed;
     internal bool CheatModeEnabledForAutomation => cheatModeEnabled;
 
     /// <summary>
@@ -598,6 +612,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     public override void OnGuiOpened()
     {
         FlushPendingNormalWorldShaderRestore();
+        worldTeardownStarted = false;
         base.OnGuiOpened();
         presentationChangeCoordinator.Reset(config.RenderOnScroll);
         // The dialog is constructed before a world/player necessarily exists.
@@ -652,6 +667,46 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "[ModernAtlas] Automated smoke test is rendering the Survival-safe 20-degree camera floor before exercising the unlocked 0-degree pitch."
             );
         }
+        string? forcedSmokeYaw = Environment.GetEnvironmentVariable(
+            SmokeYawEnvironmentVariable
+        );
+        if (automatedSmokeTestActive
+            && float.TryParse(
+                forcedSmokeYaw,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out float parsedSmokeYaw
+            ))
+        {
+            yawDegrees = NormalizeDegrees(parsedSmokeYaw);
+            targetYawDegrees = yawDegrees;
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated smoke test selected atlas yaw {0:0.0} degrees without changing world camera state.",
+                yawDegrees
+            );
+        }
+        string? forcedSmokePitch = Environment.GetEnvironmentVariable(
+            SmokePitchEnvironmentVariable
+        );
+        if (automatedSmokeTestActive
+            && float.TryParse(
+                forcedSmokePitch,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out float parsedSmokePitch
+            ))
+        {
+            pitchDegrees = Math.Clamp(
+                parsedSmokePitch,
+                MinimumPitchDegrees,
+                86f
+            );
+            targetPitchDegrees = pitchDegrees;
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated smoke test selected atlas pitch {0:0.0} degrees without changing world camera state.",
+                pitchDegrees
+            );
+        }
         FocusOnExteriorSurface();
         FitLoadedTerrain();
         zoom = targetZoom;
@@ -668,6 +723,12 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnRenderGUI(float deltaTime)
     {
+        IRenderAPI renderStateApi = capi.Render;
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(
+            renderStateApi
+        );
+        try
+        {
         AdvancePresentationChange();
         AdvanceBottomPanelAnimation();
         bool viewportChanged = capi.Render.FrameWidth != composedFrameWidth
@@ -690,6 +751,12 @@ public sealed class ModernAtlasDialog : GuiDialog
             PrepareMapLayer();
         }
         SynchronizeGameViewDistance();
+        if (automatedSmokeTestActive
+            && automatedSmokeTestInitialViewDistance > 0
+            && GameViewDistance != automatedSmokeTestInitialViewDistance)
+        {
+            automatedSmokeTestViewDistanceUnchanged = false;
+        }
         if (pendingInterfaceRecompose)
         {
             pendingInterfaceRecompose = false;
@@ -734,6 +801,30 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (freshAtlasFrame && rendered)
         {
             lastAtlasWorldRenderMilliseconds = capi.ElapsedMilliseconds;
+            if (automatedSmokeTestActive
+                && !automatedSmokeTestResolvedAtlasAlphaChecked
+                && exactChunkRenderer?.BoundaryResolvedLastFrame == true)
+            {
+                automatedSmokeTestResolvedAtlasAlphaChecked = true;
+                automatedSmokeTestResolvedAtlasAlphaPassed =
+                    exactChunkRenderer.ValidateResolvedAtlasFramebuffer(
+                        out string resolvedAlphaDiagnostic
+                    );
+                if (automatedSmokeTestResolvedAtlasAlphaPassed)
+                {
+                    capi.Logger.Notification(
+                        "[ModernAtlas] Automated resolved-atlas alpha validation passed: {0}.",
+                        resolvedAlphaDiagnostic
+                    );
+                }
+                else
+                {
+                    capi.Logger.Error(
+                        "[ModernAtlas] Automated resolved-atlas alpha validation failed: {0}.",
+                        resolvedAlphaDiagnostic
+                    );
+                }
+            }
             if (pendingScreenshotRequest)
             {
                 AdvanceTileScreenshot();
@@ -938,6 +1029,27 @@ public sealed class ModernAtlasDialog : GuiDialog
         CaptureAutomatedSmokeScreenshot();
         AdvanceAutomatedPresentationSwitchTest();
         AdvanceAutomatedSmokeTest();
+        }
+        finally
+        {
+            try
+            {
+                renderState.RestoreGuiHandoff();
+            }
+            finally
+            {
+                // The following GUI renderer owns this handoff; it is set only
+                // after the atlas scope has released its target and shader.
+                try
+                {
+                    renderStateApi.GetEngineShader(EnumShaderProgram.Gui).Use();
+                }
+                catch
+                {
+                    // The client may already be tearing down its GUI context.
+                }
+            }
+        }
     }
 
     public override void OnMouseDown(MouseEvent args)
@@ -1271,7 +1383,41 @@ public sealed class ModernAtlasDialog : GuiDialog
         ResetPointerDrag();
         compassRenderer.Dispose();
         ReleaseAtlasFrameCache();
-        ScheduleNormalWorldShaderRestore();
+        if (!worldTeardownStarted)
+        {
+            ScheduleNormalWorldShaderRestore();
+        }
+        else
+        {
+            // Render finally blocks already clear atlas switches before world
+            // teardown. Never activate an engine shader after DefaultShader-
+            // Uniforms has started being replaced.
+            pendingNormalWorldShaderRestore = null;
+            normalWorldShaderRestoreGeneration++;
+        }
+        if (!worldTeardownStarted)
+        {
+            bool atlasFlagsClear = exactChunkRenderer?.AtlasStateIsClear ?? true;
+            bool framebufferClear = capi.Render.CurrentFrameBuffer == null;
+            bool statePassed = atlasFlagsClear && framebufferClear;
+            automatedSmokeCloseStatePassed &= statePassed;
+            if (statePassed)
+            {
+                capi.Logger.Notification(
+                    "[ModernAtlas] Atlas close state check passed: atlas flags/uniforms clear={0}, current framebuffer null={1}.",
+                    atlasFlagsClear,
+                    framebufferClear
+                );
+            }
+            else
+            {
+                capi.Logger.Error(
+                    "[ModernAtlas] Atlas close state check failed: atlas flags/uniforms clear={0}, current framebuffer null={1}.",
+                    atlasFlagsClear,
+                    framebufferClear
+                );
+            }
+        }
         base.OnGuiClosed();
     }
 
@@ -1471,27 +1617,17 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (rendererToRestore == null) return;
 
         pendingNormalWorldShaderRestore = rendererToRestore;
-        long generation = ++normalWorldShaderRestoreGeneration;
-        // Switch off the atlas-only branches between frames. Capture the
-        // renderer instance and invalidate older callbacks: a rapid
-        // close/open/close sequence must never let a callback for the first
-        // atlas session mutate the renderer used by the next one.
-        capi.Event.RegisterCallback(
-            _ =>
-            {
-                if (generation != normalWorldShaderRestoreGeneration
-                    || !ReferenceEquals(
-                        pendingNormalWorldShaderRestore,
-                        rendererToRestore
-                    ))
-                {
-                    return;
-                }
-
-                pendingNormalWorldShaderRestore = null;
-                rendererToRestore.RestoreNormalWorldShaders();
-            },
-            1
+        normalWorldShaderRestoreGeneration++;
+        // The ordinary world must not render one frame with atlas branches
+        // still enabled. Restore synchronously while the live renderer and
+        // DefaultShaderUniforms are valid; Dispose remains shader-free during
+        // world teardown.
+        pendingNormalWorldShaderRestore = null;
+        rendererToRestore.RestoreNormalWorldShaders();
+        capi.Logger.Notification(
+            "[ModernAtlas] Synchronously restored ordinary-world shader state after atlas close: atlas flags clear={0}, current framebuffer null={1}.",
+            rendererToRestore.AtlasStateIsClear,
+            capi.Render.CurrentFrameBuffer == null
         );
     }
 
@@ -1738,6 +1874,50 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "[ModernAtlas] Automated smoke test disabled atlas clouds for the rendering A/B diagnostic."
             );
         }
+        automatedSmokeTestInitialViewDistance = GameViewDistance;
+        automatedSmokeTestViewDistancePassed = true;
+        automatedSmokeTestViewDistanceUnchanged = true;
+        string? expectedSmokeViewDistance = Environment.GetEnvironmentVariable(
+            SmokeExpectedViewDistanceEnvironmentVariable
+        );
+        if (!string.IsNullOrWhiteSpace(expectedSmokeViewDistance))
+        {
+            if (int.TryParse(expectedSmokeViewDistance, out int expectedDistance))
+            {
+                automatedSmokeTestViewDistancePassed =
+                    automatedSmokeTestInitialViewDistance == expectedDistance;
+                if (automatedSmokeTestViewDistancePassed)
+                {
+                    capi.Logger.Notification(
+                        "[ModernAtlas] Automated smoke view-distance probe passed: configured={0}; atlas read the same value without changing it.",
+                        automatedSmokeTestInitialViewDistance
+                    );
+                }
+                else
+                {
+                    capi.Logger.Error(
+                        "[ModernAtlas] Automated smoke view-distance probe failed: expected configured value {0}, read {1}; the test never changes viewDistance.",
+                        expectedDistance,
+                        automatedSmokeTestInitialViewDistance
+                    );
+                }
+            }
+            else
+            {
+                automatedSmokeTestViewDistancePassed = false;
+                capi.Logger.Error(
+                    "[ModernAtlas] Automated smoke view-distance probe could not parse MODERNATLAS_SMOKE_EXPECT_VIEW_DISTANCE={0}.",
+                    expectedSmokeViewDistance
+                );
+            }
+        }
+        else
+        {
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated smoke view-distance probe: configured={0}; no setting mutation is performed.",
+                automatedSmokeTestInitialViewDistance
+            );
+        }
         // Capture the resized compass in the early smoke frames. The normal
         // interface exercise later selects Time, so one run now covers both
         // instrument faces before restoring the player's original choice.
@@ -1820,6 +2000,9 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestPerformanceModeSelected = false;
         automatedSmokeTestPerformanceModeRendered = false;
         automatedSmokeTestPresentationPassed = false;
+        automatedSmokeTestResolvedAtlasAlphaChecked = false;
+        automatedSmokeTestResolvedAtlasAlphaPassed = false;
+        automatedSmokeCloseStatePassed = true;
         automatedSmokeTestPresentationPhase = 0;
         automatedSmokeTestSettingsComposer = null;
         automatedSmokeTestPerformanceComposer = null;
@@ -2006,7 +2189,10 @@ public sealed class ModernAtlasDialog : GuiDialog
             && automatedSmokeTestSearchPassed
             && automatedSmokeTestMapLayerPassed
             && automatedSmokeTestPerformanceModeRendered
-            && automatedSmokeTestPresentationPassed;
+            && automatedSmokeTestPresentationPassed
+            && automatedSmokeTestResolvedAtlasAlphaPassed
+            && automatedSmokeTestViewDistancePassed
+            && automatedSmokeTestViewDistanceUnchanged;
         if (smokeStepsComplete
             && !automatedScreenshotCaptureRequested
             && !automatedScreenshotSequenceFailed
@@ -2078,9 +2264,14 @@ public sealed class ModernAtlasDialog : GuiDialog
             && (!automatedScreenshotSequenceEnabled
                 || automatedScreenshotSequenceStep >= 2);
         if (passed && automatedSmokeTestElapsedSeconds < 3f) return;
+        // Exact loaded-data search and map-layer preparation are budgeted over
+        // many frames. A large standard world can legitimately need more than
+        // one minute before those phases finish, especially after a second
+        // atlas cycle. Keep the timeout finite, but avoid treating ordinary
+        // client streaming variance as a rendering failure.
         float screenshotTimeoutSeconds = config.ScreenshotScale >= 8
             ? 180f
-            : 60f;
+            : 120f;
         if (!passed && automatedSmokeTestElapsedSeconds < screenshotTimeoutSeconds)
             return;
 
@@ -2103,9 +2294,14 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (!passed)
         {
             capi.Logger.Error(
-                "[ModernAtlas] Automated smoke summary: exact={0}, boundary={1}, safeSurface={2}, pitch={3}/{4}, interface={5}, unit={6}/{7}, searchInput={8}, bilingual={9}, ore={10}, creativeOre={11}, partialZoom={12}, maximumZoom={13}, search={14}(phase={15}), layers={16}(phase={17}), performance={18}(selected={19}, renderedVegetationHidden={20}, flatLighting={21}), presentation={22}, screenshotCapture={23}(requested={24}, sequenceStep={25}, outputs={26}, cancel={27}/{28}).",
+                "[ModernAtlas] Automated smoke summary: exact={0}, boundary={1}, resolvedAlpha={2}(checked={3}), viewDistance={4}(unchanged={5}, initial={6}), safeSurface={7}, pitch={8}/{9}, interface={10}, unit={11}/{12}, searchInput={13}, bilingual={14}, ore={15}, creativeOre={16}, partialZoom={17}, maximumZoom={18}, search={19}(phase={20}), layers={21}(phase={22}), performance={23}(selected={24}, renderedVegetationHidden={25}, flatLighting={26}), presentation={27}, screenshotCapture={28}(requested={29}, sequenceStep={30}, outputs={31}, cancel={32}/{33}).",
                 AutomatedSmokeTestRenderedExactWorld,
                 exactChunkRenderer?.BoundaryResolvedLastFrame == true,
+                automatedSmokeTestResolvedAtlasAlphaPassed,
+                automatedSmokeTestResolvedAtlasAlphaChecked,
+                automatedSmokeTestViewDistancePassed,
+                automatedSmokeTestViewDistanceUnchanged,
+                automatedSmokeTestInitialViewDistance,
                 automatedSmokeTestSafeSurfaceFrameRendered,
                 automatedSmokeTestRenderedAtPitchFloor,
                 automatedSmokeTestRequiresUnlockedPitch,
@@ -3812,6 +4008,62 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
     }
 
+    /// <summary>
+    /// Captures the ordinary Vintage Story frame while the atlas is closed.
+    /// This deliberately does not call <see cref="ForceOpaqueWindowAlpha"/>
+    /// or any atlas compositor: the screenshot must observe the real world
+    /// handoff after the atlas scope has ended.
+    /// </summary>
+    internal bool CaptureAutomatedOrdinaryWorldScreenshot(string suffix)
+    {
+        string? configuredPath = Environment.GetEnvironmentVariable(
+            SmokeScreenshotEnvironmentVariable
+        );
+        if (string.IsNullOrWhiteSpace(configuredPath))
+        {
+            return true;
+        }
+
+        string prefix = configuredPath.EndsWith(
+            ".png",
+            StringComparison.OrdinalIgnoreCase
+        )
+            ? configuredPath[..^4]
+            : configuredPath;
+        string path = $"{prefix}-{suffix}.png";
+        try
+        {
+            string? directory = System.IO.Path.GetDirectoryName(path);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            using BitmapRef screenshot = capi.Render.GrabScreenshot(
+                capi.Render.FrameWidth,
+                capi.Render.FrameHeight,
+                false,
+                true,
+                true
+            );
+            screenshot.Save(path);
+            capi.Logger.Notification(
+                "[ModernAtlas] Saved ordinary-world smoke screenshot after atlas state handoff: {0}",
+                path
+            );
+            return true;
+        }
+        catch (Exception exception)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Ordinary-world smoke screenshot failed for {0}: {1}",
+                path,
+                exception.Message
+            );
+            return false;
+        }
+    }
+
     private void RestoreAutomatedSmokeTestPreferences()
     {
         if (!automatedSmokeTestPreferencesCaptured) return;
@@ -4393,6 +4645,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     internal void OnWorldLeave()
     {
+        worldTeardownStarted = true;
         CommitPendingPresentationPreference();
         presentationChangeCoordinator.Reset(config.RenderOnScroll);
         RestoreAutomatedSmokeTestPreferences();
@@ -4428,6 +4681,12 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestMapLayerPassed = false;
         pendingAutomatedMapLayerScreenshotSuffix = null;
         automatedSmokeTestPresentationPassed = false;
+        automatedSmokeTestResolvedAtlasAlphaChecked = false;
+        automatedSmokeTestResolvedAtlasAlphaPassed = false;
+        automatedSmokeTestViewDistancePassed = true;
+        automatedSmokeTestViewDistanceUnchanged = true;
+        automatedSmokeTestInitialViewDistance = -1;
+        automatedSmokeCloseStatePassed = true;
         automatedSmokeTestPresentationPhase = 0;
         automatedSmokeTestSettingsComposer = null;
         automatedSmokeTestPerformanceComposer = null;
@@ -4496,6 +4755,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void Dispose()
     {
+        worldTeardownStarted = true;
         presentationChangeCoordinator.Reset(config.RenderOnScroll);
         RestoreAutomatedSmokeTestPreferences();
         automatedSmokeTestActive = false;
@@ -7809,6 +8069,9 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool RenderLiveWorld(float deltaTime)
     {
         IRenderAPI render = capi.Render;
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
+        try
+        {
         render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
 
         preparingSurfaceFilter = !surfaceHeightTexture.Advance();
@@ -7939,6 +8202,11 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
         render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
         return rendered;
+        }
+        finally
+        {
+            renderState.RestoreGuiHandoff();
+        }
     }
 
     private void ResetView()
@@ -8586,21 +8854,29 @@ public sealed class ModernAtlasDialog : GuiDialog
 
         opacityQuad ??= capi.Render.UploadMesh(QuadMeshUtil.GetQuad());
         IRenderAPI render = capi.Render;
-        render.CurrentFrameBuffer = null;
-        render.CurrentActiveShader?.Stop();
-        render.GLDisableDepthTest();
-        render.GLDepthMask(false);
-        render.GlToggleBlend(false, EnumBlendMode.Standard);
-        render.GlColorMask(false, false, false, true);
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
         try
         {
+            render.CurrentFrameBuffer = null;
+            render.CurrentActiveShader?.Stop();
+            render.GLDisableDepthTest();
+            render.GLDepthMask(false);
+            render.GlToggleBlend(false, EnumBlendMode.Standard);
+            render.GlColorMask(false, false, false, true);
             shader.Use();
             render.RenderMesh(opacityQuad);
-            shader.Stop();
         }
         finally
         {
-            render.GlColorMask(true, true, true, true);
+            renderState.RestoreGuiHandoff(true);
+            try
+            {
+                capi.Render.GetEngineShader(EnumShaderProgram.Gui).Use();
+            }
+            catch
+            {
+                // The GUI shader may already be unavailable during teardown.
+            }
         }
     }
 

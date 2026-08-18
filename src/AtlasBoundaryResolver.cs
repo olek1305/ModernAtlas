@@ -74,6 +74,7 @@ internal sealed class AtlasBoundaryResolver : IDisposable
         if (shader == null || shader.Disposed) return false;
 
         IRenderAPI render = capi.Render;
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
         try
         {
             render.CurrentActiveShader?.Stop();
@@ -175,12 +176,7 @@ internal sealed class AtlasBoundaryResolver : IDisposable
         }
         finally
         {
-            render.CurrentActiveShader?.Stop();
-            render.CurrentFrameBuffer = null;
-            render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
-            render.GLDepthMask(true);
-            render.GlToggleBlend(false, EnumBlendMode.Standard);
-            render.GlEnableCullFace();
+            renderState.RestoreCapturedState();
         }
     }
 

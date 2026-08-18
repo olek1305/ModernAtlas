@@ -34,6 +34,7 @@ public sealed class ModernAtlasSystem : ModSystem
     private IShaderProgram? atlasScrollShader;
     private CheatModeConsentDialog? cheatModeDialog;
     private AtlasOpeningTransitionDialog? openingTransition;
+    private AtlasOrdinaryWorldScreenshotRenderer? ordinaryWorldScreenshotRenderer;
     private AtlasSoundController? soundController;
     private string? activeWorldIdentifier;
     private int worldSessionGeneration;
@@ -173,10 +174,18 @@ public sealed class ModernAtlasSystem : ModSystem
             PublishScrollAnimationPhase,
             soundController
         );
+        ordinaryWorldScreenshotRenderer = new AtlasOrdinaryWorldScreenshotRenderer(
+            dialog.CaptureAutomatedOrdinaryWorldScreenshot
+        );
         api.Event.RegisterRenderer(
             openingTransition,
             EnumRenderStage.Opaque,
             "modernatlas-opening-scroll"
+        );
+        api.Event.RegisterRenderer(
+            ordinaryWorldScreenshotRenderer,
+            EnumRenderStage.AfterBlit,
+            "modernatlas-ordinary-world-smoke-screenshot"
         );
 
         api.Input.RegisterHotKey(
@@ -501,9 +510,17 @@ public sealed class ModernAtlasSystem : ModSystem
                 EnumRenderStage.Opaque
             );
         }
+        if (clientApi != null && ordinaryWorldScreenshotRenderer != null)
+        {
+            clientApi.Event.UnregisterRenderer(
+                ordinaryWorldScreenshotRenderer,
+                EnumRenderStage.AfterBlit
+            );
+        }
         openingTransition?.CancelWithoutOpening();
         openingTransition?.Dispose();
         openingTransition = null;
+        ordinaryWorldScreenshotRenderer = null;
         dialog?.Dispose();
         dialog = null;
         soundController?.Dispose();
@@ -904,6 +921,55 @@ public sealed class ModernAtlasSystem : ModSystem
             automatedSmokeTestOpeningStarted = false;
             return;
         }
+
+        if (automatedSmokeAtlasCycle == 1)
+        {
+            if (ordinaryWorldScreenshotRenderer == null
+                || !ordinaryWorldScreenshotRenderer.Queue(
+                    "ordinary-before-atlas",
+                    passed => clientApi?.Event.RegisterCallback(
+                        _ => BeginAutomatedAtlasOpen(
+                            worldIdentifier,
+                            sessionGeneration,
+                            passed
+                        ),
+                        0
+                    )
+                ))
+            {
+                clientApi.Logger.Error(
+                    "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: the ordinary-world baseline screenshot could not be queued before the atlas opened."
+                );
+                FinishAutomatedSmokeTest(worldIdentifier, sessionGeneration, false);
+            }
+            return;
+        }
+        BeginAutomatedAtlasOpen(worldIdentifier, sessionGeneration, true);
+    }
+
+    private void BeginAutomatedAtlasOpen(
+        string worldIdentifier,
+        int sessionGeneration,
+        bool ordinaryBaselinePassed
+    )
+    {
+        if (clientApi == null
+            || dialog == null
+            || openingTransition == null
+            || !clientApi.IsSinglePlayer
+            || activeWorldIdentifier != worldIdentifier
+            || worldSessionGeneration != sessionGeneration)
+        {
+            return;
+        }
+        if (!ordinaryBaselinePassed)
+        {
+            clientApi.Logger.Error(
+                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: the ordinary-world baseline screenshot could not be captured after a completed world frame."
+            );
+            FinishAutomatedSmokeTest(worldIdentifier, sessionGeneration, false);
+            return;
+        }
         clientApi.Logger.Notification(
             "[ModernAtlas] Automated atlas open/close cycle {0} of 2 is starting after the previous world-shader restore.",
             automatedSmokeAtlasCycle
@@ -1065,19 +1131,102 @@ public sealed class ModernAtlasSystem : ModSystem
         }
 
         automatedSmokeCycleFinishing = false;
-        automatedSmokeAllCyclesPassed &= closePassed;
+        bool closeStatePassed = dialog?.AutomatedSmokeCloseStatePassed == true;
+        automatedSmokeAllCyclesPassed &= closePassed && closeStatePassed;
         int cycle = automatedSmokeAtlasCycle <= 0 ? 1 : automatedSmokeAtlasCycle;
-        if (!closePassed)
+        if (!closePassed || !closeStatePassed)
         {
             clientApi.Logger.Error(
-                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED (cycle {0}): the reverse scroll transition did not complete.",
-                cycle
+                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED (cycle {0}): close transition passed={1}, atlas state restore passed={2}.",
+                cycle,
+                closePassed,
+                closeStatePassed
             );
         }
         else
         {
             clientApi.Logger.Notification(
                 "[ModernAtlas] AUTOMATED ATLAS OPEN/CLOSE CYCLE {0} PASSED: the atlas closed and released its per-draw world state.",
+                cycle
+            );
+        }
+
+        // Give the client two ordinary render-frame boundaries after the
+        // closing transition. The screenshot must observe the world renderer,
+        // not the transition or an atlas-owned framebuffer handoff.
+        clientApi.Event.RegisterCallback(
+            _ => clientApi?.Event.RegisterCallback(
+                __ => CompleteAutomatedAtlasCloseAfterWorldFrames(
+                    worldIdentifier,
+                    sessionGeneration,
+                    cycle
+                ),
+                100
+            ),
+            100
+        );
+    }
+
+    private void CompleteAutomatedAtlasCloseAfterWorldFrames(
+        string worldIdentifier,
+        int sessionGeneration,
+        int cycle
+    )
+    {
+        if (clientApi == null
+            || activeWorldIdentifier != worldIdentifier
+            || worldSessionGeneration != sessionGeneration)
+        {
+            return;
+        }
+
+        if (ordinaryWorldScreenshotRenderer == null
+            || !ordinaryWorldScreenshotRenderer.Queue(
+                $"ordinary-after-cycle-{cycle}",
+                passed => clientApi?.Event.RegisterCallback(
+                    _ => CompleteAutomatedAtlasCloseAfterOrdinaryScreenshot(
+                        worldIdentifier,
+                        sessionGeneration,
+                        cycle,
+                        passed
+                    ),
+                    0
+                )
+            ))
+        {
+            automatedSmokeAllCyclesPassed = false;
+            clientApi.Logger.Error(
+                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED (cycle {0}): ordinary-world screenshot could not be queued after two post-close frames.",
+                cycle
+            );
+            CompleteAutomatedAtlasCloseAfterOrdinaryScreenshot(
+                worldIdentifier,
+                sessionGeneration,
+                cycle,
+                false
+            );
+        }
+    }
+
+    private void CompleteAutomatedAtlasCloseAfterOrdinaryScreenshot(
+        string worldIdentifier,
+        int sessionGeneration,
+        int cycle,
+        bool ordinaryFramePassed
+    )
+    {
+        if (clientApi == null
+            || activeWorldIdentifier != worldIdentifier
+            || worldSessionGeneration != sessionGeneration)
+        {
+            return;
+        }
+
+        automatedSmokeAllCyclesPassed &= ordinaryFramePassed;
+        if (!ordinaryFramePassed)
+        {
+            clientApi.Logger.Error(
+                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED (cycle {0}): ordinary-world screenshot after two post-close frames could not be captured.",
                 cycle
             );
         }

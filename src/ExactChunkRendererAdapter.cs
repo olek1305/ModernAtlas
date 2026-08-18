@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Reflection;
 using HarmonyLib;
 using Vintagestory.API.Client;
@@ -223,6 +224,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private bool loggedLightingDiagnostics;
     private bool loggedVegetationFilteringDiagnostics;
     private bool disposed;
+    private bool atlasUniformsActive;
 
     public int LastRenderedEntityCount { get; private set; }
     public int LastSuppressedHeldItemCount =>
@@ -236,6 +238,25 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     public float LastRenderedVegetationPixelsPerBlock { get; private set; }
     public bool LastRenderedVegetationHidden { get; private set; }
     public bool LastRenderedPerformanceLightingEnabled { get; private set; } = true;
+
+    public bool AtlasStateIsClear =>
+        !atlasUniformsActive
+        && !atlasVisibilityOverride
+        && !atlasTerrainCollectionOverride
+        && !atlasTransparentVisibilityOverride
+        && !atlasLiquidVisibilityOverride
+        && !atlasDisclosureCullingOverride
+        && !atlasCompleteBoundaryEnabled
+        && !atlasVegetationOnlyVisibilityOverride
+        && atlasVisibleTerrainColumns == null
+        && atlasSupportedTerrainColumns == null
+        && atlasSupportedSurfaceSections == null
+        && atlasConsideredTerrainColumns == null
+        && atlasLiquidAdapter == null
+        && !atlasOreTextureBindingOverride
+        && !atlasVegetationTextureBindingOverride
+        && !atlasOreTextureBindingRecursion
+        && atlasOreTextureBindingAdapter == null;
 
     private sealed class AtlasFilterShaderState
     {
@@ -743,6 +764,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         if (hideVegetation && !vegetationMaskReady) return false;
 
         IRenderAPI render = capi.Render;
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
         Vec3d cameraPosition = capi.World.Player.Entity.CameraPos;
         double oldCameraX = cameraPosition.X;
         double oldCameraY = cameraPosition.Y;
@@ -1205,6 +1227,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             atlasDisclosureCullingOverride = false;
             atlasCompleteBoundaryEnabled = false;
             atlasVegetationOnlyVisibilityOverride = false;
+            atlasUniformsActive = false;
             atlasVisibleTerrainColumns = null;
             atlasSupportedTerrainColumns = null;
             atlasSupportedSurfaceSections = null;
@@ -1275,7 +1298,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 );
             }
             if (projectionPushed) render.PMatrix.Pop();
-            render.CurrentActiveShader?.Stop();
+            renderState.RestoreCapturedState();
         }
     }
 
@@ -1621,7 +1644,17 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             // can invalidate its cached uniform locations and leave chunks
             // black after the second G. The source is restored only when the
             // renderer is disposed during world teardown.
-            DisableAtlasFilterUniforms();
+            AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(
+                capi.Render
+            );
+            try
+            {
+                DisableAtlasFilterUniforms();
+            }
+            finally
+            {
+                renderState.RestoreCapturedState();
+            }
 
             if (!loggedNormalWorldShaderRestore)
             {
@@ -1647,15 +1680,23 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         try
         {
             IRenderAPI render = capi.Render;
-            render.CurrentActiveShader?.Stop();
-            FrameBufferRef primaryFramebuffer = render.FrameBuffers[(int)EnumFrameBuffer.Primary];
-            float[] atlasBackground = { 0.035f, 0.075f, 0.11f, 1f };
-            render.ClearFrameBuffer(primaryFramebuffer, atlasBackground, true, true);
-            if (blitToDefault)
+            AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
+            try
             {
-                blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
+                render.CurrentActiveShader?.Stop();
+                FrameBufferRef primaryFramebuffer = render.FrameBuffers[(int)EnumFrameBuffer.Primary];
+                float[] atlasBackground = { 0.035f, 0.075f, 0.11f, 1f };
+                render.ClearFrameBuffer(primaryFramebuffer, atlasBackground, true, true);
+                if (blitToDefault)
+                {
+                    blitPrimaryToDefault.Invoke(platform, Array.Empty<object>());
+                }
+                render.CurrentFrameBuffer = null;
             }
-            render.CurrentFrameBuffer = null;
+            finally
+            {
+                renderState.RestoreCapturedState();
+            }
         }
         catch (Exception exception)
         {
@@ -1687,6 +1728,117 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     public FrameBufferRef? ResolvedFramebuffer => boundaryResolver.Framebuffer;
 
     public bool BoundaryResolvedLastFrame => boundaryResolver.LastResolveSucceeded;
+
+    /// <summary>
+    /// Reads the boundary-resolved atlas target before any window-opacity or
+    /// parchment composition. The readback is used only by the opt-in smoke
+    /// test; normal atlas frames never stall on CPU pixel inspection.
+    /// </summary>
+    public bool ValidateResolvedAtlasFramebuffer(out string diagnostic)
+    {
+        FrameBufferRef? resolved = boundaryResolver.Framebuffer;
+        if (resolved == null
+            || resolved.Disposed
+            || resolved.ColorTextureIds is not { Length: > 0 }
+            || resolved.ColorTextureIds[0] <= 0)
+        {
+            diagnostic = "resolved framebuffer or color attachment is unavailable";
+            return false;
+        }
+
+        IRenderAPI render = capi.Render;
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
+        try
+        {
+            render.CurrentActiveShader?.Stop();
+            render.CurrentFrameBuffer = resolved;
+            render.GlViewport(0, 0, resolved.Width, resolved.Height);
+            using BitmapRef screenshot = render.GrabScreenshot(
+                resolved.Width,
+                resolved.Height,
+                false,
+                true,
+                true
+            );
+
+            int minimumAlpha = 255;
+            int belowOpaque = 0;
+            int backgroundPixels = 0;
+            int nonBackgroundPixels = 0;
+            // BitmapRef stores pixels as AARRGGBB (the low byte is blue).
+            // The validation readback exposes the linear clear color
+            // (0.035, 0.075, 0.11) as #09131C; PNG encoding later applies the
+            // display transform and shows the same background as #060D13.
+            const int backgroundRed = 9;
+            const int backgroundGreen = 19;
+            const int backgroundBlue = 28;
+            foreach (int pixel in screenshot.Pixels)
+            {
+                int alpha = (pixel >> 24) & 0xff;
+                minimumAlpha = Math.Min(minimumAlpha, alpha);
+                if (alpha < 255) belowOpaque++;
+
+                int blue = pixel & 0xff;
+                int green = (pixel >> 8) & 0xff;
+                int red = (pixel >> 16) & 0xff;
+                bool isBackground = Math.Abs(red - backgroundRed) <= 8
+                    && Math.Abs(green - backgroundGreen) <= 8
+                    && Math.Abs(blue - backgroundBlue) <= 8;
+                if (isBackground) backgroundPixels++;
+                else nonBackgroundPixels++;
+            }
+
+            bool valid = screenshot.Pixels.Length > 0
+                && minimumAlpha == 255
+                && belowOpaque == 0
+                && backgroundPixels > 0
+                && nonBackgroundPixels > 0;
+            string? smokePrefix = Environment.GetEnvironmentVariable(
+                "MODERNATLAS_SMOKE_SCREENSHOT"
+            );
+            if (!string.IsNullOrWhiteSpace(smokePrefix))
+            {
+                string resolvedPath = smokePrefix + "-resolved-atlas.png";
+                try
+                {
+                    Directory.CreateDirectory(
+                        Path.GetDirectoryName(resolvedPath) ?? "."
+                    );
+                    screenshot.Save(resolvedPath);
+                }
+                catch (Exception saveException)
+                {
+                    capi.Logger.Warning(
+                        "[ModernAtlas] Could not save resolved atlas validation image: {0}",
+                        saveException.Message
+                    );
+                }
+            }
+            int firstPixel = screenshot.Pixels.Length > 0
+                ? screenshot.Pixels[0]
+                : 0;
+            diagnostic = string.Format(
+                "size={0}x{1}, minAlpha={2}, belowOpaque={3}, backgroundPixels={4}, nonBackgroundPixels={5}, firstPacked=0x{6:X8}",
+                resolved.Width,
+                resolved.Height,
+                minimumAlpha,
+                belowOpaque,
+                backgroundPixels,
+                nonBackgroundPixels,
+                firstPixel
+            );
+            return valid;
+        }
+        catch (Exception exception)
+        {
+            diagnostic = $"resolved framebuffer readback failed: {exception.Message}";
+            return false;
+        }
+        finally
+        {
+            renderState.RestoreCapturedState();
+        }
+    }
 
     /// <summary>
     /// Transient per-frame flag set by the tiled screenshot capture: hides
@@ -1743,6 +1895,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             || (hideVegetation && !vegetationTextureMask.Ready)
             || !EnsureAtlasFilterShaders())
         {
+            atlasUniformsActive = false;
             return false;
         }
 
@@ -1752,6 +1905,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
 
         try
         {
+            atlasUniformsActive = true;
             foreach (EnumShaderProgram program in AtlasFilterPrograms)
             {
                 IShaderProgram shader = atlasFilterShaders[program].Shader;
@@ -2072,6 +2226,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
 
     private void DisableAtlasFilterUniforms()
     {
+        atlasUniformsActive = false;
         DefaultShaderUniforms uniforms = capi.Render.ShaderUniforms;
         if (uniforms.ColorMapRects4 == null
             || uniforms.ColorMapRects4.Length < 40 * 4)
@@ -2149,7 +2304,15 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 }
                 if (shader.HasUniform("atlasDisableHorizonFade"))
                 {
-                    shader.Uniform("atlasDisableHorizonFade", 0);
+                    // The compiled atlas variant cannot safely re-enter the
+                    // engine's haxyFade branch after the atlas closes. On
+                    // Vintage Story 1.22.x that branch can upload a bright
+                    // red horizon silhouette to the ordinary world even
+                    // after every atlas boundary switch is zeroed. Keep the
+                    // variant's horizon branch disabled until world teardown
+                    // restores the original source; no atlas framebuffer is
+                    // active during this handoff.
+                    shader.Uniform("atlasDisableHorizonFade", 1);
                 }
                 if (shader.HasUniform("atlasDisableLod0Fade"))
                 {
@@ -2256,6 +2419,14 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             topsoilGrassExpression,
             "getColorMapped(terrainTexLinear, modernAtlasSampleTerrain(terrainTex, uv2 + vec2(blockTextureSize.x * normal.y, 0)))"
                 + " * vec4(rgba.rgb, atlasFilteringEnabled > 0 ? 1.0 : rgba.a)",
+            StringComparison.Ordinal
+        );
+        // chunktopsoil carries its perspective-camera distance fade in the
+        // separate rgbaFog.a varying. Replace that alpha only in the atlas
+        // branch; the ordinary world keeps the native horizon/LOD fade.
+        renamed = renamed.Replace(
+            "outColor.a = rgbaFog.a;",
+            "outColor.a = atlasFilteringEnabled > 0 ? 1.0 : rgbaFog.a;",
             StringComparison.Ordinal
         );
         const string transparentColorExpression =
@@ -3529,6 +3700,8 @@ void main()
         }
         if (transparentPassDisabled) return false;
 
+        IRenderAPI render = capi.Render;
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
         bool framebufferLoaded = false;
         List<(object Manager, object Pools)> hiddenLiquidPools = new();
         try
@@ -3673,9 +3846,9 @@ void main()
                     // unavailable after an OIT failure.
                 }
             }
-            // GUI elements must always continue on the actual window target,
-            // including after a transparent-pass exception.
-            capi.Render.CurrentFrameBuffer = null;
+            // Restore the target and active program owned by the enclosing
+            // atlas pass, including after a transparent-pass exception.
+            renderState.RestoreCapturedState();
         }
     }
 
@@ -3735,6 +3908,9 @@ void main()
         if (textureIdsField.GetValue(chunkRenderer) is not int[] textureIds) return;
 
         IRenderAPI render = capi.Render;
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
+        try
+        {
         render.CurrentActiveShader?.Stop();
         render.GLEnableDepthTest();
         render.GLDepthMask(false);
@@ -3913,6 +4089,11 @@ void main()
                 rejectedLiquidLocationCount,
                 1 << LastRenderedTextureDetailReduction
             );
+        }
+        }
+        finally
+        {
+            renderState.RestoreCapturedState();
         }
     }
 

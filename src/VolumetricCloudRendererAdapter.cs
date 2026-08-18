@@ -183,6 +183,8 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
         IShaderProgram? shader = shaderProvider();
         if (shader == null || shader.Disposed) return false;
 
+        IRenderAPI render = capi.Render;
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
         try
         {
             // During a singleplayer pause only the already generated cloud
@@ -205,7 +207,6 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
             Vec3f offset = frozenOffset ?? (Vec3f)(offsetField.GetValue(map)
                 ?? throw new InvalidOperationException("The live cloud offset is unavailable."));
 
-            IRenderAPI render = capi.Render;
             FrameBufferRef primary = render.FrameBuffers[(int)EnumFrameBuffer.Primary];
             Vec3d playerCamera = capi.World.Player.Entity.CameraPos;
             float cloudBaseWorldY = Math.Max(
@@ -273,6 +274,13 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
                 cause.Message
             );
             return false;
+        }
+        finally
+        {
+            // Cloud blending is atlas-owned. Restore the target and program
+            // even when a weather texture or mesh draw fails.
+            // The caller owns the subsequent Primary/boundary handoff.
+            renderState.RestoreCapturedState();
         }
     }
 

@@ -51,14 +51,14 @@ void main()
     if (any(lessThan(pixel, ivec2(0)))
         || any(greaterThanEqual(pixel, dimensions)))
     {
-        outColor = backgroundColor;
+        outColor = vec4(backgroundColor.rgb, 1.0);
         return;
     }
 
     float depth = texelFetch(sourceDepthTex, pixel, 0).r;
     if (depth >= 0.999999)
     {
-        outColor = backgroundColor;
+        outColor = vec4(backgroundColor.rgb, 1.0);
         return;
     }
 
@@ -75,7 +75,7 @@ void main()
                 completeBoundaryMaxXZ
             ))))
     {
-        outColor = backgroundColor;
+        outColor = vec4(backgroundColor.rgb, 1.0);
         return;
     }
     vec2 disclosureDelta = absolutePosition.xz - disclosureCenterXZ;
@@ -83,7 +83,7 @@ void main()
             >= disclosureRadius * disclosureRadius
         || !hasSurfaceCoverage(absolutePosition.xz))
     {
-        outColor = backgroundColor;
+        outColor = vec4(backgroundColor.rgb, 1.0);
         return;
     }
 
