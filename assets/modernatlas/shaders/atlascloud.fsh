@@ -15,6 +15,8 @@ uniform float cloudBaseY;
 uniform float cloudThickness;
 uniform float cloudMapWidth;
 uniform vec2 depthScale;
+uniform vec3 atlasCloudLightColor;
+uniform float atlasCloudExposure;
 
 vec3 unproject(mat4 inverseMvp, vec4 position)
 {
@@ -140,7 +142,29 @@ void main()
             smoothstep(0.08, max(0.16, puffTop), height)
         );
         float softEdge = 1.0 - smoothstep(0.52, 0.92, density);
-        vec3 sampleColor = cloudColor.rgb * topLight;
+        // TextureCol follows the normal world's cloud lighting and can be
+        // nearly black even when the independent atlas uses bright fixed-hour
+        // lighting. Used directly, a dense weather front becomes a broad
+        // black stripe that resembles missing chunk geometry. Preserve the
+        // native tint, but give the atlas cloud volume its own bounded
+        // celestial illumination so it remains recognisable as cloud cover.
+        float sourceLuminance = dot(
+            max(cloudColor.rgb, vec3(0.0)),
+            vec3(0.2126, 0.7152, 0.0722)
+        );
+        vec3 sourceTint = sourceLuminance > 0.001
+            ? cloudColor.rgb / sourceLuminance
+            : vec3(1.0);
+        sourceTint = clamp(sourceTint, vec3(0.72), vec3(1.18));
+        float atlasBrightness = mix(
+            0.30,
+            0.82,
+            clamp(atlasCloudExposure / 1.5, 0.0, 1.0)
+        );
+        vec3 boundedCloudColor = sourceTint
+            * mix(vec3(1.0), atlasCloudLightColor, 0.32)
+            * atlasBrightness;
+        vec3 sampleColor = boundedCloudColor * topLight;
         sampleColor = mix(sampleColor, vec3(1.0), softEdge * 0.08);
 
         accumulated.rgb += (1.0 - accumulated.a) * sampleColor * sampleAlpha;
@@ -152,7 +176,7 @@ void main()
         min(mapPosition.x, mapPosition.y),
         min(cloudMapWidth - mapPosition.x, cloudMapWidth - mapPosition.y)
     );
-    float cloudAlpha = min(accumulated.a, 0.76)
+    float cloudAlpha = min(accumulated.a, 0.48)
         * smoothstep(1.0, cloudMapWidth * 0.12, edgeDistance);
     if (cloudAlpha < 0.005) discard;
     vec3 volumeColor = accumulated.rgb / max(accumulated.a, 0.0001);

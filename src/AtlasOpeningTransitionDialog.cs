@@ -41,6 +41,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     private const string HoldAnimationCode = "modernatlas-opening-scroll-hold";
     private const string SmokeScreenshotEnvironmentVariable =
         "MODERNATLAS_SMOKE_SCREENSHOT";
+    private const float AutomatedFinalScreenshotMarginSeconds = 0.05f;
 
     private readonly Func<bool> prepareAtlasResources;
     private readonly Func<IShaderProgram?> getScrollShader;
@@ -1935,7 +1936,17 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
                 $"{prefix}-{phaseName}-handoff.png"
             );
         }
-        if (!automatedScreenshotHandled && elapsed >= 1.60f)
+        // ClosingDurationSeconds is currently 1.50 seconds, so the old fixed
+        // 1.60-second probe could never run during the reverse transition.
+        // Keep the opening probe at its established point, but capture the
+        // closing frame near the end of the actual phase.
+        float finalScreenshotElapsed = closing
+            ? Math.Max(
+                1.21f,
+                ClosingDurationSeconds - AutomatedFinalScreenshotMarginSeconds
+            )
+            : 1.60f;
+        if (!automatedScreenshotHandled && elapsed >= finalScreenshotElapsed)
         {
             automatedScreenshotHandled = true;
             automatedScreenshotPassed = TryCaptureAutomatedScreenshot(

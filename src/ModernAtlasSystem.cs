@@ -29,6 +29,7 @@ public sealed class ModernAtlasSystem : ModSystem
     private IClientNetworkChannel? clientPolicyChannel;
     private IShaderProgram? stableLiquidShader;
     private IShaderProgram? atlasCloudShader;
+    private IShaderProgram? atlasBoundaryShader;
     private IShaderProgram? atlasOpacityShader;
     private IShaderProgram? atlasScrollShader;
     private CheatModeConsentDialog? cheatModeDialog;
@@ -38,6 +39,10 @@ public sealed class ModernAtlasSystem : ModSystem
     private int worldSessionGeneration;
     private bool automatedWorldExitRequested;
     private bool automatedSmokeTestOpeningStarted;
+    private int automatedSmokeAtlasCycle;
+    private bool automatedSmokeAllCyclesPassed = true;
+    private bool automatedSmokeCycleFinishing;
+    private bool automatedSmokeOriginalCheatMode;
     private bool suppressLocalHandActions;
     private long handActionSuppressionListenerId = -1;
 
@@ -133,6 +138,10 @@ public sealed class ModernAtlasSystem : ModSystem
         {
             api.Logger.Error("[ModernAtlas] Failed to compile the atlas cloud shader.");
         }
+        if (GetAtlasBoundaryShader() == null)
+        {
+            api.Logger.Error("[ModernAtlas] Failed to compile the final boundary shader.");
+        }
         if (GetAtlasOpacityShader() == null)
         {
             api.Logger.Error("[ModernAtlas] Failed to compile the window opacity shader.");
@@ -151,6 +160,7 @@ public sealed class ModernAtlasSystem : ModSystem
             RequestCloseAtlas,
             GetStableLiquidShader,
             GetAtlasCloudShader,
+            GetAtlasBoundaryShader,
             GetAtlasOpacityShader,
             GetAtlasScrollShader,
             soundController
@@ -503,6 +513,7 @@ public sealed class ModernAtlasSystem : ModSystem
         cheatModeDialog = null;
         stableLiquidShader = null;
         atlasCloudShader = null;
+        atlasBoundaryShader = null;
         atlasOpacityShader = null;
         atlasScrollShader = null;
         clientApi = null;
@@ -705,6 +716,10 @@ public sealed class ModernAtlasSystem : ModSystem
         openingTransition?.ClearRemoteAnimations();
         soundController?.StopAll();
         activeWorldIdentifier = null;
+        automatedSmokeTestOpeningStarted = false;
+        automatedSmokeAtlasCycle = 0;
+        automatedSmokeAllCyclesPassed = true;
+        automatedSmokeCycleFinishing = false;
         suppressLocalHandActions = false;
         dialog?.OnWorldLeave();
         serverPolicy.ResetToSafeDefaults();
@@ -726,6 +741,9 @@ public sealed class ModernAtlasSystem : ModSystem
         int sessionGeneration = ++worldSessionGeneration;
         activeWorldIdentifier = worldIdentifier;
         automatedSmokeTestOpeningStarted = false;
+        automatedSmokeAtlasCycle = 0;
+        automatedSmokeAllCyclesPassed = true;
+        automatedSmokeCycleFinishing = false;
         cheatModeDialog?.CancelWithoutDecision();
         cheatModeDialog?.Dispose();
         cheatModeDialog = null;
@@ -752,6 +770,7 @@ public sealed class ModernAtlasSystem : ModSystem
                 enabled ? "Cheat Mode enabled" : "caves hidden"
             );
         }
+
         else
         {
             dialog?.SetCheatMode(false);
@@ -763,6 +782,8 @@ public sealed class ModernAtlasSystem : ModSystem
                 );
             }
         }
+
+        automatedSmokeOriginalCheatMode = dialog?.CheatModeEnabledForAutomation == true;
 
         if (AutomatedSmokeTestEnabled)
         {
@@ -828,6 +849,12 @@ public sealed class ModernAtlasSystem : ModSystem
                         disabled
                     );
                 }
+                // Exercise the command path above, then enable only the
+                // atlas-owned disclosure switch for the remaining checks.
+                // Never change Vintage Story's player game mode: an aborted
+                // smoke run must not leave persistent Creative state in the
+                // named standard test world.
+                dialog!.SetCheatMode(true);
                 ScheduleAutomatedSmokeTest(worldIdentifier, sessionGeneration);
             },
             500
@@ -871,6 +898,16 @@ public sealed class ModernAtlasSystem : ModSystem
 
         if (automatedSmokeTestOpeningStarted) return;
         automatedSmokeTestOpeningStarted = true;
+        if (automatedSmokeAtlasCycle <= 0) automatedSmokeAtlasCycle = 1;
+        if (automatedSmokeAtlasCycle > 2)
+        {
+            automatedSmokeTestOpeningStarted = false;
+            return;
+        }
+        clientApi.Logger.Notification(
+            "[ModernAtlas] Automated atlas open/close cycle {0} of 2 is starting after the previous world-shader restore.",
+            automatedSmokeAtlasCycle
+        );
 
         // Recover from a direct atlas open that may have happened before the
         // scheduled smoke callback. The test must own exactly one opening
@@ -948,7 +985,8 @@ public sealed class ModernAtlasSystem : ModSystem
         }
 
         clientApi.Logger.Notification(
-            "[ModernAtlas] Automated opening transition entered the atlas normally."
+            "[ModernAtlas] Automated opening transition entered atlas cycle {0} normally.",
+            automatedSmokeAtlasCycle
         );
     }
 
@@ -966,16 +1004,23 @@ public sealed class ModernAtlasSystem : ModSystem
             return;
         }
 
+        if (automatedSmokeCycleFinishing) return;
+        automatedSmokeCycleFinishing = true;
+        int cycle = automatedSmokeAtlasCycle <= 0 ? 1 : automatedSmokeAtlasCycle;
+        automatedSmokeAllCyclesPassed &= passed;
+
         if (passed)
         {
             clientApi.Logger.Notification(
-                "[ModernAtlas] AUTOMATED ATLAS CHECKS PASSED: exact terrain and requested atlas features rendered."
+                "[ModernAtlas] AUTOMATED ATLAS CHECKS PASSED (cycle {0}): exact terrain and requested atlas features rendered.",
+                cycle
             );
         }
         else
         {
             clientApi.Logger.Error(
-                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: exact terrain did not render before timeout."
+                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED (cycle {0}): one or more atlas, presentation or screenshot checks did not finish before timeout.",
+                cycle
             );
         }
 
@@ -987,18 +1032,10 @@ public sealed class ModernAtlasSystem : ModSystem
                     true,
                     closePassed =>
                     {
-                        if (!closePassed)
-                        {
-                            clientApi?.Logger.Error(
-                                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: the reverse scroll transition did not complete."
-                            );
-                        }
-                        clientApi?.Event.RegisterCallback(
-                            _ => ExitWorldForAutomatedSmokeTest(
-                                worldIdentifier,
-                                sessionGeneration
-                            ),
-                            1000
+                        CompleteAutomatedAtlasClose(
+                            worldIdentifier,
+                            sessionGeneration,
+                            closePassed
                         );
                     }
                 ))
@@ -1007,9 +1044,96 @@ public sealed class ModernAtlasSystem : ModSystem
             }
         }
 
+        CompleteAutomatedAtlasClose(
+            worldIdentifier,
+            sessionGeneration,
+            false
+        );
+    }
+
+    private void CompleteAutomatedAtlasClose(
+        string worldIdentifier,
+        int sessionGeneration,
+        bool closePassed
+    )
+    {
+        if (clientApi == null
+            || activeWorldIdentifier != worldIdentifier
+            || worldSessionGeneration != sessionGeneration)
+        {
+            return;
+        }
+
+        automatedSmokeCycleFinishing = false;
+        automatedSmokeAllCyclesPassed &= closePassed;
+        int cycle = automatedSmokeAtlasCycle <= 0 ? 1 : automatedSmokeAtlasCycle;
+        if (!closePassed)
+        {
+            clientApi.Logger.Error(
+                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED (cycle {0}): the reverse scroll transition did not complete.",
+                cycle
+            );
+        }
+        else
+        {
+            clientApi.Logger.Notification(
+                "[ModernAtlas] AUTOMATED ATLAS OPEN/CLOSE CYCLE {0} PASSED: the atlas closed and released its per-draw world state.",
+                cycle
+            );
+        }
+
+        if (cycle < 2)
+        {
+            automatedSmokeAtlasCycle = cycle + 1;
+            automatedSmokeTestOpeningStarted = false;
+            clientApi.Logger.Notification(
+                "[ModernAtlas] First atlas cycle completed; scheduling the second open/render/close cycle after a world frame boundary."
+            );
+            clientApi.Event.RegisterCallback(
+                _ => OpenAtlasForAutomatedSmokeTest(
+                    worldIdentifier,
+                    sessionGeneration
+                ),
+                1500
+            );
+            return;
+        }
+
+        if (automatedSmokeAllCyclesPassed)
+        {
+            clientApi.Logger.Notification(
+                "[ModernAtlas] AUTOMATED ATLAS TWO-CYCLE CHECK PASSED: the atlas opened, rendered, closed, reopened, rendered, and closed again without losing exact terrain."
+            );
+        }
+        else
+        {
+            clientApi.Logger.Error(
+                "[ModernAtlas] AUTOMATED ATLAS TWO-CYCLE CHECK FAILED: at least one open/render/close cycle did not complete cleanly."
+            );
+        }
+
+        clientApi.Event.RegisterCallback(
+            _ => RestoreAutomatedSmokeAccessThenExit(
+                worldIdentifier,
+                sessionGeneration
+            ),
+            1000
+        );
+    }
+
+    private void RestoreAutomatedSmokeAccessThenExit(
+        string worldIdentifier,
+        int sessionGeneration
+    )
+    {
+        if (!IsCurrentAutomatedWorld(worldIdentifier, sessionGeneration)) return;
+        dialog!.SetCheatMode(automatedSmokeOriginalCheatMode);
+        clientApi!.Logger.Notification(
+            "[ModernAtlas] Automated smoke test restored the atlas Cheat Mode state without changing the Vintage Story player game mode."
+        );
         clientApi.Event.RegisterCallback(
             _ => ExitWorldForAutomatedSmokeTest(worldIdentifier, sessionGeneration),
-            1000
+            500
         );
     }
 
@@ -1164,6 +1288,23 @@ public sealed class ModernAtlasSystem : ModSystem
         if (!program.Compile()) return null;
 
         atlasOpacityShader = program;
+        return program;
+    }
+
+    private IShaderProgram? GetAtlasBoundaryShader()
+    {
+        if (atlasBoundaryShader != null && !atlasBoundaryShader.Disposed)
+        {
+            return atlasBoundaryShader;
+        }
+        if (clientApi == null) return null;
+
+        IShaderProgram program = clientApi.Shader.NewShaderProgram();
+        program.AssetDomain = "modernatlas";
+        clientApi.Shader.RegisterFileShaderProgram("atlasboundary", program);
+        if (!program.Compile()) return null;
+
+        atlasBoundaryShader = program;
         return program;
     }
 

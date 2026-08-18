@@ -829,7 +829,7 @@ internal sealed class AtlasTiledScreenshot : IDisposable
     /// Call from the render thread right after the atlas world render that
     /// used <see cref="GetTileCamera"/> for <see cref="CurrentTile"/>.
     /// </summary>
-    public bool CaptureCurrentFrame()
+    public bool CaptureCurrentFrame(FrameBufferRef sourceFramebuffer)
     {
         CaptureJob? captureJob;
         int capturedTile;
@@ -851,8 +851,12 @@ internal sealed class AtlasTiledScreenshot : IDisposable
         try
         {
             IRenderAPI render = capi.Render;
-            FrameBufferRef primary = render.FrameBuffers[(int)EnumFrameBuffer.Primary];
-            render.CurrentFrameBuffer = primary;
+            if (sourceFramebuffer.Disposed
+                || sourceFramebuffer.ColorTextureIds is not { Length: > 0 })
+            {
+                return false;
+            }
+            render.CurrentFrameBuffer = sourceFramebuffer;
             // The engine's OIT machinery can leave GL_READ_BUFFER on one of
             // its multi-attachment color buffers. Binding Primary does not
             // reset it; an inherited foreign read buffer returns invalid

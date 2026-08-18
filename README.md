@@ -48,6 +48,11 @@ with `MODERNATLAS_SMOKE_SCREENSHOT_SEQUENCE=1`; it captures 1x/25% followed by
 the progress modal during stitching and verifies that the cancelled job leaves
 neither a PNG nor a public sidecar.
 
+The automated smoke test targets the existing standard generated world
+`arcyliszs cave world` by default. Run it with `bash scripts/run-smoke-test.sh`;
+set `MODERNATLAS_SMOKE_WORLD` to select another standard test world. The
+superflat `TESTCREATIVE` world is not a valid rendering regression target.
+
 ## Installation
 
 Place the ModernAtlas release ZIP in the Vintage Story `Mods` directory. Keep

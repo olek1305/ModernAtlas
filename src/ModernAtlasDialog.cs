@@ -43,8 +43,12 @@ public sealed class ModernAtlasDialog : GuiDialog
         "MODERNATLAS_SMOKE_SCREENSHOT_SEQUENCE";
     private const string SmokeScreenshotCancelEnvironmentVariable =
         "MODERNATLAS_SMOKE_SCREENSHOT_CANCEL";
+    private const string SmokeDisableCloudsEnvironmentVariable =
+        "MODERNATLAS_SMOKE_DISABLE_CLOUDS";
 
     private ExactChunkRendererAdapter? exactChunkRenderer;
+    private ExactChunkRendererAdapter? pendingNormalWorldShaderRestore;
+    private long normalWorldShaderRestoreGeneration;
     private readonly float[] projection = Mat4f.Create();
     private readonly ModernAtlasConfig config;
     private readonly ModernAtlasServerPolicy serverPolicy;
@@ -53,6 +57,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private readonly Func<bool> requestClose;
     private readonly Func<IShaderProgram?> stableLiquidShaderProvider;
     private readonly Func<IShaderProgram?> atlasCloudShaderProvider;
+    private readonly Func<IShaderProgram?> atlasBoundaryShaderProvider;
     private readonly Func<IShaderProgram?> atlasOpacityShaderProvider;
     private readonly AtlasScrollViewportRenderer scrollViewportRenderer;
     private readonly AtlasScrollRealtimeWeather scrollRealtimeWeather;
@@ -135,6 +140,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool automatedScreenshotSequenceEnabled;
     private bool automatedScreenshotSequenceFailed;
     private bool automatedScreenshotOutputValidationPassed;
+    private long automatedScreenshotDiagnosticNextMilliseconds;
     private bool automatedScreenshotCancelMode;
     private bool automatedScreenshotCancelTriggered;
     private bool automatedScreenshotCancelPassed;
@@ -149,6 +155,8 @@ public sealed class ModernAtlasDialog : GuiDialog
     private bool automatedSmokeTestForceSurvivalOreConcealment;
     private bool automatedSmokeTestSafeSurfaceFrameRendered;
     private bool automatedSmokeTestSafeSurfaceScreenshotHandled;
+    private bool automatedSmokeTestBorderTopDownPending;
+    private bool automatedSmokeTestBorderTopDownFrameRendered;
     private bool automatedSmokeTestMaximumZoomPending;
     private bool automatedSmokeTestMaximumZoomFrameRendered;
     private bool automatedSmokeTestPartialZoomPending;
@@ -157,6 +165,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private float automatedSmokeTestPitchBeforeMaximum;
     private float automatedSmokeTestMaximumZoomStartedSeconds;
     private float automatedSmokeTestPartialZoomStartedSeconds;
+    private float automatedSmokeTestBorderTopDownStartedSeconds;
     private int automatedSmokeTestSearchPhase;
     private bool automatedSmokeTestSearchPassed;
     private double automatedLanternBlockX;
@@ -209,6 +218,7 @@ public sealed class ModernAtlasDialog : GuiDialog
     private float screenshotFrozenWaterFlowCounter;
     private Vec3f? screenshotFrozenCloudOffset;
     private float automatedScreenshotBaselineZoom;
+    private float automatedScreenshotBaselineTargetZoom;
     private double automatedScreenshotBaselineCenterX;
     private double automatedScreenshotBaselineCenterY;
     private double automatedScreenshotBaselineCenterZ;
@@ -556,6 +566,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         Func<bool> requestClose,
         Func<IShaderProgram?> stableLiquidShaderProvider,
         Func<IShaderProgram?> atlasCloudShaderProvider,
+        Func<IShaderProgram?> atlasBoundaryShaderProvider,
         Func<IShaderProgram?> atlasOpacityShaderProvider,
         Func<IShaderProgram?> atlasScrollShaderProvider,
         AtlasSoundController soundController
@@ -567,6 +578,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         this.requestClose = requestClose;
         this.stableLiquidShaderProvider = stableLiquidShaderProvider;
         this.atlasCloudShaderProvider = atlasCloudShaderProvider;
+        this.atlasBoundaryShaderProvider = atlasBoundaryShaderProvider;
         this.atlasOpacityShaderProvider = atlasOpacityShaderProvider;
         this.soundController = soundController;
         scrollViewportRenderer = new AtlasScrollViewportRenderer(
@@ -585,6 +597,7 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public override void OnGuiOpened()
     {
+        FlushPendingNormalWorldShaderRestore();
         base.OnGuiOpened();
         presentationChangeCoordinator.Reset(config.RenderOnScroll);
         // The dialog is constructed before a world/player necessarily exists.
@@ -784,6 +797,8 @@ public sealed class ModernAtlasDialog : GuiDialog
             }
             if (safeSurfaceFrameWasAlreadyRendered
                 && automatedSmokeTestSafeSurfaceScreenshotHandled
+                && automatedSmokeTestBorderTopDownFrameRendered
+                && !automatedSmokeTestBorderTopDownPending
                 && automatedSmokeTestPartialZoomFrameRendered
                 && !automatedSmokeTestPartialZoomPending
                 && automatedSmokeTestMaximumZoomFrameRendered
@@ -1340,13 +1355,14 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     private void CaptureAtlasFrameCache()
     {
-        int textureId = exactChunkRenderer?.PrimaryColorTextureId ?? 0;
+        int textureId = exactChunkRenderer?.ResolvedColorTextureId ?? 0;
         if (textureId <= 0) return;
 
         IRenderAPI render = capi.Render;
-        FrameBufferRef primary = render.FrameBuffers[(int)EnumFrameBuffer.Primary];
-        int width = Math.Max(1, primary.Width);
-        int height = Math.Max(1, primary.Height);
+        FrameBufferRef? resolved = exactChunkRenderer?.ResolvedFramebuffer;
+        if (resolved == null) return;
+        int width = Math.Max(1, resolved.Width);
+        int height = Math.Max(1, resolved.Height);
         try
         {
             if (atlasFrameStagingTexture == null
@@ -1451,13 +1467,43 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     public void ScheduleNormalWorldShaderRestore()
     {
-        // Switch off the atlas-only branches between frames. The compiled
-        // chunk programs remain valid for the world session, avoiding the
-        // full-engine shader reload that previously froze closing.
+        ExactChunkRendererAdapter? rendererToRestore = exactChunkRenderer;
+        if (rendererToRestore == null) return;
+
+        pendingNormalWorldShaderRestore = rendererToRestore;
+        long generation = ++normalWorldShaderRestoreGeneration;
+        // Switch off the atlas-only branches between frames. Capture the
+        // renderer instance and invalidate older callbacks: a rapid
+        // close/open/close sequence must never let a callback for the first
+        // atlas session mutate the renderer used by the next one.
         capi.Event.RegisterCallback(
-            _ => exactChunkRenderer?.RestoreNormalWorldShaders(),
+            _ =>
+            {
+                if (generation != normalWorldShaderRestoreGeneration
+                    || !ReferenceEquals(
+                        pendingNormalWorldShaderRestore,
+                        rendererToRestore
+                    ))
+                {
+                    return;
+                }
+
+                pendingNormalWorldShaderRestore = null;
+                rendererToRestore.RestoreNormalWorldShaders();
+            },
             1
         );
+    }
+
+    private void FlushPendingNormalWorldShaderRestore()
+    {
+        ExactChunkRendererAdapter? rendererToRestore =
+            pendingNormalWorldShaderRestore;
+        if (rendererToRestore == null) return;
+
+        pendingNormalWorldShaderRestore = null;
+        normalWorldShaderRestoreGeneration++;
+        rendererToRestore.RestoreNormalWorldShaders();
     }
 
     public void OnServerPolicyChanged()
@@ -1530,7 +1576,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         exactChunkRenderer = ExactChunkRendererAdapter.TryCreate(
             capi,
             stableLiquidShaderProvider,
-            atlasCloudShaderProvider
+            atlasCloudShaderProvider,
+            atlasBoundaryShaderProvider
         );
         return exactChunkRenderer != null;
     }
@@ -1597,6 +1644,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedScreenshotCancelPassed = false;
         automatedScreenshotSequenceFailed = false;
         automatedScreenshotOutputValidationPassed = false;
+        automatedScreenshotDiagnosticNextMilliseconds = 0;
         automatedScreenshotSequenceStep = 0;
         automatedFirstScreenshotPath = null;
         automatedSecondScreenshotPath = null;
@@ -1672,12 +1720,24 @@ public sealed class ModernAtlasDialog : GuiDialog
                 "[ModernAtlas] Automated smoke test temporarily accepted Cheat Mode for Creative-only atlas checks."
             );
         }
+        capi.Logger.Notification(
+            "[ModernAtlas] Automated smoke player game mode: {0}.",
+            capi.World.Player?.WorldData.CurrentGameMode.ToString() ?? "unavailable"
+        );
         config.MapLayersEnabled = true;
         config.CaveModeEnabled = false;
         config.SearchModeEnabled = true;
         config.CameraAngleLocked = false;
         config.RenderOnScroll = true;
-        config.CloudsEnabled = true;
+        config.CloudsEnabled = !IsEnvironmentFlagEnabled(
+            SmokeDisableCloudsEnvironmentVariable
+        );
+        if (!config.CloudsEnabled)
+        {
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated smoke test disabled atlas clouds for the rendering A/B diagnostic."
+            );
+        }
         // Capture the resized compass in the early smoke frames. The normal
         // interface exercise later selects Time, so one run now covers both
         // instrument faces before restoring the player's original choice.
@@ -1709,6 +1769,11 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestSearchInputPassed = false;
         automatedScreenshotCaptureRequested = false;
         automatedScreenshotCapturePassed = false;
+        automatedScreenshotBaselineZoom = 0;
+        automatedScreenshotBaselineTargetZoom = 0;
+        automatedScreenshotBaselineCenterX = 0;
+        automatedScreenshotBaselineCenterY = 0;
+        automatedScreenshotBaselineCenterZ = 0;
         automatedSmokeTestBilingualSearchPassed =
             searchController.ValidateBilingualSearchForAutomatedTest(
                 out string languageDiagnostic
@@ -1732,6 +1797,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
         automatedSmokeTestSafeSurfaceFrameRendered = false;
         automatedSmokeTestSafeSurfaceScreenshotHandled = false;
+        automatedSmokeTestBorderTopDownPending = false;
+        automatedSmokeTestBorderTopDownFrameRendered = false;
         automatedSmokeTestMaximumZoomPending = false;
         automatedSmokeTestMaximumZoomFrameRendered = false;
         automatedSmokeTestPartialZoomPending = false;
@@ -1740,6 +1807,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestPitchBeforeMaximum = 0;
         automatedSmokeTestMaximumZoomStartedSeconds = 0;
         automatedSmokeTestPartialZoomStartedSeconds = 0;
+        automatedSmokeTestBorderTopDownStartedSeconds = 0;
         automatedSmokeTestSearchPhase = 0;
         automatedSmokeTestSearchPassed = false;
         automatedLanternBlockX = 0;
@@ -1786,8 +1854,9 @@ public sealed class ModernAtlasDialog : GuiDialog
             && !tileScreenshot.Busy)
         {
             bool cameraRestored = !pendingScreenshotRequest
-                && Math.Abs(zoom - automatedScreenshotBaselineZoom) < 0.001f
-                && Math.Abs(targetZoom - automatedScreenshotBaselineZoom) < 0.001f
+                && (Math.Abs(zoom - automatedScreenshotBaselineZoom) < 0.001f
+                    || Math.Abs(zoom - automatedScreenshotBaselineTargetZoom) < 0.001f)
+                && Math.Abs(targetZoom - automatedScreenshotBaselineTargetZoom) < 0.001f
                 && Math.Abs(centerX - automatedScreenshotBaselineCenterX) < 0.001
                 && Math.Abs(centerY - automatedScreenshotBaselineCenterY) < 0.001
                 && Math.Abs(centerZ - automatedScreenshotBaselineCenterZ) < 0.001;
@@ -1816,11 +1885,36 @@ public sealed class ModernAtlasDialog : GuiDialog
             string? capturedPath = tileScreenshot.LastSavedPath;
             string? capturedError = tileScreenshot.LastError;
             bool cameraRestored = !pendingScreenshotRequest
-                && Math.Abs(zoom - automatedScreenshotBaselineZoom) < 0.001f
-                && Math.Abs(targetZoom - automatedScreenshotBaselineZoom) < 0.001f
+                && (Math.Abs(zoom - automatedScreenshotBaselineZoom) < 0.001f
+                    || Math.Abs(zoom - automatedScreenshotBaselineTargetZoom) < 0.001f)
+                && Math.Abs(targetZoom - automatedScreenshotBaselineTargetZoom) < 0.001f
                 && Math.Abs(centerX - automatedScreenshotBaselineCenterX) < 0.001
                 && Math.Abs(centerY - automatedScreenshotBaselineCenterY) < 0.001
                 && Math.Abs(centerZ - automatedScreenshotBaselineCenterZ) < 0.001;
+            if (capi.ElapsedMilliseconds >= automatedScreenshotDiagnosticNextMilliseconds)
+            {
+                automatedScreenshotDiagnosticNextMilliseconds =
+                    capi.ElapsedMilliseconds + 1000;
+                capi.Logger.Notification(
+                    "[ModernAtlas] Automated screenshot completion diagnostic: path={0}, exists={1}, busy={2}, state={3}, pending={4}, cameraRestored={5}, zoom={6}/{7}, targetZoom={8}/{9}, center=({10:0.###},{11:0.###},{12:0.###})/({13:0.###},{14:0.###},{15:0.###}).",
+                    capturedPath ?? "<null>",
+                    capturedPath != null && File.Exists(capturedPath),
+                    tileScreenshot.Busy,
+                    tileScreenshot.State,
+                    pendingScreenshotRequest,
+                    cameraRestored,
+                    zoom,
+                    automatedScreenshotBaselineZoom,
+                    targetZoom,
+                    automatedScreenshotBaselineTargetZoom,
+                    centerX,
+                    centerY,
+                    centerZ,
+                    automatedScreenshotBaselineCenterX,
+                    automatedScreenshotBaselineCenterY,
+                    automatedScreenshotBaselineCenterZ
+                );
+            }
             if (capturedPath != null
                 && File.Exists(capturedPath)
                 && !tileScreenshot.Busy
@@ -1896,6 +1990,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         // camera; queueing earlier would make the camera-restore comparison
         // race their legitimate zoom changes.
         bool smokeStepsComplete = AutomatedSmokeTestRenderedExactWorld
+            && exactChunkRenderer?.BoundaryResolvedLastFrame == true
             && automatedSmokeTestSafeSurfaceFrameRendered
             && (!automatedSmokeTestRequiresUnlockedPitch
                 || automatedSmokeTestRenderedAtPitchFloor)
@@ -1932,6 +2027,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             else if (!presentationChangeCoordinator.HasPending)
             {
                 automatedScreenshotBaselineZoom = zoom;
+                automatedScreenshotBaselineTargetZoom = targetZoom;
                 automatedScreenshotBaselineCenterX = centerX;
                 automatedScreenshotBaselineCenterY = centerY;
                 automatedScreenshotBaselineCenterZ = centerZ;
@@ -2007,8 +2103,9 @@ public sealed class ModernAtlasDialog : GuiDialog
         if (!passed)
         {
             capi.Logger.Error(
-                "[ModernAtlas] Automated smoke summary: exact={0}, safeSurface={1}, pitch={2}/{3}, interface={4}, unit={5}/{6}, searchInput={7}, bilingual={8}, ore={9}, creativeOre={10}, partialZoom={11}, maximumZoom={12}, search={13}(phase={14}), layers={15}(phase={16}), performance={17}(selected={18}, renderedVegetationHidden={19}, flatLighting={20}), presentation={21}, screenshotCapture={22}(requested={23}, sequenceStep={24}, outputs={25}, cancel={26}/{27}).",
+                "[ModernAtlas] Automated smoke summary: exact={0}, boundary={1}, safeSurface={2}, pitch={3}/{4}, interface={5}, unit={6}/{7}, searchInput={8}, bilingual={9}, ore={10}, creativeOre={11}, partialZoom={12}, maximumZoom={13}, search={14}(phase={15}), layers={16}(phase={17}), performance={18}(selected={19}, renderedVegetationHidden={20}, flatLighting={21}), presentation={22}, screenshotCapture={23}(requested={24}, sequenceStep={25}, outputs={26}, cancel={27}/{28}).",
                 AutomatedSmokeTestRenderedExactWorld,
+                exactChunkRenderer?.BoundaryResolvedLastFrame == true,
                 automatedSmokeTestSafeSurfaceFrameRendered,
                 automatedSmokeTestRenderedAtPitchFloor,
                 automatedSmokeTestRequiresUnlockedPitch,
@@ -3403,6 +3500,40 @@ public sealed class ModernAtlasDialog : GuiDialog
             automatedSmokeTestPitchBeforeMaximum = targetPitchDegrees;
             targetPitchDegrees = 72;
             pitchDegrees = 72;
+            zoom = targetZoom;
+            automatedSmokeTestBorderTopDownStartedSeconds =
+                automatedSmokeTestElapsedSeconds;
+            automatedSmokeTestBorderTopDownPending = true;
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated smoke test is holding a fitted top-down standard-world view for border inspection before layers and Cave Mode."
+            );
+            return;
+        }
+
+        if (automatedSmokeTestBorderTopDownPending)
+        {
+            if (automatedSmokeTestElapsedSeconds
+                - automatedSmokeTestBorderTopDownStartedSeconds
+                < MaximumZoomScreenshotSettleSeconds)
+            {
+                return;
+            }
+
+            automatedSmokeTestBorderTopDownPending = false;
+            automatedSmokeTestBorderTopDownFrameRendered = true;
+            if (!string.IsNullOrWhiteSpace(configuredPath))
+            {
+                string borderPrefix = configuredPath.EndsWith(
+                    ".png",
+                    StringComparison.OrdinalIgnoreCase
+                )
+                    ? configuredPath[..^4]
+                    : configuredPath;
+                automatedSmokeTestBorderTopDownFrameRendered =
+                    TrySaveAutomatedSmokeScreenshot(
+                        $"{borderPrefix}-border-topdown.png"
+                    );
+            }
             ApplyZoomWheel(1, false);
             ApplyZoomWheel(1, false);
             // The automated check validates a settled zoom level. Snap only
@@ -3541,7 +3672,10 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
         if (string.IsNullOrWhiteSpace(configuredPath))
         {
-            automatedSmokeScreenshotPhase = 5;
+            // Screenshot files are optional. Complete the comparison
+            // sequence when no output prefix was requested so the later
+            // presentation and tiled-capture checks are not blocked forever.
+            automatedSmokeScreenshotPhase = AutomatedUiScreenshotPhaseCount;
             return;
         }
 
@@ -3685,7 +3819,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         presentationChangeCoordinator.Reset(config.RenderOnScroll);
 
         if (automatedSmokeTestPartialZoomPending
-            || automatedSmokeTestMaximumZoomPending)
+            || automatedSmokeTestMaximumZoomPending
+            || automatedSmokeTestBorderTopDownPending)
         {
             targetZoom = automatedSmokeTestZoomBeforeMaximum;
             zoom = automatedSmokeTestZoomBeforeMaximum;
@@ -3693,6 +3828,7 @@ public sealed class ModernAtlasDialog : GuiDialog
             pitchDegrees = automatedSmokeTestPitchBeforeMaximum;
             automatedSmokeTestPartialZoomPending = false;
             automatedSmokeTestMaximumZoomPending = false;
+            automatedSmokeTestBorderTopDownPending = false;
         }
 
         automatedSmokeTestPreferencesCaptured = false;
@@ -4273,6 +4409,11 @@ public sealed class ModernAtlasDialog : GuiDialog
         automatedSmokeTestSearchInputPassed = false;
         automatedScreenshotCaptureRequested = false;
         automatedScreenshotCapturePassed = false;
+        automatedScreenshotBaselineZoom = 0;
+        automatedScreenshotBaselineTargetZoom = 0;
+        automatedScreenshotBaselineCenterX = 0;
+        automatedScreenshotBaselineCenterY = 0;
+        automatedScreenshotBaselineCenterZ = 0;
         automatedSmokeTestBilingualSearchPassed = false;
         automatedSmokeTestOreConcealmentPassed = false;
         automatedSmokeTestForceSurvivalOreConcealment = false;
@@ -4341,6 +4482,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         }
         finally
         {
+            pendingNormalWorldShaderRestore = null;
+            normalWorldShaderRestoreGeneration++;
             exactChunkRenderer = null;
         }
         preparedGameViewDistance = -1;
@@ -4357,6 +4500,8 @@ public sealed class ModernAtlasDialog : GuiDialog
         RestoreAutomatedSmokeTestPreferences();
         automatedSmokeTestActive = false;
         automatedSmokeTestCompletion = null;
+        pendingNormalWorldShaderRestore = null;
+        normalWorldShaderRestoreGeneration++;
         exactChunkRenderer?.Dispose();
         exactChunkRenderer = null;
         surfaceHeightTexture.Dispose();
@@ -6425,7 +6570,9 @@ public sealed class ModernAtlasDialog : GuiDialog
     /// </summary>
     private void AdvanceTileScreenshot()
     {
-        if (!tileScreenshot.CaptureCurrentFrame())
+        FrameBufferRef? resolvedFramebuffer = exactChunkRenderer?.ResolvedFramebuffer;
+        if (resolvedFramebuffer == null
+            || !tileScreenshot.CaptureCurrentFrame(resolvedFramebuffer))
         {
             tileScreenshot.Cancel();
             RestoreScreenshotCamera();
@@ -7664,7 +7811,7 @@ public sealed class ModernAtlasDialog : GuiDialog
         IRenderAPI render = capi.Render;
         render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
 
-        preparingSurfaceFilter = SurfaceSafetyEnabled && !surfaceHeightTexture.Advance();
+        preparingSurfaceFilter = !surfaceHeightTexture.Advance();
         preparingOreConcealment = SurvivalOreConcealmentEnabled
             && exactChunkRenderer != null
             && !exactChunkRenderer.AdvanceSurvivalOreConcealment();
@@ -7762,7 +7909,7 @@ public sealed class ModernAtlasDialog : GuiDialog
                 GameViewDistance,
                 SurfaceSafetyEnabled,
                 SurvivalOreConcealmentEnabled,
-                SurfaceSafetyEnabled ? surfaceHeightTexture : null,
+                surfaceHeightTexture,
                 mapLayerTexture,
                 EffectiveMapLayerOpacity,
                 0,
@@ -7843,16 +7990,27 @@ public sealed class ModernAtlasDialog : GuiDialog
     private void PrepareSurfaceSafetyFilter()
     {
         preparedGameViewDistance = GameViewDistance;
-        preparingSurfaceFilter = SurfaceSafetyEnabled;
-        if (!SurfaceSafetyEnabled)
+        double playerX = capi.World.Player.Entity.Pos.X;
+        double playerZ = capi.World.Player.Entity.Pos.Z;
+        if (surfaceHeightTexture.CoversArea(
+                playerX,
+                playerZ,
+                GameViewDistance
+            ))
         {
-            surfaceHeightTexture.Reset();
+            // This is transient world data, not a persistent terrain cache.
+            // Keep it across G close/open while it still covers the required
+            // loaded-world footprint; rebuilding it here creates a blank
+            // preparation interval on every second atlas open.
+            preparingSurfaceFilter = false;
             return;
         }
 
+        preparingSurfaceFilter = true;
+
         surfaceHeightTexture.Begin(
-            capi.World.Player.Entity.Pos.X,
-            capi.World.Player.Entity.Pos.Z,
+            playerX,
+            playerZ,
             GameViewDistance
         );
     }

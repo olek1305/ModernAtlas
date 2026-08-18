@@ -7,6 +7,9 @@ uniform vec2 textureAtlasSize;
 uniform float waterFlowCounter;
 uniform vec2 disclosureCenterXZ;
 uniform float disclosureRadius;
+uniform int completeBoundaryEnabled;
+uniform vec2 completeBoundaryMinXZ;
+uniform vec2 completeBoundaryMaxXZ;
 uniform int atlasHideCaves;
 uniform sampler2D atlasSurfaceHeightTex;
 uniform vec2 atlasSurfaceOriginXZ;
@@ -68,8 +71,18 @@ void main(void)
     }
     float opaqueDepth = texelFetch(opaqueDepthTex, depthPosition, 0).r;
     if (opaqueDepth >= 0.999999) discard;
+    if (gl_FragCoord.z > opaqueDepth + 0.0005) discard;
 
     vec2 disclosureDelta = absoluteWorldPosition.xz - disclosureCenterXZ;
+    if (completeBoundaryEnabled > 0
+        && (any(lessThan(absoluteWorldPosition.xz, completeBoundaryMinXZ))
+            || any(greaterThanEqual(
+                absoluteWorldPosition.xz,
+                completeBoundaryMaxXZ
+            ))))
+    {
+        discard;
+    }
     float disclosureDistance = length(disclosureDelta);
     if (disclosureDistance >= disclosureRadius) discard;
     if (atlasHideCaves > 0)
@@ -85,6 +98,16 @@ void main(void)
 
         if (absoluteWorldPosition.y
             < exteriorSurfaceHeight - atlasVisibleSubsurfaceDepth)
+        {
+            discard;
+        }
+
+        // Match the terrain disclosure seam: the outer chunk may show only
+        // its registered liquid surface, never deep liquid sides or partial
+        // columns extending beyond the accepted atlas footprint.
+        if (disclosureDistance >= max(0.0, disclosureRadius - 32.0)
+            && (absoluteWorldPosition.y < exteriorSurfaceHeight - 0.25
+                || absoluteWorldPosition.y > exteriorSurfaceHeight + 1.5))
         {
             discard;
         }

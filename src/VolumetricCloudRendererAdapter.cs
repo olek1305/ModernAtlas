@@ -162,7 +162,9 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
         double[] view,
         float pausedAnimationDeltaTime,
         bool renderIntoPrimary = false,
-        Vec3f? frozenOffset = null
+        Vec3f? frozenOffset = null,
+        Vec3f? atlasLightColor = null,
+        float atlasExposure = 1f
     )
     {
         if (disabled) return false;
@@ -223,6 +225,17 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
             shader.Uniform("cloudBaseY", cloudBaseWorldY - (float)playerCamera.Y);
             shader.Uniform("cloudThickness", 64f);
             shader.Uniform("cloudMapWidth", (float)cloudMapWidth);
+            Vec3f safeLightColor = atlasLightColor ?? new Vec3f(1f, 1f, 1f);
+            shader.Uniform(
+                "atlasCloudLightColor",
+                safeLightColor.X,
+                safeLightColor.Y,
+                safeLightColor.Z
+            );
+            shader.Uniform(
+                "atlasCloudExposure",
+                Math.Clamp(atlasExposure, 0.04f, 1.5f)
+            );
             shader.Uniform(
                 "depthScale",
                 renderIntoPrimary

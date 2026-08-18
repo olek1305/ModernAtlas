@@ -421,7 +421,12 @@ the product scope when the atlas itself is correct.
 
   ```sh
   env MODERNATLAS_SMOKE_TEST=1 /opt/vintagestory/Vintagestory \
-    --dataPath /home/arcylisz/.config/VintagestoryData -o 'test creative'
+    --dataPath /home/arcylisz/.config/VintagestoryData -o 'arcyliszs cave world'
+
+  The default smoke target must be an existing standard generated world, not
+  the superflat `TESTCREATIVE` fixture. The repository helper
+  `bash scripts/run-smoke-test.sh` uses `arcyliszs cave world` and accepts
+  `MODERNATLAS_SMOKE_WORLD` when a different standard test world is needed.
   ```
 
   Add `MODERNATLAS_SMOKE_SCREENSHOT=/tmp/modernatlas-smoke` to capture the
