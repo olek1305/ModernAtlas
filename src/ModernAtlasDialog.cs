@@ -1423,9 +1423,9 @@ public sealed class ModernAtlasDialog : GuiDialog
 
     internal bool CaptureNormalWorldSnapshotBeforeTransition()
     {
-        // The scroll renderer owns an opaque stationary backdrop and a neutral
-        // placeholder, so the transition never needs a synchronous screenshot
-        // of the normal world framebuffer.
+        // The transition dialog owns the readback and blur. This callback only
+        // confirms that the ordinary world completed its handoff; it never
+        // changes an ordinary chunk shader, framebuffer or camera.
         return true;
     }
 

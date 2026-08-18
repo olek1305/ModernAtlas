@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
+using HarmonyLib;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Common.Entities;
@@ -18,6 +20,13 @@ public sealed class ModernAtlasSystem : ModSystem
     private const string ServerConfigFileName = "ModernAtlasServer.json";
     private const string PolicyChannelName = "modernatlas-policy";
     private const string SmokeTestEnvironmentVariable = "MODERNATLAS_SMOKE_TEST";
+    private const string SmokeGodModePatchId = "modernatlas.smoke.godmode";
+
+    // The smoke test must not change the saved world or the Vintage Story
+    // game mode.  This narrowly scoped Harmony guard only rejects damage for
+    // the local smoke-test player while the opt-in test is running.  It is
+    // removed before the automated soft exit and again on every teardown path.
+    private static ModernAtlasSystem? smokeGodModeOwner;
 
     private ModernAtlasDialog? dialog;
     private ICoreClientAPI? clientApi;
@@ -44,6 +53,10 @@ public sealed class ModernAtlasSystem : ModSystem
     private bool automatedSmokeAllCyclesPassed = true;
     private bool automatedSmokeCycleFinishing;
     private bool automatedSmokeOriginalCheatMode;
+    private Harmony? smokeGodModeHarmony;
+    private bool smokeGodModeEnabled;
+    private long smokeGodModeEntityId;
+    private string? smokeGodModePlayerUid;
     private bool suppressLocalHandActions;
     private long handActionSuppressionListenerId = -1;
 
@@ -175,7 +188,9 @@ public sealed class ModernAtlasSystem : ModSystem
             soundController
         );
         ordinaryWorldScreenshotRenderer = new AtlasOrdinaryWorldScreenshotRenderer(
-            dialog.CaptureAutomatedOrdinaryWorldScreenshot
+            dialog.CaptureAutomatedOrdinaryWorldScreenshot,
+            openingTransition.ShouldRefreshOrdinaryWorldSnapshot,
+            openingTransition.TryRefreshOrdinaryWorldSnapshot
         );
         api.Event.RegisterRenderer(
             openingTransition,
@@ -397,9 +412,19 @@ public sealed class ModernAtlasSystem : ModSystem
     {
         if (dialog?.IsOpened() != true) return false;
 
-        if (!dialog.TryClose()) return false;
+        // Freeze the last complete ordinary-world snapshot before closing the
+        // atlas GUI.  The first AfterBlit callback after TryClose can observe
+        // a transient handoff frame; that frame must never replace the
+        // closing backdrop with a dark/partially restored scene.
+        openingTransition?.LockOrdinaryWorldSnapshotForClosing();
+        if (!dialog.TryClose())
+        {
+            openingTransition?.UnlockOrdinaryWorldSnapshot();
+            return false;
+        }
         if (ShouldSkipScrollTransitions())
         {
+            openingTransition?.UnlockOrdinaryWorldSnapshot();
             onCompleted?.Invoke(true);
             return true;
         }
@@ -412,6 +437,7 @@ public sealed class ModernAtlasSystem : ModSystem
                 }
             ))
         {
+            openingTransition?.UnlockOrdinaryWorldSnapshot();
             clientApi?.Logger.Warning(
                 "[ModernAtlas] The scroll stowing transition was unavailable."
             );
@@ -488,6 +514,7 @@ public sealed class ModernAtlasSystem : ModSystem
 
     public override void Dispose()
     {
+        DisableAutomatedSmokeGodMode();
         if (clientApi != null)
         {
             clientApi.Event.LeaveWorld -= OnLeaveWorld;
@@ -722,6 +749,7 @@ public sealed class ModernAtlasSystem : ModSystem
     {
         bool completeAutomatedWorldExit = automatedWorldExitRequested;
         automatedWorldExitRequested = false;
+        DisableAutomatedSmokeGodMode();
         clientApi?.Logger.Notification(
             "[ModernAtlas] World leave received; releasing atlas state without activating engine shaders."
         );
@@ -751,6 +779,11 @@ public sealed class ModernAtlasSystem : ModSystem
     private void OnLevelFinalize()
     {
         if (clientApi == null || config == null) return;
+
+        // A previous session may have ended before its normal completion
+        // callback. Remove its test-only damage guard before binding the new
+        // world/player identity.
+        DisableAutomatedSmokeGodMode();
 
         string worldIdentifier = clientApi.World.SavegameIdentifier;
         if (string.IsNullOrWhiteSpace(worldIdentifier)) return;
@@ -804,6 +837,7 @@ public sealed class ModernAtlasSystem : ModSystem
 
         if (AutomatedSmokeTestEnabled)
         {
+            EnableAutomatedSmokeGodMode();
             ScheduleAutomatedCheatCommandTest(worldIdentifier, sessionGeneration);
         }
     }
@@ -813,6 +847,190 @@ public sealed class ModernAtlasSystem : ModSystem
         "1",
         StringComparison.Ordinal
     );
+
+    private bool EnableAutomatedSmokeGodMode()
+    {
+        if (!AutomatedSmokeTestEnabled || smokeGodModeEnabled)
+        {
+            return smokeGodModeEnabled;
+        }
+
+        EntityPlayer? player = clientApi?.World.Player?.Entity;
+        if (player == null)
+        {
+            clientApi?.Logger.Error(
+                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: the local player was unavailable while enabling smoke-test damage protection."
+            );
+            return false;
+        }
+
+        try
+        {
+            List<MethodInfo> targets = new();
+            // ReceiveDamage is overridden through several engine entity
+            // layers.  The public contract guarantees that it calls the
+            // concrete player's ShouldReceiveDamage virtual, so patch that
+            // player implementation only.  This avoids touching the base
+            // world entity method and keeps the guard local to the smoke
+            // player's server/client entity.
+            AddSmokeDamageTarget(
+                targets,
+                player.GetType(),
+                nameof(Entity.ShouldReceiveDamage)
+            );
+            AddSmokeDamageTarget(
+                targets,
+                typeof(EntityPlayer),
+                nameof(Entity.ShouldReceiveDamage)
+            );
+
+            if (targets.Count == 0)
+            {
+                throw new MissingMethodException(
+                    typeof(Entity).FullName,
+                    nameof(Entity.ShouldReceiveDamage)
+                );
+            }
+
+            MethodInfo prefix = typeof(ModernAtlasSystem).GetMethod(
+                nameof(SmokeGodModeDamagePrefix),
+                BindingFlags.Static | BindingFlags.NonPublic
+            ) ?? throw new MissingMethodException(
+                typeof(ModernAtlasSystem).FullName,
+                nameof(SmokeGodModeDamagePrefix)
+            );
+
+            Harmony harmony = new(SmokeGodModePatchId);
+            foreach (MethodInfo target in targets)
+            {
+                harmony.Patch(
+                    target,
+                    prefix: new HarmonyMethod(prefix)
+                );
+            }
+
+            smokeGodModeEntityId = player.EntityId;
+            smokeGodModePlayerUid = player.PlayerUID;
+            smokeGodModeHarmony = harmony;
+            smokeGodModeOwner = this;
+            smokeGodModeEnabled = true;
+            clientApi?.Logger.Notification(
+                "[ModernAtlas] AUTOMATED SMOKE GOD MODE ENABLED: damage is blocked only for the local smoke-test player; Vintage Story game mode and world data are unchanged."
+            );
+            return true;
+        }
+        catch (Exception exception)
+        {
+            try
+            {
+                new Harmony(SmokeGodModePatchId).UnpatchAll(SmokeGodModePatchId);
+            }
+            catch
+            {
+                // Keep the original setup error as the useful diagnostic.
+            }
+            smokeGodModeHarmony = null;
+            smokeGodModeOwner = null;
+            smokeGodModeEnabled = false;
+            smokeGodModeEntityId = 0;
+            smokeGodModePlayerUid = null;
+            clientApi?.Logger.Error(
+                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: could not install the local-player damage guard: {0}",
+                exception.Message
+            );
+            return false;
+        }
+    }
+
+    private static void AddSmokeDamageTarget(
+        List<MethodInfo> targets,
+        Type ownerType,
+        string methodName
+    )
+    {
+        MethodInfo? method = ownerType.GetMethod(
+            methodName,
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            null,
+            new[] { typeof(DamageSource), typeof(float) },
+            null
+        );
+        // Harmony must receive a concrete method body.  Some engine types
+        // expose only a virtual declaration, so ignore those declarations.
+        bool alreadyAdded = method != null && targets.Exists(
+            existing => existing.Module == method.Module
+                && existing.MetadataToken == method.MetadataToken
+        );
+        if (method != null && !method.IsAbstract && !alreadyAdded)
+        {
+            targets.Add(method);
+        }
+    }
+
+    private static bool SmokeGodModeDamagePrefix(
+        Entity __instance,
+        ref bool __result
+    )
+    {
+        ModernAtlasSystem? owner = smokeGodModeOwner;
+        if (owner == null
+            || !owner.smokeGodModeEnabled
+            || !owner.IsSmokeGodModePlayer(__instance))
+        {
+            return true;
+        }
+
+        __result = false;
+        return false;
+    }
+
+    private bool IsSmokeGodModePlayer(Entity entity)
+    {
+        if (entity is not EntityPlayer player) return false;
+        if (!string.IsNullOrWhiteSpace(smokeGodModePlayerUid)
+            && string.Equals(
+                player.PlayerUID,
+                smokeGodModePlayerUid,
+                StringComparison.Ordinal
+            ))
+        {
+            return true;
+        }
+        return smokeGodModeEntityId != 0
+            && player.EntityId == smokeGodModeEntityId;
+    }
+
+    private void DisableAutomatedSmokeGodMode()
+    {
+        bool owned = ReferenceEquals(smokeGodModeOwner, this);
+        if (!owned && smokeGodModeHarmony == null && !smokeGodModeEnabled)
+        {
+            return;
+        }
+
+        smokeGodModeEnabled = false;
+        if (owned) smokeGodModeOwner = null;
+        try
+        {
+            smokeGodModeHarmony?.UnpatchAll(SmokeGodModePatchId);
+        }
+        catch (Exception exception)
+        {
+            clientApi?.Logger.Warning(
+                "[ModernAtlas] Could not remove the smoke-test damage guard during teardown: {0}",
+                exception.Message
+            );
+        }
+        finally
+        {
+            smokeGodModeHarmony = null;
+            smokeGodModeEntityId = 0;
+            smokeGodModePlayerUid = null;
+        }
+        clientApi?.Logger.Notification(
+            "[ModernAtlas] AUTOMATED SMOKE GOD MODE RESTORED: the temporary local-player damage guard is disabled."
+        );
+    }
 
     private void ScheduleAutomatedCheatCommandTest(
         string worldIdentifier,
@@ -1092,6 +1310,7 @@ public sealed class ModernAtlasSystem : ModSystem
 
         if (dialog.IsOpened())
         {
+            openingTransition?.LockOrdinaryWorldSnapshotForClosing();
             if (openingTransition != null
                 && dialog.TryClose()
                 && openingTransition.BeginClosing(
@@ -1108,6 +1327,7 @@ public sealed class ModernAtlasSystem : ModSystem
             {
                 return;
             }
+            openingTransition?.UnlockOrdinaryWorldSnapshot();
         }
 
         CompleteAutomatedAtlasClose(
@@ -1276,6 +1496,7 @@ public sealed class ModernAtlasSystem : ModSystem
     )
     {
         if (!IsCurrentAutomatedWorld(worldIdentifier, sessionGeneration)) return;
+        DisableAutomatedSmokeGodMode();
         dialog!.SetCheatMode(automatedSmokeOriginalCheatMode);
         clientApi!.Logger.Notification(
             "[ModernAtlas] Automated smoke test restored the atlas Cheat Mode state without changing the Vintage Story player game mode."
