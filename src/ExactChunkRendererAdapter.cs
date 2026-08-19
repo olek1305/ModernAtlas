@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Reflection;
 using HarmonyLib;
+using OpenTK.Graphics.OpenGL;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Config;
@@ -225,6 +226,9 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     private bool loggedVegetationFilteringDiagnostics;
     private bool disposed;
     private bool atlasUniformsActive;
+    private readonly float[] lastAtlasProjection = Mat4f.Create();
+    private readonly double[] lastAtlasView = Mat4d.Create();
+    private bool lastAtlasCameraReady;
 
     public int LastRenderedEntityCount { get; private set; }
     public int LastSuppressedHeldItemCount =>
@@ -991,6 +995,9 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 },
                 new[] { 0d, 1d, 0d }
             );
+            Array.Copy(projection, lastAtlasProjection, 16);
+            Array.Copy(view, lastAtlasView, 16);
+            lastAtlasCameraReady = true;
             double[] cullingView = Mat4d.Create();
             Mat4d.LookAt(
                 cullingView,
@@ -1608,6 +1615,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
     {
         if (disposed) return;
         disposed = true;
+        lastAtlasCameraReady = false;
 
         // LeaveWorld is raised after the engine has started clearing its
         // DefaultShaderUniforms arrays. Activating an engine chunk shader at
@@ -1725,9 +1733,59 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
 
     public int ResolvedColorTextureId => boundaryResolver.ColorTextureId;
 
+    public int BoundaryValidityTextureId => boundaryResolver.ValidityTextureId;
+
+    public int PrimaryDepthTextureId
+    {
+        get
+        {
+            if (disposed) return 0;
+            try
+            {
+                return capi.Render.FrameBuffers[(int)EnumFrameBuffer.Primary]
+                    .DepthTextureId;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+    }
+
     public FrameBufferRef? ResolvedFramebuffer => boundaryResolver.Framebuffer;
 
+    public bool BoundaryDrawBufferStateCheckPassed =>
+        boundaryResolver.LastDrawBufferStateCheckPassed;
+
+    public bool BoundaryDrawBufferStateCheckPerformed =>
+        boundaryResolver.LastDrawBufferStateCheckPerformed;
+
+    public string BoundaryDrawBufferStateDiagnostic =>
+        boundaryResolver.LastDrawBufferStateDiagnostic;
+
+    public bool TryReadBoundaryValidityMask(
+        out byte[] mask,
+        out AtlasValidityMaskDiagnostics diagnostics
+    ) => boundaryResolver.TryReadValidityMask(out mask, out diagnostics);
+
     public bool BoundaryResolvedLastFrame => boundaryResolver.LastResolveSucceeded;
+
+    public bool TryGetLastAtlasCamera(
+        out float[] atlasProjection,
+        out double[] atlasView
+    )
+    {
+        if (disposed || !lastAtlasCameraReady)
+        {
+            atlasProjection = Array.Empty<float>();
+            atlasView = Array.Empty<double>();
+            return false;
+        }
+
+        atlasProjection = (float[])lastAtlasProjection.Clone();
+        atlasView = (double[])lastAtlasView.Clone();
+        return true;
+    }
 
     /// <summary>
     /// Reads the boundary-resolved atlas target before any window-opacity or
@@ -1745,6 +1803,13 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             diagnostic = "resolved framebuffer or color attachment is unavailable";
             return false;
         }
+        if (!BoundaryDrawBufferStateCheckPerformed
+            || !BoundaryDrawBufferStateCheckPassed)
+        {
+            diagnostic =
+                $"boundary draw-buffer configuration was not preserved: {BoundaryDrawBufferStateDiagnostic}";
+            return false;
+        }
 
         IRenderAPI render = capi.Render;
         AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
@@ -1753,6 +1818,7 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
             render.CurrentActiveShader?.Stop();
             render.CurrentFrameBuffer = resolved;
             render.GlViewport(0, 0, resolved.Width, resolved.Height);
+            GL.ReadBuffer(ReadBufferMode.ColorAttachment0);
             using BitmapRef screenshot = render.GrabScreenshot(
                 resolved.Width,
                 resolved.Height,
@@ -1788,11 +1854,15 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 else nonBackgroundPixels++;
             }
 
+            bool sensibleCoverage = nonBackgroundPixels >= 64
+                && (nonBackgroundPixels >= 512
+                    || (screenshot.Pixels.Length > 0
+                        && (double)nonBackgroundPixels / screenshot.Pixels.Length
+                            >= 0.00025d));
             bool valid = screenshot.Pixels.Length > 0
                 && minimumAlpha == 255
                 && belowOpaque == 0
-                && backgroundPixels > 0
-                && nonBackgroundPixels > 0;
+                && sensibleCoverage;
             string? smokePrefix = Environment.GetEnvironmentVariable(
                 "MODERNATLAS_SMOKE_SCREENSHOT"
             );
@@ -1818,13 +1888,20 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
                 ? screenshot.Pixels[0]
                 : 0;
             diagnostic = string.Format(
-                "size={0}x{1}, minAlpha={2}, belowOpaque={3}, backgroundPixels={4}, nonBackgroundPixels={5}, firstPacked=0x{6:X8}",
+                "size={0}x{1}, minAlpha={2}, belowOpaque={3}, backgroundPixels={4}, nonBackgroundPixels={5}, nonBackgroundRatio={6:0.####}, sensibleCoverage={7}, drawBuffersChecked={8}, drawBuffersStable={9}, drawBuffers={10}, firstPacked=0x{11:X8}",
                 resolved.Width,
                 resolved.Height,
                 minimumAlpha,
                 belowOpaque,
                 backgroundPixels,
                 nonBackgroundPixels,
+                screenshot.Pixels.Length > 0
+                    ? (double)nonBackgroundPixels / screenshot.Pixels.Length
+                    : 0d,
+                sensibleCoverage,
+                BoundaryDrawBufferStateCheckPerformed,
+                BoundaryDrawBufferStateCheckPassed,
+                BoundaryDrawBufferStateDiagnostic,
                 firstPixel
             );
             return valid;
@@ -1837,6 +1914,18 @@ internal sealed class ExactChunkRendererAdapter : IDisposable
         finally
         {
             renderState.RestoreCapturedState();
+            try
+            {
+                GL.ReadBuffer(
+                    render.CurrentFrameBuffer == null
+                        ? ReadBufferMode.Back
+                        : ReadBufferMode.ColorAttachment0
+                );
+            }
+            catch
+            {
+                // The client may already be leaving the world.
+            }
         }
     }
 

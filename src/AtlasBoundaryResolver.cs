@@ -1,9 +1,61 @@
 using System;
+using System.Collections.Generic;
+using OpenTK.Graphics.OpenGL;
 using Vintagestory.API.Client;
 using Vintagestory.API.Config;
 using Vintagestory.API.MathTools;
 
 namespace ModernAtlas;
+
+internal readonly record struct AtlasValidityMaskDiagnostics(
+    int Width,
+    int Height,
+    long ValidPixelCount,
+    long TotalPixelCount
+)
+{
+    public double ValidRatio => TotalPixelCount <= 0
+        ? 0d
+        : (double)ValidPixelCount / TotalPixelCount;
+
+    public bool HasSensibleCoverage =>
+        ValidPixelCount >= 64
+        && (ValidRatio >= 0.00025d || ValidPixelCount >= 512);
+
+    public override string ToString() =>
+        $"dimensions={Width}x{Height}, validPixels={ValidPixelCount}/{TotalPixelCount}, validRatio={ValidRatio:0.####}";
+}
+
+/// <summary>
+/// Aggregate validity coverage for one complete filtered screenshot job. The
+/// dimensions describe one tile; the pixel counts and tile counts cover all
+/// recorded tiles. Empty tiles are legal at a disclosure edge or at a
+/// top-down pitch, so callers validate aggregate coverage and non-empty tile
+/// count rather than requiring background pixels or terrain in every tile.
+/// </summary>
+internal readonly record struct AtlasValidityMaskAggregateDiagnostics(
+    int Width,
+    int Height,
+    int TileCount,
+    int NonEmptyTileCount,
+    int EmptyTileCount,
+    long ValidPixelCount,
+    long TotalPixelCount
+)
+{
+    public double ValidRatio => TotalPixelCount <= 0
+        ? 0d
+        : (double)ValidPixelCount / TotalPixelCount;
+
+    public bool HasSensibleCoverage =>
+        TileCount > 0
+        && NonEmptyTileCount > 0
+        && ValidPixelCount >= 64
+        && (ValidRatio >= 0.00025d || ValidPixelCount >= 512);
+
+    public override string ToString() =>
+        $"dimensions={Width}x{Height}, tiles={TileCount}, nonEmptyTiles={NonEmptyTileCount}, emptyTiles={EmptyTileCount}, validPixels={ValidPixelCount}/{TotalPixelCount}, validRatio={ValidRatio:0.####}";
+}
 
 /// <summary>
 /// Resolves the fully composed atlas through one material-independent hard
@@ -23,8 +75,30 @@ internal sealed class AtlasBoundaryResolver : IDisposable
     private FrameBufferRef? framebuffer;
     private bool disposed;
     private bool loggedSuccess;
+    private bool loggedMrtFallback;
+    private bool loggedDrawBufferMismatch;
+
+    private static readonly bool DrawBufferDiagnosticsEnabled =
+        string.Equals(
+            Environment.GetEnvironmentVariable("MODERNATLAS_SMOKE_TEST"),
+            "1",
+            StringComparison.Ordinal
+        );
 
     public bool LastResolveSucceeded { get; private set; }
+
+    /// <summary>
+    /// Smoke-only state probe. It is deliberately observational: the resolver
+    /// never writes draw-buffer state after the previous framebuffer has been
+    /// restored. A false value means the probe found a change (or could not
+    /// complete) and automated validation must fail.
+    /// </summary>
+    public bool LastDrawBufferStateCheckPassed { get; private set; } = true;
+
+    public bool LastDrawBufferStateCheckPerformed { get; private set; }
+
+    public string LastDrawBufferStateDiagnostic { get; private set; } =
+        "draw-buffer probe is disabled";
 
     public FrameBufferRef? Framebuffer =>
         framebuffer is { Disposed: false } ? framebuffer : null;
@@ -32,6 +106,17 @@ internal sealed class AtlasBoundaryResolver : IDisposable
     public int ColorTextureId => Framebuffer?.ColorTextureIds is { Length: > 0 }
         ? Framebuffer.ColorTextureIds[0]
         : 0;
+
+    /// <summary>
+    /// R channel validity mask from the final disclosure resolve. A value of
+    /// one means the pixel belongs to geometry inside the hard boundary; zero
+    /// is opaque background and must not participate in spatial filtering.
+    /// </summary>
+    public int ValidityTextureId => Framebuffer?.ColorTextureIds is { Length: > 1 }
+        ? Framebuffer.ColorTextureIds[1]
+        : 0;
+
+    public bool HasValidityMask => ValidityTextureId > 0;
 
     public AtlasBoundaryResolver(
         ICoreClientAPI capi,
@@ -74,6 +159,18 @@ internal sealed class AtlasBoundaryResolver : IDisposable
         if (shader == null || shader.Disposed) return false;
 
         IRenderAPI render = capi.Render;
+        int[]? capturedDrawBuffers = DrawBufferDiagnosticsEnabled
+            ? TryCaptureDrawBuffers()
+            : null;
+        LastDrawBufferStateCheckPerformed =
+            DrawBufferDiagnosticsEnabled && capturedDrawBuffers != null;
+        LastDrawBufferStateCheckPassed = !DrawBufferDiagnosticsEnabled
+            || capturedDrawBuffers != null;
+        LastDrawBufferStateDiagnostic = DrawBufferDiagnosticsEnabled
+            ? capturedDrawBuffers == null
+                ? "draw-buffer probe could not capture the current framebuffer"
+                : FormatDrawBuffers(capturedDrawBuffers)
+            : "draw-buffer probe is disabled";
         AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
         try
         {
@@ -84,6 +181,26 @@ internal sealed class AtlasBoundaryResolver : IDisposable
             render.GLDepthMask(false);
             render.GlToggleBlend(false, EnumBlendMode.Standard);
             render.GlDisableCullFace();
+
+            // Draw-buffer state belongs to the framebuffer currently bound.
+            // Configure the resolver target here, before rendering, and never
+            // write it after RestoreCapturedState() has rebound Primary or
+            // the default framebuffer.
+            if (HasValidityMask)
+            {
+                GL.DrawBuffers(
+                    2,
+                    new[]
+                    {
+                        DrawBuffersEnum.ColorAttachment0,
+                        DrawBuffersEnum.ColorAttachment1
+                    }
+                );
+            }
+            else
+            {
+                GL.DrawBuffer(DrawBufferMode.ColorAttachment0);
+            }
 
             shader.Use();
             shader.BindTexture2D("sourceColorTex", source.ColorTextureIds[0], 0);
@@ -177,8 +294,66 @@ internal sealed class AtlasBoundaryResolver : IDisposable
         finally
         {
             renderState.RestoreCapturedState();
+
+            if (DrawBufferDiagnosticsEnabled && capturedDrawBuffers != null)
+            {
+                int[]? restoredDrawBuffers = TryCaptureDrawBuffers();
+                bool unchanged = restoredDrawBuffers != null
+                    && DrawBuffersEqual(
+                        capturedDrawBuffers,
+                        restoredDrawBuffers
+                    );
+                LastDrawBufferStateCheckPerformed = restoredDrawBuffers != null;
+                LastDrawBufferStateCheckPassed = unchanged;
+                LastDrawBufferStateDiagnostic = restoredDrawBuffers == null
+                    ? "draw-buffer probe could not inspect the restored framebuffer"
+                    : $"before={FormatDrawBuffers(capturedDrawBuffers)}, after={FormatDrawBuffers(restoredDrawBuffers)}";
+                if (!unchanged && !loggedDrawBufferMismatch)
+                {
+                    loggedDrawBufferMismatch = true;
+                    capi.Logger.Error(
+                        "[ModernAtlas] Atlas boundary resolve changed the previously bound framebuffer draw buffers: {0}.",
+                        LastDrawBufferStateDiagnostic
+                    );
+                }
+            }
         }
     }
+
+    private static int[]? TryCaptureDrawBuffers()
+    {
+        try
+        {
+            GL.GetInteger(GetPName.MaxDrawBuffers, out int maximum);
+            maximum = Math.Clamp(maximum, 1, 16);
+            int[] values = new int[maximum];
+            for (int index = 0; index < values.Length; index++)
+            {
+                GL.GetInteger(
+                    (GetPName)((int)GetPName.DrawBuffer0 + index),
+                    out values[index]
+                );
+            }
+            return values;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool DrawBuffersEqual(int[] expected, int[] actual)
+    {
+        if (expected.Length != actual.Length) return false;
+        for (int index = 0; index < expected.Length; index++)
+        {
+            if (expected[index] != actual[index]) return false;
+        }
+        return true;
+    }
+
+    private static string FormatDrawBuffers(int[] values) =>
+        string.Join(",", values);
 
 
     private bool EnsureResources(int width, int height)
@@ -190,40 +365,196 @@ internal sealed class AtlasBoundaryResolver : IDisposable
             && framebuffer.Width == width
             && framebuffer.Height == height)
         {
-            return true;
+            return framebuffer.ColorTextureIds is { Length: > 0 }
+                && framebuffer.ColorTextureIds[0] > 0;
         }
 
         DestroyFramebuffer();
-        RawTexture color = new()
+
+        try
         {
-            Width = width,
-            Height = height,
-            MinFilter = EnumTextureFilter.Nearest,
-            MagFilter = EnumTextureFilter.Nearest,
-            WrapS = EnumTextureWrap.ClampToEdge,
-            WrapT = EnumTextureWrap.ClampToEdge,
-            PixelInternalFormat = EnumTextureInternalFormat.Rgba8,
-            PixelFormat = EnumTexturePixelFormat.Rgba
-        };
-        FramebufferAttrs attributes = new(
-            "modernatlas-boundary-resolve",
-            width,
-            height
-        )
-        {
-            Attachments = new[]
+            framebuffer = capi.Render.CreateFrameBuffer(
+                CreateAttributes(
+                    "modernatlas-boundary-resolve",
+                    width,
+                    height,
+                    includeValidity: true
+                )
+            );
+            if (framebuffer is { Disposed: false }
+                && framebuffer.ColorTextureIds is { Length: > 1 }
+                && framebuffer.ColorTextureIds[0] > 0
+                && framebuffer.ColorTextureIds[1] > 0)
             {
-                new FramebufferAttrsAttachment
-                {
-                    AttachmentType = EnumFramebufferAttachment.ColorAttachment0,
-                    Texture = color
-                }
+                return true;
             }
-        };
-        framebuffer = capi.Render.CreateFrameBuffer(attributes);
+        }
+        catch (Exception exception)
+        {
+            LogMrtFallback(exception.Message);
+        }
+
+        DestroyFramebuffer();
+        try
+        {
+            framebuffer = capi.Render.CreateFrameBuffer(
+                CreateAttributes(
+                    "modernatlas-boundary-resolve-color",
+                    width,
+                    height,
+                    includeValidity: false
+                )
+            );
+        }
+        catch (Exception exception)
+        {
+            capi.Logger.Warning(
+                "[ModernAtlas] Could not create the color-only atlas boundary framebuffer: {0}",
+                exception.Message
+            );
+            framebuffer = null;
+        }
+        LogMrtFallback("the optional validity attachment is unavailable");
         return framebuffer is { Disposed: false }
             && framebuffer.ColorTextureIds is { Length: > 0 }
             && framebuffer.ColorTextureIds[0] > 0;
+    }
+
+    private FramebufferAttrs CreateAttributes(
+        string name,
+        int width,
+        int height,
+        bool includeValidity
+    )
+    {
+        List<FramebufferAttrsAttachment> attachments = new()
+        {
+            new FramebufferAttrsAttachment
+            {
+                AttachmentType = EnumFramebufferAttachment.ColorAttachment0,
+                Texture = CreateColorTexture(width, height)
+            }
+        };
+        if (includeValidity)
+        {
+            attachments.Add(
+                new FramebufferAttrsAttachment
+                {
+                    AttachmentType = EnumFramebufferAttachment.ColorAttachment1,
+                    Texture = CreateColorTexture(width, height)
+                }
+            );
+        }
+        return new FramebufferAttrs(name, width, height)
+        {
+            Attachments = attachments.ToArray()
+        };
+    }
+
+    private static RawTexture CreateColorTexture(int width, int height) => new()
+    {
+        Width = width,
+        Height = height,
+        MinFilter = EnumTextureFilter.Nearest,
+        MagFilter = EnumTextureFilter.Nearest,
+        WrapS = EnumTextureWrap.ClampToEdge,
+        WrapT = EnumTextureWrap.ClampToEdge,
+        PixelInternalFormat = EnumTextureInternalFormat.Rgba8,
+        PixelFormat = EnumTexturePixelFormat.Rgba
+    };
+
+    private void LogMrtFallback(string reason)
+    {
+        if (loggedMrtFallback) return;
+        loggedMrtFallback = true;
+        capi.Logger.Warning(
+            "[ModernAtlas] Screenshot validity MRT is unavailable ({0}); the color boundary remains enabled and spatial screenshot filters will be disabled.",
+            reason
+        );
+    }
+
+    /// <summary>
+    /// Opt-in CPU diagnostic for the optional second boundary attachment. It
+    /// never participates in normal atlas rendering or capture readback.
+    /// </summary>
+    public bool TryReadValidityMask(
+        out byte[] mask,
+        out AtlasValidityMaskDiagnostics diagnostics
+    )
+    {
+        mask = Array.Empty<byte>();
+        diagnostics = default;
+        FrameBufferRef? target = Framebuffer;
+        if (target == null || !HasValidityMask)
+        {
+            return false;
+        }
+
+        IRenderAPI render = capi.Render;
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
+        try
+        {
+            render.CurrentActiveShader?.Stop();
+            render.CurrentFrameBuffer = target;
+            render.GlViewport(0, 0, target.Width, target.Height);
+            GL.ReadBuffer(ReadBufferMode.ColorAttachment1);
+            GL.PixelStore(PixelStoreParameter.PackRowLength, 0);
+            GL.PixelStore(PixelStoreParameter.PackSkipRows, 0);
+            GL.PixelStore(PixelStoreParameter.PackSkipPixels, 0);
+            GL.PixelStore(PixelStoreParameter.PackAlignment, 1);
+            mask = new byte[checked(target.Width * target.Height)];
+            GL.ReadPixels(
+                0,
+                0,
+                target.Width,
+                target.Height,
+                PixelFormat.Red,
+                PixelType.UnsignedByte,
+                mask
+            );
+            long validPixels = 0;
+            foreach (byte value in mask)
+            {
+                if (value >= 128) validPixels++;
+            }
+            diagnostics = new AtlasValidityMaskDiagnostics(
+                target.Width,
+                target.Height,
+                validPixels,
+                mask.LongLength
+            );
+            return true;
+        }
+        catch (Exception exception)
+        {
+            capi.Logger.Warning(
+                "[ModernAtlas] Could not read the atlas validity mask: {0}",
+                exception.Message
+            );
+            mask = Array.Empty<byte>();
+            diagnostics = default;
+            return false;
+        }
+        finally
+        {
+            renderState.RestoreCapturedState();
+            try
+            {
+                GL.PixelStore(PixelStoreParameter.PackRowLength, 0);
+                GL.PixelStore(PixelStoreParameter.PackSkipRows, 0);
+                GL.PixelStore(PixelStoreParameter.PackSkipPixels, 0);
+                GL.PixelStore(PixelStoreParameter.PackAlignment, 4);
+                GL.ReadBuffer(
+                    render.CurrentFrameBuffer == null
+                        ? ReadBufferMode.Back
+                        : ReadBufferMode.ColorAttachment0
+                );
+            }
+            catch
+            {
+                // The client may already be leaving the world.
+            }
+        }
     }
 
     private void DestroyFramebuffer()
@@ -240,6 +571,11 @@ internal sealed class AtlasBoundaryResolver : IDisposable
         if (disposed) return;
         disposed = true;
         LastResolveSucceeded = false;
+        LastDrawBufferStateCheckPassed = true;
+        LastDrawBufferStateCheckPerformed = false;
+        LastDrawBufferStateDiagnostic = "draw-buffer probe is disabled";
+        loggedDrawBufferMismatch = false;
+        loggedMrtFallback = false;
         DestroyFramebuffer();
         quad?.Dispose();
         quad = null;

@@ -5,3 +5,4 @@ obj/
 Releases/*.zip
 .idea/
 .vscode/
+/.tmp/

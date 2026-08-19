@@ -3,6 +3,7 @@
 in vec2 ndc;
 
 layout(location = 0) out vec4 outColor;
+layout(location = 1) out vec4 outValidity;
 
 uniform sampler2D sourceColorTex;
 uniform sampler2D sourceDepthTex;
@@ -52,6 +53,7 @@ void main()
         || any(greaterThanEqual(pixel, dimensions)))
     {
         outColor = vec4(backgroundColor.rgb, 1.0);
+        outValidity = vec4(0.0);
         return;
     }
 
@@ -59,6 +61,7 @@ void main()
     if (depth >= 0.999999)
     {
         outColor = vec4(backgroundColor.rgb, 1.0);
+        outValidity = vec4(0.0);
         return;
     }
 
@@ -76,6 +79,7 @@ void main()
             ))))
     {
         outColor = vec4(backgroundColor.rgb, 1.0);
+        outValidity = vec4(0.0);
         return;
     }
     vec2 disclosureDelta = absolutePosition.xz - disclosureCenterXZ;
@@ -84,8 +88,10 @@ void main()
         || !hasSurfaceCoverage(absolutePosition.xz))
     {
         outColor = vec4(backgroundColor.rgb, 1.0);
+        outValidity = vec4(0.0);
         return;
     }
 
     outColor = vec4(texelFetch(sourceColorTex, pixel, 0).rgb, 1.0);
+    outValidity = vec4(1.0, 0.0, 0.0, 1.0);
 }

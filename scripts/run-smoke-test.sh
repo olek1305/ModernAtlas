@@ -17,7 +17,15 @@ fi
 
 printf '[ModernAtlas] Starting the automated smoke test in standard world: %s\n' "$smoke_world"
 status=0
+smoke_mask_prefix="${MODERNATLAS_SMOKE_SCREENSHOT_MASK:-${MODERNATLAS_SMOKE_SCREENSHOT:-}}"
+smoke_sequence="${MODERNATLAS_SMOKE_SCREENSHOT_SEQUENCE:-0}"
+case "${smoke_sequence,,}" in
+    1|true|yes) smoke_sequence=1 ;;
+    *) smoke_sequence=0 ;;
+esac
 env MODERNATLAS_SMOKE_TEST=1 \
+    MODERNATLAS_SMOKE_SCREENSHOT_SEQUENCE="$smoke_sequence" \
+    MODERNATLAS_SMOKE_SCREENSHOT_MASK="$smoke_mask_prefix" \
     "$game_path/Vintagestory" \
     --dataPath "$data_path" \
     -o "$smoke_world" || status=$?
@@ -69,6 +77,17 @@ if [[ -n "${MODERNATLAS_SMOKE_SCREENSHOT:-}" ]]; then
         "${screenshot_prefix}-closing-handoff.png"
         "${screenshot_prefix}-closing.png"
     )
+    if (( smoke_sequence == 1 )); then
+        required_screenshots+=(
+            "${screenshot_prefix}-unfiltered-off.png"
+            "${screenshot_prefix}-filtered-google-earth.png"
+            "${screenshot_prefix}-validity-mask-filtered-last-nonempty-tile.png"
+        )
+    else
+        required_screenshots+=(
+            "${screenshot_prefix}-screenshot-tiled.png"
+        )
+    fi
     for screenshot in "${required_screenshots[@]}"; do
         if [[ ! -s "$screenshot" ]]; then
             printf '[ModernAtlas] Required smoke screenshot is missing or empty: %s\n' "$screenshot" >&2

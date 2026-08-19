@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 namespace ModernAtlas;
@@ -6,6 +7,14 @@ namespace ModernAtlas;
 public sealed class ModernAtlasConfig
 {
     private Dictionary<string, bool> cheatModeByWorld = new();
+    private int screenshotFilterIntensityPercent = 100;
+    private int screenshotSaturationPercent = 100;
+    private int screenshotContrastPercent = 100;
+    private int screenshotTemperaturePercent;
+    private int screenshotShadowTintStrengthPercent;
+    private int screenshotAmbientOcclusionPercent;
+    private int screenshotIndirectLightPercent;
+    private int screenshotBloomPercent;
 
     public bool AnimationsEnabled { get; set; } = true;
     public bool ShowPlayerCompass { get; set; }
@@ -43,6 +52,54 @@ public sealed class ModernAtlasConfig
     /// centered and does not change the saved image dimensions.
     /// </summary>
     public int ScreenshotCaptureAreaPercent { get; set; } = 100;
+
+    /// <summary>
+    /// Screenshot-only GPU grading. This is deliberately separate from the
+    /// atlas visual lab: interactive atlas frames and the ordinary world must
+    /// remain unfiltered.
+    /// </summary>
+    public bool ScreenshotFiltersEnabled { get; set; }
+    public string ScreenshotFilterPreset { get; set; } = "natural";
+    public int ScreenshotFilterIntensityPercent
+    {
+        get => screenshotFilterIntensityPercent;
+        set => screenshotFilterIntensityPercent = Math.Clamp(value, 0, 200);
+    }
+    public int ScreenshotSaturationPercent
+    {
+        get => screenshotSaturationPercent;
+        set => screenshotSaturationPercent = Math.Clamp(value, 0, 200);
+    }
+    public int ScreenshotContrastPercent
+    {
+        get => screenshotContrastPercent;
+        set => screenshotContrastPercent = Math.Clamp(value, 0, 200);
+    }
+    public int ScreenshotTemperaturePercent
+    {
+        get => screenshotTemperaturePercent;
+        set => screenshotTemperaturePercent = Math.Clamp(value, -100, 100);
+    }
+    public int ScreenshotShadowTintStrengthPercent
+    {
+        get => screenshotShadowTintStrengthPercent;
+        set => screenshotShadowTintStrengthPercent = Math.Clamp(value, 0, 100);
+    }
+    public int ScreenshotAmbientOcclusionPercent
+    {
+        get => screenshotAmbientOcclusionPercent;
+        set => screenshotAmbientOcclusionPercent = Math.Clamp(value, 0, 100);
+    }
+    public int ScreenshotIndirectLightPercent
+    {
+        get => screenshotIndirectLightPercent;
+        set => screenshotIndirectLightPercent = Math.Clamp(value, 0, 100);
+    }
+    public int ScreenshotBloomPercent
+    {
+        get => screenshotBloomPercent;
+        set => screenshotBloomPercent = Math.Clamp(value, 0, 100);
+    }
 
     /// <summary>
     /// Stores the player's explicit spoiler decision per save without writing

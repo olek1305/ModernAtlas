@@ -39,6 +39,7 @@ public sealed class ModernAtlasSystem : ModSystem
     private IShaderProgram? stableLiquidShader;
     private IShaderProgram? atlasCloudShader;
     private IShaderProgram? atlasBoundaryShader;
+    private IShaderProgram? atlasScreenshotFilterShader;
     private IShaderProgram? atlasOpacityShader;
     private IShaderProgram? atlasScrollShader;
     private CheatModeConsentDialog? cheatModeDialog;
@@ -156,6 +157,10 @@ public sealed class ModernAtlasSystem : ModSystem
         {
             api.Logger.Error("[ModernAtlas] Failed to compile the final boundary shader.");
         }
+        if (GetAtlasScreenshotFilterShader() == null)
+        {
+            api.Logger.Error("[ModernAtlas] Failed to compile the screenshot filter shader.");
+        }
         if (GetAtlasOpacityShader() == null)
         {
             api.Logger.Error("[ModernAtlas] Failed to compile the window opacity shader.");
@@ -175,6 +180,7 @@ public sealed class ModernAtlasSystem : ModSystem
             GetStableLiquidShader,
             GetAtlasCloudShader,
             GetAtlasBoundaryShader,
+            GetAtlasScreenshotFilterShader,
             GetAtlasOpacityShader,
             GetAtlasScrollShader,
             soundController
@@ -558,6 +564,7 @@ public sealed class ModernAtlasSystem : ModSystem
         stableLiquidShader = null;
         atlasCloudShader = null;
         atlasBoundaryShader = null;
+        atlasScreenshotFilterShader = null;
         atlasOpacityShader = null;
         atlasScrollShader = null;
         clientApi = null;
@@ -1675,6 +1682,27 @@ public sealed class ModernAtlasSystem : ModSystem
         if (!program.Compile()) return null;
 
         atlasBoundaryShader = program;
+        return program;
+    }
+
+    private IShaderProgram? GetAtlasScreenshotFilterShader()
+    {
+        if (atlasScreenshotFilterShader != null
+            && !atlasScreenshotFilterShader.Disposed)
+        {
+            return atlasScreenshotFilterShader;
+        }
+        if (clientApi == null) return null;
+
+        IShaderProgram program = clientApi.Shader.NewShaderProgram();
+        program.AssetDomain = "modernatlas";
+        clientApi.Shader.RegisterFileShaderProgram(
+            "atlasscreenshotfilter",
+            program
+        );
+        if (!program.Compile()) return null;
+
+        atlasScreenshotFilterShader = program;
         return program;
     }
 

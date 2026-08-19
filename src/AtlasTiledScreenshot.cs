@@ -137,6 +137,20 @@ internal sealed class AtlasTiledScreenshot : IDisposable
     private string? completedPath;
     private string? completedError;
     private bool logReadbackFailureOnce;
+    private long activeNonBackgroundPixels;
+    private long activeTotalPixels;
+    private int activeFilteredTileCount;
+    private AtlasValidityMaskAggregateDiagnostics? activeValidityMaskDiagnostics;
+    private int activeValidityMaskTileCount;
+    private int activeValidityMaskNonEmptyTileCount;
+    private long activeValidityMaskValidPixelCount;
+    private long activeValidityMaskTotalPixelCount;
+    private AtlasScreenshotFilterMode lastCompletedFilterMode =
+        AtlasScreenshotFilterMode.Unfiltered;
+    private int lastCompletedFilterTileCount;
+    private int lastCompletedFilterTotalTiles;
+    private string lastCompletedFilterPreset = "off";
+    private AtlasValidityMaskAggregateDiagnostics? lastCompletedValidityMaskDiagnostics;
     private readonly bool debugSaveTiles = !string.IsNullOrWhiteSpace(
         Environment.GetEnvironmentVariable("MODERNATLAS_DEBUG_TILES")
     );
@@ -185,6 +199,8 @@ internal sealed class AtlasTiledScreenshot : IDisposable
         public float BaselineYawDegrees { get; init; }
         public float BaselinePitchDegrees { get; init; }
         public float ViewportAspect { get; init; }
+        public AtlasScreenshotFilterSettings FilterSettings { get; init; }
+        public AtlasScreenshotFilterMode FilterMode { get; init; }
         public CaptureLayout Layout { get; init; }
         public AtlasScreenshotPreview Preview { get; init; }
 
@@ -344,6 +360,79 @@ internal sealed class AtlasTiledScreenshot : IDisposable
     }
 
     /// <summary>
+    /// Immutable filter settings captured with the active job. The dialog may
+    /// continue changing its saved preferences after capture starts, but the
+    /// current tile and every following tile use this same value.
+    /// </summary>
+    public AtlasScreenshotFilterSettings ActiveFilterSettings
+    {
+        get
+        {
+            lock (stateLock)
+            {
+                return activeJob?.FilterSettings
+                    ?? AtlasScreenshotFilterSettings.CreatePreset("off");
+            }
+        }
+    }
+
+    public AtlasScreenshotFilterMode ActiveFilterMode
+    {
+        get
+        {
+            lock (stateLock)
+            {
+                return activeJob?.FilterMode
+                    ?? AtlasScreenshotFilterMode.Unfiltered;
+            }
+        }
+    }
+
+    public AtlasScreenshotFilterMode LastCompletedFilterMode =>
+        lastCompletedFilterMode;
+
+    public int LastCompletedFilterTileCount => lastCompletedFilterTileCount;
+
+    public int LastCompletedFilterTotalTiles => lastCompletedFilterTotalTiles;
+
+    public string LastCompletedFilterPreset => lastCompletedFilterPreset;
+
+    public AtlasValidityMaskAggregateDiagnostics? LastCompletedValidityMaskDiagnostics =>
+        lastCompletedValidityMaskDiagnostics;
+
+    /// <summary>
+    /// Pixel overlap available to screenshot spatial filters. Filter kernels
+    /// are clamped to this value so a tile can never borrow pixels beyond the
+    /// region shared with its neighbors.
+    /// </summary>
+    public int FilterOverlapMargin
+    {
+        get
+        {
+            lock (stateLock)
+            {
+                return activeJob?.Layout.Margin ?? margin;
+            }
+        }
+    }
+
+    public int GetFilterOverlapMargin(
+        int requestedGridSize,
+        float viewportAspect
+    )
+    {
+        int normalizedGrid = Math.Clamp(
+            requestedGridSize,
+            MinimumResolutionScale,
+            MaximumResolutionScale
+        );
+        return CalculateCaptureLayout(
+            normalizedGrid,
+            Math.Max(0.05f, viewportAspect)
+        ).Margin;
+    }
+
+    /// <summary>
     /// Maps arbitrary persisted values to one of the four supported centered
     /// capture areas. This keeps older or manually edited config files safe.
     /// </summary>
@@ -391,9 +480,24 @@ internal sealed class AtlasTiledScreenshot : IDisposable
         float zoom,
         float yawDegrees,
         float pitchDegrees,
-        float viewportAspect
+        float viewportAspect,
+        AtlasScreenshotFilterSettings filterSettings,
+        AtlasScreenshotFilterMode filterMode
     )
     {
+        if ((filterMode == AtlasScreenshotFilterMode.Filtered)
+            != filterSettings.Enabled)
+        {
+            lock (stateLock)
+            {
+                completedError =
+                    "The screenshot filter mode and frozen filter settings disagree.";
+            }
+            capi.Logger.Error(
+                "[ModernAtlas] Refused a screenshot job with inconsistent frozen filter mode/settings."
+            );
+            return false;
+        }
         lock (stateLock)
         {
             if (captureActive || busy || cleanupPending) return false;
@@ -477,6 +581,8 @@ internal sealed class AtlasTiledScreenshot : IDisposable
                 BaselineYawDegrees = baselineYawDegrees,
                 BaselinePitchDegrees = baselinePitchDegrees,
                 ViewportAspect = capturedViewportAspect,
+                FilterSettings = filterSettings,
+                FilterMode = filterMode,
                 Layout = layout,
                 Preview = activePreview
             };
@@ -497,6 +603,19 @@ internal sealed class AtlasTiledScreenshot : IDisposable
         {
             completedPath = null;
             completedError = null;
+            activeNonBackgroundPixels = 0;
+            activeTotalPixels = 0;
+            activeFilteredTileCount = 0;
+            activeValidityMaskDiagnostics = null;
+            activeValidityMaskTileCount = 0;
+            activeValidityMaskNonEmptyTileCount = 0;
+            activeValidityMaskValidPixelCount = 0;
+            activeValidityMaskTotalPixelCount = 0;
+            lastCompletedValidityMaskDiagnostics = null;
+            lastCompletedFilterMode = AtlasScreenshotFilterMode.Unfiltered;
+            lastCompletedFilterTileCount = 0;
+            lastCompletedFilterTotalTiles = 0;
+            lastCompletedFilterPreset = filterSettings.Preset;
             captureActive = true;
             busy = true;
             cleanupPending = false;
@@ -829,7 +948,62 @@ internal sealed class AtlasTiledScreenshot : IDisposable
     /// Call from the render thread right after the atlas world render that
     /// used <see cref="GetTileCamera"/> for <see cref="CurrentTile"/>.
     /// </summary>
-    public bool CaptureCurrentFrame(FrameBufferRef sourceFramebuffer)
+    public void RecordValidityMaskDiagnostics(
+        AtlasValidityMaskDiagnostics diagnostics
+    )
+    {
+        lock (stateLock)
+        {
+            if (jobState != AtlasScreenshotJobState.Capturing
+                || activeJob == null
+                || activeJob.FilterMode != AtlasScreenshotFilterMode.Filtered)
+            {
+                return;
+            }
+            activeValidityMaskValidPixelCount += diagnostics.ValidPixelCount;
+            activeValidityMaskTotalPixelCount += diagnostics.TotalPixelCount;
+            activeValidityMaskTileCount++;
+            if (diagnostics.ValidPixelCount > 0)
+            {
+                activeValidityMaskNonEmptyTileCount++;
+            }
+            activeValidityMaskDiagnostics = new AtlasValidityMaskAggregateDiagnostics(
+                diagnostics.Width,
+                diagnostics.Height,
+                activeValidityMaskTileCount,
+                activeValidityMaskNonEmptyTileCount,
+                activeValidityMaskTileCount - activeValidityMaskNonEmptyTileCount,
+                activeValidityMaskValidPixelCount,
+                activeValidityMaskTotalPixelCount
+            );
+        }
+    }
+
+    public void FailCapture(string error)
+    {
+        string message = string.IsNullOrWhiteSpace(error)
+            ? "The filtered screenshot job failed."
+            : error.Trim();
+        lock (stateLock)
+        {
+            if (activeJob == null || jobState == AtlasScreenshotJobState.Committed)
+            {
+                return;
+            }
+            captureActive = false;
+            busy = true;
+            cleanupPending = true;
+            jobState = AtlasScreenshotJobState.Failed;
+            completedPath = null;
+            completedError = message;
+        }
+        capi.Logger.Error("[ModernAtlas] Screenshot capture failed: {0}", message);
+    }
+
+    public bool CaptureCurrentFrame(
+        FrameBufferRef sourceFramebuffer,
+        bool filteredFrame
+    )
     {
         CaptureJob? captureJob;
         int capturedTile;
@@ -846,14 +1020,30 @@ internal sealed class AtlasTiledScreenshot : IDisposable
             captureJob = activeJob;
             capturedTile = tileIndex;
             captureLayout = captureJob.Layout;
+            if ((captureJob.FilterMode == AtlasScreenshotFilterMode.Filtered)
+                != filteredFrame)
+            {
+                captureActive = false;
+                busy = true;
+                cleanupPending = true;
+                jobState = AtlasScreenshotJobState.Failed;
+                completedPath = null;
+                completedError =
+                    $"Tile {capturedTile + 1} used a {(filteredFrame ? "filtered" : "unfiltered")} framebuffer for a {captureJob.FilterMode} job.";
+                return false;
+            }
         }
 
+        IRenderAPI render = capi.Render;
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
         try
         {
-            IRenderAPI render = capi.Render;
             if (sourceFramebuffer.Disposed
                 || sourceFramebuffer.ColorTextureIds is not { Length: > 0 })
             {
+                FailCapture(
+                    $"Tile {capturedTile + 1} has no readable source framebuffer."
+                );
                 return false;
             }
             render.CurrentFrameBuffer = sourceFramebuffer;
@@ -886,6 +1076,9 @@ internal sealed class AtlasTiledScreenshot : IDisposable
                 PixelType.UnsignedByte,
                 pixels
             );
+            long nonBackgroundPixels = CountNonBackgroundPixels(pixels);
+            long totalPixels = (long)captureLayout.StoredWidth
+                * captureLayout.StoredHeight;
             byte[]? capturedTilePixels = null;
             lock (stateLock)
             {
@@ -902,6 +1095,12 @@ internal sealed class AtlasTiledScreenshot : IDisposable
                         captureLayout.DownsampleScale
                     );
                     tiles[capturedTile] = capturedTilePixels;
+                    activeNonBackgroundPixels += nonBackgroundPixels;
+                    activeTotalPixels += totalPixels;
+                    if (captureJob.FilterMode == AtlasScreenshotFilterMode.Filtered)
+                    {
+                        activeFilteredTileCount++;
+                    }
                 }
             }
             if (capturedTilePixels != null)
@@ -912,6 +1111,9 @@ internal sealed class AtlasTiledScreenshot : IDisposable
                     capturedTilePixels
                 ))
                 {
+                    FailCapture(
+                        $"Tile {capturedTile + 1} could not be staged for the screenshot."
+                    );
                     return false;
                 }
                 WriteManifestForJob(
@@ -929,6 +1131,11 @@ internal sealed class AtlasTiledScreenshot : IDisposable
                         captureLayout.StoredHeight
                     );
                 }
+            }
+            else
+            {
+                FailCapture($"Tile {capturedTile + 1} was not stored.");
+                return false;
             }
         }
         catch (Exception exception)
@@ -959,9 +1166,17 @@ internal sealed class AtlasTiledScreenshot : IDisposable
         }
         finally
         {
-            capi.Render.CurrentFrameBuffer = null;
-            // The window target's correct read buffer is the back buffer.
-            GL.ReadBuffer(ReadBufferMode.Back);
+            renderState.RestoreCapturedState();
+            // Restore the explicit pixel-transfer state used by the engine.
+            GL.PixelStore(PixelStoreParameter.PackRowLength, 0);
+            GL.PixelStore(PixelStoreParameter.PackSkipRows, 0);
+            GL.PixelStore(PixelStoreParameter.PackSkipPixels, 0);
+            GL.PixelStore(PixelStoreParameter.PackAlignment, 4);
+            GL.ReadBuffer(
+                render.CurrentFrameBuffer == null
+                    ? ReadBufferMode.Back
+                    : ReadBufferMode.ColorAttachment0
+            );
         }
 
         lock (stateLock)
@@ -974,6 +1189,29 @@ internal sealed class AtlasTiledScreenshot : IDisposable
             }
             tileIndex++;
             if (tileIndex < captureJob.TotalTiles) return true;
+
+            if (!HasSensibleNonBackgroundCoverage(
+                    activeNonBackgroundPixels,
+                    activeTotalPixels
+                ))
+            {
+                captureActive = false;
+                busy = true;
+                cleanupPending = true;
+                jobState = AtlasScreenshotJobState.Failed;
+                completedPath = null;
+                completedError =
+                    $"Screenshot was rejected as nearly empty (non-background pixels {activeNonBackgroundPixels}/{activeTotalPixels}).";
+                capi.Logger.Error(
+                    "[ModernAtlas] Rejected nearly empty screenshot: non-background pixels {0}/{1} ({2:0.####}).",
+                    activeNonBackgroundPixels,
+                    activeTotalPixels,
+                    activeTotalPixels > 0
+                        ? (double)activeNonBackgroundPixels / activeTotalPixels
+                        : 0d
+                );
+                return false;
+            }
 
             captureActive = false;
             busy = true;
@@ -1176,6 +1414,54 @@ internal sealed class AtlasTiledScreenshot : IDisposable
         }
     }
 
+    private static long CountNonBackgroundPixels(byte[] bgra)
+    {
+        const int backgroundRed = 9;
+        const int backgroundGreen = 19;
+        const int backgroundBlue = 28;
+        int totalPixels = bgra.Length / 4;
+        int maximumSamples = 200_000;
+        int stride = Math.Max(
+            1,
+            (int)Math.Ceiling(totalPixels / (double)maximumSamples)
+        );
+        long sampledCount = 0;
+        long sampledNonBackground = 0;
+        for (int pixel = 0; pixel < totalPixels; pixel += stride)
+        {
+            int index = pixel * 4;
+            sampledCount++;
+            int blue = bgra[index];
+            int green = bgra[index + 1];
+            int red = bgra[index + 2];
+            bool isBackground = Math.Abs(red - backgroundRed) <= 8
+                && Math.Abs(green - backgroundGreen) <= 8
+                && Math.Abs(blue - backgroundBlue) <= 8;
+            if (!isBackground) sampledNonBackground++;
+        }
+        if (sampledCount <= 0) return 0;
+        return Math.Clamp(
+            (long)Math.Round(
+                sampledNonBackground * (double)totalPixels / sampledCount
+            ),
+            0,
+            totalPixels
+        );
+    }
+
+    private static bool HasSensibleNonBackgroundCoverage(
+        long nonBackgroundPixels,
+        long totalPixels
+    )
+    {
+        if (nonBackgroundPixels < 64 || totalPixels <= 0) return false;
+        double ratio = (double)nonBackgroundPixels / totalPixels;
+        // Small, legitimate edge-of-disclosure views may occupy only a tiny
+        // fraction of the tile. A few hundred actual terrain pixels still
+        // distinguish that case from an empty or failed resolve.
+        return ratio >= 0.00025d || nonBackgroundPixels >= 512;
+    }
+
     private void StartBackgroundStitch()
     {
         CaptureJob? job;
@@ -1365,6 +1651,12 @@ internal sealed class AtlasTiledScreenshot : IDisposable
                         jobState = AtlasScreenshotJobState.Committed;
                         completedPath = job.OutputPath;
                         completedError = null;
+                        lastCompletedFilterMode = job.FilterMode;
+                        lastCompletedFilterTileCount = activeFilteredTileCount;
+                        lastCompletedFilterTotalTiles = job.TotalTiles;
+                        lastCompletedFilterPreset = job.FilterSettings.Preset;
+                        lastCompletedValidityMaskDiagnostics =
+                            activeValidityMaskDiagnostics;
                         cleanupPending = true;
                     }
                 }
