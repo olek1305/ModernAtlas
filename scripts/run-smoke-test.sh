@@ -68,6 +68,7 @@ if [[ -n "${MODERNATLAS_SMOKE_SCREENSHOT:-}" ]]; then
         "${screenshot_prefix}-ordinary-after-cycle-1.png"
         "${screenshot_prefix}-ordinary-after-cycle-2.png"
         "${screenshot_prefix}-resolved-atlas.png"
+        "${screenshot_prefix}-screenshot-filter-preview.png"
         "${screenshot_prefix}-opening-immediate.png"
         "${screenshot_prefix}-opening-pocket.png"
         "${screenshot_prefix}-opening-handoff.png"
@@ -80,7 +81,7 @@ if [[ -n "${MODERNATLAS_SMOKE_SCREENSHOT:-}" ]]; then
     if (( smoke_sequence == 1 )); then
         required_screenshots+=(
             "${screenshot_prefix}-unfiltered-off.png"
-            "${screenshot_prefix}-filtered-google-earth.png"
+            "${screenshot_prefix}-filtered-atlas-relief.png"
             "${screenshot_prefix}-validity-mask-filtered-last-nonempty-tile.png"
         )
     else
@@ -94,6 +95,11 @@ if [[ -n "${MODERNATLAS_SMOKE_SCREENSHOT:-}" ]]; then
             exit 1
         fi
     done
+
+    if ! rg -q 'Automated screenshot filter preview passed' "$main_log"; then
+        printf '[ModernAtlas] The fresh client log is missing the screenshot-filter preview success marker.\n' >&2
+        exit 1
+    fi
 
     if ! command -v magick >/dev/null 2>&1; then
         printf '[ModernAtlas] ImageMagick is required for the ordinary-world red-border check.\n' >&2

@@ -51,6 +51,41 @@ internal static class AtlasUiStyle
         );
     }
 
+    public static void DrawOpaquePreviewCard(
+        Context context,
+        ImageSurface surface,
+        ElementBounds bounds
+    )
+    {
+        if (bounds.InnerWidth <= 0 || bounds.InnerHeight <= 0) return;
+
+        double scale = Math.Max(0.5, RuntimeEnv.GUIScale);
+        double edge = Math.Max(1, scale);
+        RoundedRectangle(
+            context,
+            bounds.drawX + 4 * scale,
+            bounds.drawY + 6 * scale,
+            Math.Max(1, bounds.InnerWidth - 6 * scale),
+            Math.Max(1, bounds.InnerHeight - 6 * scale),
+            16 * scale
+        );
+        context.SetSourceRGBA(0.005, 0.010, 0.014, 0.86);
+        context.Fill();
+        RoundedRectangle(
+            context,
+            bounds.drawX + edge,
+            bounds.drawY + edge,
+            Math.Max(1, bounds.InnerWidth - 2 * edge),
+            Math.Max(1, bounds.InnerHeight - 2 * edge),
+            Math.Max(2, 16 * scale - edge)
+        );
+        context.SetSourceRGBA(0.010, 0.018, 0.024, 0.96);
+        context.FillPreserve();
+        context.SetSourceRGBA(1, 1, 1, 0.20);
+        context.LineWidth = edge;
+        context.Stroke();
+    }
+
     public static void DrawToolbarPanel(Context context, ImageSurface surface, ElementBounds bounds)
     {
         if (bounds.InnerWidth <= 0 || bounds.InnerHeight <= 0) return;
@@ -388,6 +423,20 @@ internal sealed class GuiElementAtlasButton : GuiElementControl
         // its action.
         base.OnMouseUp(capi, args);
         if (args.Button == EnumMouseButton.Left) pressed = false;
+    }
+
+    /// <summary>
+    /// Invokes the button from a parent dialog that owns a modal input layer.
+    /// The preview is rendered after the atlas viewport and must retain mouse
+    /// ownership even when the engine's GUI dispatcher has already marked the
+    /// physical release as handled by another HUD dialog.
+    /// </summary>
+    internal bool InvokeFromOwner()
+    {
+        if (!Enabled) return false;
+        pressed = false;
+        onClick();
+        return true;
     }
 
     public void SetActive(bool enabled)

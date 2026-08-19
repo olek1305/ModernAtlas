@@ -77,6 +77,96 @@ internal readonly struct AtlasScreenshotPreview
 }
 
 /// <summary>
+/// Immutable geometry contract for one screenshot view.  The tiled capture
+/// and the live preview both consume this value, so the preview frame cannot
+/// drift away from the readback rectangle, overlap margin or PNG dimensions
+/// used by the real capture.
+/// </summary>
+internal readonly struct AtlasScreenshotCaptureLayout
+{
+    public bool IsValid { get; }
+    public int FrameWidth { get; }
+    public int FrameHeight { get; }
+    public float ProjectionVerticalFactor { get; }
+    public int TileWidth { get; }
+    public int TileHeight { get; }
+    public int NominalTileWidth { get; }
+    public int NominalTileHeight { get; }
+    public int Margin { get; }
+    public int StoredWidth { get; }
+    public int StoredHeight { get; }
+    public int ReadX { get; }
+    public int ReadY { get; }
+    public int RequestedWidth { get; }
+    public int RequestedHeight { get; }
+    public int OutputWidth { get; }
+    public int OutputHeight { get; }
+    public long RequestedPixels { get; }
+    public long OutputPixels { get; }
+    public float DownsampleScale { get; }
+    public int CaptureAreaPercent { get; }
+    public int CaptureFrameX { get; }
+    public int CaptureFrameY { get; }
+    public int CaptureFrameWidth { get; }
+    public int CaptureFrameHeight { get; }
+
+    public AtlasScreenshotCaptureLayout(
+        bool isValid,
+        int frameWidth,
+        int frameHeight,
+        float projectionVerticalFactor,
+        int tileWidth,
+        int tileHeight,
+        int nominalTileWidth,
+        int nominalTileHeight,
+        int margin,
+        int storedWidth,
+        int storedHeight,
+        int readX,
+        int readY,
+        int requestedWidth,
+        int requestedHeight,
+        int outputWidth,
+        int outputHeight,
+        long requestedPixels,
+        long outputPixels,
+        float downsampleScale,
+        int captureAreaPercent,
+        int captureFrameX,
+        int captureFrameY,
+        int captureFrameWidth,
+        int captureFrameHeight
+    )
+    {
+        IsValid = isValid;
+        FrameWidth = frameWidth;
+        FrameHeight = frameHeight;
+        ProjectionVerticalFactor = projectionVerticalFactor;
+        TileWidth = tileWidth;
+        TileHeight = tileHeight;
+        NominalTileWidth = nominalTileWidth;
+        NominalTileHeight = nominalTileHeight;
+        Margin = margin;
+        StoredWidth = storedWidth;
+        StoredHeight = storedHeight;
+        ReadX = readX;
+        ReadY = readY;
+        RequestedWidth = requestedWidth;
+        RequestedHeight = requestedHeight;
+        OutputWidth = outputWidth;
+        OutputHeight = outputHeight;
+        RequestedPixels = requestedPixels;
+        OutputPixels = outputPixels;
+        DownsampleScale = downsampleScale;
+        CaptureAreaPercent = captureAreaPercent;
+        CaptureFrameX = captureFrameX;
+        CaptureFrameY = captureFrameY;
+        CaptureFrameWidth = captureFrameWidth;
+        CaptureFrameHeight = captureFrameHeight;
+    }
+}
+
+/// <summary>
 /// Tiled high-resolution atlas capture. The current map view is divided into
 /// an N-by-N grid (1x to 8x). For every tile the atlas camera zooms in N times
 /// and re-renders the exact world into the engine Primary framebuffer; the
@@ -201,7 +291,7 @@ internal sealed class AtlasTiledScreenshot : IDisposable
         public float ViewportAspect { get; init; }
         public AtlasScreenshotFilterSettings FilterSettings { get; init; }
         public AtlasScreenshotFilterMode FilterMode { get; init; }
-        public CaptureLayout Layout { get; init; }
+        public AtlasScreenshotCaptureLayout Layout { get; init; }
         public AtlasScreenshotPreview Preview { get; init; }
 
         public int TotalTiles => GridSize * GridSize;
@@ -428,7 +518,8 @@ internal sealed class AtlasTiledScreenshot : IDisposable
         );
         return CalculateCaptureLayout(
             normalizedGrid,
-            Math.Max(0.05f, viewportAspect)
+            Math.Max(0.05f, viewportAspect),
+            100
         ).Margin;
     }
 
@@ -462,11 +553,37 @@ internal sealed class AtlasTiledScreenshot : IDisposable
         int captureAreaPercent = NormalizeCaptureAreaPercent(
             requestedCaptureAreaPercent
         );
-        CaptureLayout layout = CalculateCaptureLayout(
+        AtlasScreenshotCaptureLayout layout = CalculateCaptureLayout(
             resolutionScale,
-            viewportAspect
+            viewportAspect,
+            captureAreaPercent
         );
         return BuildPreview(layout, resolutionScale, captureAreaPercent);
+    }
+
+    /// <summary>
+    /// Returns the immutable central readback and preview-frame geometry for
+    /// the current framebuffer without changing the camera or starting a job.
+    /// </summary>
+    public AtlasScreenshotCaptureLayout GetCaptureLayout(
+        int requestedResolutionScale,
+        int requestedCaptureAreaPercent,
+        float viewportAspect
+    )
+    {
+        int resolutionScale = Math.Clamp(
+            requestedResolutionScale,
+            MinimumResolutionScale,
+            MaximumResolutionScale
+        );
+        int captureAreaPercent = NormalizeCaptureAreaPercent(
+            requestedCaptureAreaPercent
+        );
+        return CalculateCaptureLayout(
+            resolutionScale,
+            viewportAspect,
+            captureAreaPercent
+        );
     }
 
     /// <summary>
@@ -516,9 +633,10 @@ internal sealed class AtlasTiledScreenshot : IDisposable
         baselinePitchDegrees = pitchDegrees;
         capturedViewportAspect = Math.Max(0.05f, viewportAspect);
 
-        CaptureLayout layout = CalculateCaptureLayout(
+        AtlasScreenshotCaptureLayout layout = CalculateCaptureLayout(
             gridSize,
-            capturedViewportAspect
+            capturedViewportAspect,
+            captureAreaPercent
         );
         if (!layout.IsValid)
         {
@@ -645,78 +763,10 @@ internal sealed class AtlasTiledScreenshot : IDisposable
         return true;
     }
 
-    private readonly struct CaptureLayout
-    {
-        public bool IsValid { get; }
-        public int FrameWidth { get; }
-        public int FrameHeight { get; }
-        public float ProjectionVerticalFactor { get; }
-        public int TileWidth { get; }
-        public int TileHeight { get; }
-        public int NominalTileWidth { get; }
-        public int NominalTileHeight { get; }
-        public int Margin { get; }
-        public int StoredWidth { get; }
-        public int StoredHeight { get; }
-        public int ReadX { get; }
-        public int ReadY { get; }
-        public int RequestedWidth { get; }
-        public int RequestedHeight { get; }
-        public int OutputWidth { get; }
-        public int OutputHeight { get; }
-        public long RequestedPixels { get; }
-        public long OutputPixels { get; }
-        public float DownsampleScale { get; }
-
-        public CaptureLayout(
-            bool isValid,
-            int frameWidth,
-            int frameHeight,
-            float projectionVerticalFactor,
-            int tileWidth,
-            int tileHeight,
-            int nominalTileWidth,
-            int nominalTileHeight,
-            int margin,
-            int storedWidth,
-            int storedHeight,
-            int readX,
-            int readY,
-            int requestedWidth,
-            int requestedHeight,
-            int outputWidth,
-            int outputHeight,
-            long requestedPixels,
-            long outputPixels,
-            float downsampleScale
-        )
-        {
-            IsValid = isValid;
-            FrameWidth = frameWidth;
-            FrameHeight = frameHeight;
-            ProjectionVerticalFactor = projectionVerticalFactor;
-            TileWidth = tileWidth;
-            TileHeight = tileHeight;
-            NominalTileWidth = nominalTileWidth;
-            NominalTileHeight = nominalTileHeight;
-            Margin = margin;
-            StoredWidth = storedWidth;
-            StoredHeight = storedHeight;
-            ReadX = readX;
-            ReadY = readY;
-            RequestedWidth = requestedWidth;
-            RequestedHeight = requestedHeight;
-            OutputWidth = outputWidth;
-            OutputHeight = outputHeight;
-            RequestedPixels = requestedPixels;
-            OutputPixels = outputPixels;
-            DownsampleScale = downsampleScale;
-        }
-    }
-
-    private CaptureLayout CalculateCaptureLayout(
+    private AtlasScreenshotCaptureLayout CalculateCaptureLayout(
         int requestedResolutionScale,
-        float viewportAspect
+        float viewportAspect,
+        int requestedCaptureAreaPercent
     )
     {
         int resolutionScale = Math.Clamp(
@@ -726,9 +776,12 @@ internal sealed class AtlasTiledScreenshot : IDisposable
         );
         int frameWidth = Math.Max(1, capi.Render.FrameWidth);
         int frameHeight = Math.Max(1, capi.Render.FrameHeight);
+        int captureAreaPercent = NormalizeCaptureAreaPercent(
+            requestedCaptureAreaPercent
+        );
         if (frameWidth < 96 || frameHeight < 96)
         {
-            return new CaptureLayout(
+            return new AtlasScreenshotCaptureLayout(
                 false,
                 frameWidth,
                 frameHeight,
@@ -748,7 +801,12 @@ internal sealed class AtlasTiledScreenshot : IDisposable
                 0,
                 0,
                 0,
-                1
+                1,
+                captureAreaPercent,
+                0,
+                0,
+                0,
+                0
             );
         }
 
@@ -839,7 +897,20 @@ internal sealed class AtlasTiledScreenshot : IDisposable
             );
         }
 
-        return new CaptureLayout(
+        int captureFrameWidth = Math.Clamp(
+            (int)Math.Round(storedWidth * captureAreaPercent / 100f),
+            1,
+            storedWidth
+        );
+        int captureFrameHeight = Math.Clamp(
+            (int)Math.Round(storedHeight * captureAreaPercent / 100f),
+            1,
+            storedHeight
+        );
+        int captureFrameX = readX + (storedWidth - captureFrameWidth) / 2;
+        int captureFrameY = readY + (storedHeight - captureFrameHeight) / 2;
+
+        return new AtlasScreenshotCaptureLayout(
             true,
             frameWidth,
             frameHeight,
@@ -859,12 +930,17 @@ internal sealed class AtlasTiledScreenshot : IDisposable
             outputHeight,
             requestedPixels,
             outputPixels,
-            downsampleScale
+            downsampleScale,
+            captureAreaPercent,
+            captureFrameX,
+            captureFrameY,
+            captureFrameWidth,
+            captureFrameHeight
         );
     }
 
     private static AtlasScreenshotPreview BuildPreview(
-        CaptureLayout layout,
+        AtlasScreenshotCaptureLayout layout,
         int resolutionScale,
         int captureAreaPercent
     )
@@ -1007,7 +1083,7 @@ internal sealed class AtlasTiledScreenshot : IDisposable
     {
         CaptureJob? captureJob;
         int capturedTile;
-        CaptureLayout captureLayout;
+        AtlasScreenshotCaptureLayout captureLayout;
         lock (stateLock)
         {
             if (jobState != AtlasScreenshotJobState.Capturing

@@ -22,6 +22,7 @@ uniform float saturation;
 uniform float temperature;
 uniform vec3 shadowTint;
 uniform vec3 highlightTint;
+uniform vec3 rgbBalance;
 uniform float shadowTintStrength;
 uniform float depthReliefStrength;
 uniform float indirectLightStrength;
@@ -255,6 +256,9 @@ vec3 applyFullFilter(ivec2 position, vec3 original)
         ? vec3(1.0 + temperature * 0.16, 1.0, 1.0 - temperature * 0.12)
         : vec3(1.0 + temperature * 0.10, 1.0, 1.0 - temperature * 0.16);
     color *= mix(vec3(1.0), warmTint, 0.45);
+    // User RGB sliders are a direct whole-image channel balance. They are
+    // deliberately independent of luminance masks and shadow-tint strength.
+    color *= rgbBalance;
 
     grey = luminance(color);
     float shadowWeight = 1.0 - smoothstep(0.16, 0.58, grey);

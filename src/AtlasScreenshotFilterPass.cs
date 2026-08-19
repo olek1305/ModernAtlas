@@ -53,14 +53,18 @@ internal readonly record struct AtlasScreenshotFilterSettings
     public float HighlightTintR { get; }
     public float HighlightTintG { get; }
     public float HighlightTintB { get; }
+    public float RedBalance { get; }
+    public float GreenBalance { get; }
+    public float BlueBalance { get; }
 
     internal static readonly string[] PresetValues =
     {
         "off",
         "natural",
-        "google-earth",
+        "atlas-relief",
         "cinematic",
-        "parchment",
+        "old-photo",
+        "western",
         "custom"
     };
 
@@ -68,9 +72,10 @@ internal readonly record struct AtlasScreenshotFilterSettings
     {
         "Off",
         "Natural",
-        "Google Earth",
+        "Atlas Relief",
         "Cinematic",
-        "Parchment",
+        "Old Photo",
+        "Western",
         "Custom"
     };
 
@@ -91,7 +96,10 @@ internal readonly record struct AtlasScreenshotFilterSettings
         float shadowTintB,
         float highlightTintR,
         float highlightTintG,
-        float highlightTintB
+        float highlightTintB,
+        float redBalance = 1f,
+        float greenBalance = 1f,
+        float blueBalance = 1f
     )
     {
         Enabled = enabled;
@@ -111,6 +119,9 @@ internal readonly record struct AtlasScreenshotFilterSettings
         HighlightTintR = Math.Clamp(highlightTintR, 0.5f, 1.5f);
         HighlightTintG = Math.Clamp(highlightTintG, 0.5f, 1.5f);
         HighlightTintB = Math.Clamp(highlightTintB, 0.5f, 1.5f);
+        RedBalance = Math.Clamp(redBalance, 0.5f, 1.5f);
+        GreenBalance = Math.Clamp(greenBalance, 0.5f, 1.5f);
+        BlueBalance = Math.Clamp(blueBalance, 0.5f, 1.5f);
     }
 
     internal static AtlasScreenshotFilterSettings FromConfig(
@@ -139,6 +150,12 @@ internal readonly record struct AtlasScreenshotFilterSettings
             out float highlightG,
             out float highlightB
         );
+        shadowR += (config.ScreenshotShadowRedPercent - 100) / 100f;
+        shadowG += (config.ScreenshotShadowGreenPercent - 100) / 100f;
+        shadowB += (config.ScreenshotShadowBluePercent - 100) / 100f;
+        highlightR += (config.ScreenshotHighlightRedPercent - 100) / 100f;
+        highlightG += (config.ScreenshotHighlightGreenPercent - 100) / 100f;
+        highlightB += (config.ScreenshotHighlightBluePercent - 100) / 100f;
         return new AtlasScreenshotFilterSettings(
             true,
             "custom",
@@ -156,7 +173,10 @@ internal readonly record struct AtlasScreenshotFilterSettings
             shadowB,
             highlightR,
             highlightG,
-            highlightB
+            highlightB,
+            config.ScreenshotRedBalancePercent / 100f,
+            config.ScreenshotGreenBalancePercent / 100f,
+            config.ScreenshotBlueBalancePercent / 100f
         );
     }
 
@@ -178,7 +198,10 @@ internal readonly record struct AtlasScreenshotFilterSettings
             ShadowTintB,
             HighlightTintR,
             HighlightTintG,
-            HighlightTintB
+            HighlightTintB,
+            RedBalance,
+            GreenBalance,
+            BlueBalance
         );
 
     internal AtlasScreenshotFilterSettings WithoutDepthEffects() =>
@@ -199,7 +222,10 @@ internal readonly record struct AtlasScreenshotFilterSettings
             ShadowTintB,
             HighlightTintR,
             HighlightTintG,
-            HighlightTintB
+            HighlightTintB,
+            RedBalance,
+            GreenBalance,
+            BlueBalance
         );
 
     internal static void ApplyPresetToConfig(
@@ -228,7 +254,46 @@ internal readonly record struct AtlasScreenshotFilterSettings
             settings.AmbientOcclusionPercent;
         config.ScreenshotIndirectLightPercent = settings.IndirectLightPercent;
         config.ScreenshotBloomPercent = settings.BloomPercent;
+        config.ScreenshotRedBalancePercent = 100;
+        config.ScreenshotGreenBalancePercent = 100;
+        config.ScreenshotBlueBalancePercent = 100;
+        GetTemperatureTints(
+            settings.TemperaturePercent,
+            out float temperatureShadowR,
+            out float temperatureShadowG,
+            out float temperatureShadowB,
+            out float temperatureHighlightR,
+            out float temperatureHighlightG,
+            out float temperatureHighlightB
+        );
+        config.ScreenshotShadowRedPercent = TintOffsetPercent(
+            settings.ShadowTintR,
+            temperatureShadowR
+        );
+        config.ScreenshotShadowGreenPercent = TintOffsetPercent(
+            settings.ShadowTintG,
+            temperatureShadowG
+        );
+        config.ScreenshotShadowBluePercent = TintOffsetPercent(
+            settings.ShadowTintB,
+            temperatureShadowB
+        );
+        config.ScreenshotHighlightRedPercent = TintOffsetPercent(
+            settings.HighlightTintR,
+            temperatureHighlightR
+        );
+        config.ScreenshotHighlightGreenPercent = TintOffsetPercent(
+            settings.HighlightTintG,
+            temperatureHighlightG
+        );
+        config.ScreenshotHighlightBluePercent = TintOffsetPercent(
+            settings.HighlightTintB,
+            temperatureHighlightB
+        );
     }
+
+    private static int TintOffsetPercent(float tint, float temperatureTint) =>
+        Math.Clamp((int)Math.Round(100f + (tint - temperatureTint) * 100f), 50, 150);
 
     internal static AtlasScreenshotFilterSettings CreatePreset(string value)
     {
@@ -253,9 +318,9 @@ internal readonly record struct AtlasScreenshotFilterSettings
                 1.01f,
                 0.99f
             ),
-            "google-earth" => new AtlasScreenshotFilterSettings(
+            "atlas-relief" => new AtlasScreenshotFilterSettings(
                 true,
-                "google-earth",
+                "atlas-relief",
                 100,
                 108,
                 116,
@@ -291,24 +356,43 @@ internal readonly record struct AtlasScreenshotFilterSettings
                 0.97f,
                 0.84f
             ),
-            "parchment" => new AtlasScreenshotFilterSettings(
+            "old-photo" => new AtlasScreenshotFilterSettings(
                 true,
-                "parchment",
+                "old-photo",
                 100,
-                62,
-                104,
-                28,
+                52,
+                108,
+                32,
                 22,
-                10,
-                5,
-                0,
-                0.028f,
-                1.08f,
-                0.91f,
-                0.74f,
+                8,
+                3,
+                2,
+                -0.015f,
+                1.12f,
+                0.96f,
+                0.76f,
+                1.10f,
+                1.02f,
+                0.86f
+            ),
+            "western" => new AtlasScreenshotFilterSettings(
+                true,
+                "western",
+                100,
+                78,
+                122,
+                24,
+                30,
+                16,
+                7,
+                4,
+                0.025f,
+                0.96f,
+                0.82f,
+                0.62f,
                 1.12f,
                 0.98f,
-                0.80f
+                0.78f
             ),
             "custom" => new AtlasScreenshotFilterSettings(
                 true,
@@ -356,12 +440,22 @@ internal readonly record struct AtlasScreenshotFilterSettings
         string normalized = (value ?? "natural").Trim().ToLowerInvariant();
         return normalized switch
         {
-            "google-earth"
+            "atlas-relief"
                 or "googleearth"
                 or "google_earth"
-                or "google earth" => "google-earth",
+                or "google earth"
+                or "google-earth"
+                or "atlasrelief"
+                or "atlas_relief"
+                or "atlas relief" => "atlas-relief",
             "off" or "none" or "disabled" => "off",
-            "natural" or "cinematic" or "parchment" or "custom" => normalized,
+            "old-photo" or "oldphoto" or "old_photo" or "old photo" =>
+                "old-photo",
+            "western" or "western-sepia" or "western sepia" => "western",
+            // Parchment was an early screenshot preset. Treat existing saved
+            // selections as Natural now that it is no longer exposed.
+            "parchment" => "natural",
+            "natural" or "cinematic" or "custom" => normalized,
             _ => "natural"
         };
     }
@@ -422,6 +516,13 @@ internal sealed class AtlasScreenshotFilterPass : IDisposable
     private bool loggedFailure;
 
     public string? LastError { get; private set; }
+
+    /// <summary>
+    /// The most recently published filtered framebuffer.  It is exposed only
+    /// for the automated same-source RGB diagnostic; the capture pipeline
+    /// still treats the returned framebuffer as an immutable per-frame output.
+    /// </summary>
+    public FrameBufferRef? LastOutputFramebuffer => framebufferA;
 
     public bool UsesSpatialEffects(AtlasScreenshotFilterSettings settings) =>
         settings.Enabled
@@ -760,6 +861,12 @@ internal sealed class AtlasScreenshotFilterPass : IDisposable
             settings.HighlightTintR,
             settings.HighlightTintG,
             settings.HighlightTintB
+        );
+        shader.Uniform(
+            "rgbBalance",
+            settings.RedBalance,
+            settings.GreenBalance,
+            settings.BlueBalance
         );
         shader.Uniform(
             "shadowTintStrength",

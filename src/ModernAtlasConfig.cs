@@ -12,6 +12,15 @@ public sealed class ModernAtlasConfig
     private int screenshotContrastPercent = 100;
     private int screenshotTemperaturePercent;
     private int screenshotShadowTintStrengthPercent;
+    private int screenshotRedBalancePercent = 100;
+    private int screenshotGreenBalancePercent = 100;
+    private int screenshotBlueBalancePercent = 100;
+    private int screenshotShadowRedPercent = 100;
+    private int screenshotShadowGreenPercent = 100;
+    private int screenshotShadowBluePercent = 100;
+    private int screenshotHighlightRedPercent = 100;
+    private int screenshotHighlightGreenPercent = 100;
+    private int screenshotHighlightBluePercent = 100;
     private int screenshotAmbientOcclusionPercent;
     private int screenshotIndirectLightPercent;
     private int screenshotBloomPercent;
@@ -84,6 +93,51 @@ public sealed class ModernAtlasConfig
     {
         get => screenshotShadowTintStrengthPercent;
         set => screenshotShadowTintStrengthPercent = Math.Clamp(value, 0, 100);
+    }
+    public int ScreenshotRedBalancePercent
+    {
+        get => screenshotRedBalancePercent;
+        set => screenshotRedBalancePercent = Math.Clamp(value, 50, 150);
+    }
+    public int ScreenshotGreenBalancePercent
+    {
+        get => screenshotGreenBalancePercent;
+        set => screenshotGreenBalancePercent = Math.Clamp(value, 50, 150);
+    }
+    public int ScreenshotBlueBalancePercent
+    {
+        get => screenshotBlueBalancePercent;
+        set => screenshotBlueBalancePercent = Math.Clamp(value, 50, 150);
+    }
+    public int ScreenshotShadowRedPercent
+    {
+        get => screenshotShadowRedPercent;
+        set => screenshotShadowRedPercent = Math.Clamp(value, 50, 150);
+    }
+    public int ScreenshotShadowGreenPercent
+    {
+        get => screenshotShadowGreenPercent;
+        set => screenshotShadowGreenPercent = Math.Clamp(value, 50, 150);
+    }
+    public int ScreenshotShadowBluePercent
+    {
+        get => screenshotShadowBluePercent;
+        set => screenshotShadowBluePercent = Math.Clamp(value, 50, 150);
+    }
+    public int ScreenshotHighlightRedPercent
+    {
+        get => screenshotHighlightRedPercent;
+        set => screenshotHighlightRedPercent = Math.Clamp(value, 50, 150);
+    }
+    public int ScreenshotHighlightGreenPercent
+    {
+        get => screenshotHighlightGreenPercent;
+        set => screenshotHighlightGreenPercent = Math.Clamp(value, 50, 150);
+    }
+    public int ScreenshotHighlightBluePercent
+    {
+        get => screenshotHighlightBluePercent;
+        set => screenshotHighlightBluePercent = Math.Clamp(value, 50, 150);
     }
     public int ScreenshotAmbientOcclusionPercent
     {
