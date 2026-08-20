@@ -343,7 +343,7 @@ public sealed partial class ModernAtlasDialog
     {
         if (!SearchModeActive || interfaceHidden || !searchController.HasActiveQuery) return;
         EnsureSearchMarkerTexture();
-        if (searchMarkerTexture?.TextureId <= 0) return;
+        if (searchMarkerTexture is not { TextureId: > 0 }) return;
 
         bool clipped = BeginScrollContentClip();
         try
@@ -714,7 +714,7 @@ public sealed partial class ModernAtlasDialog
     private void RenderOreHoverCard()
     {
         if (oreHoverInspection == null
-            || oreHoverTexture?.TextureId <= 0
+            || oreHoverTexture is not { TextureId: > 0 }
             || interfaceHidden
             || activeMapLayer != AtlasMapLayer.OreDensity
             || !CreativeCheatSettingsAvailable)

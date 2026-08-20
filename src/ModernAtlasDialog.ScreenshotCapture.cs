@@ -266,7 +266,7 @@ public sealed partial class ModernAtlasDialog
             screenshotStatusShownUntilMilliseconds = capi.ElapsedMilliseconds + 4000;
             return true;
         }
-        if (atlasFrameCacheTexture?.TextureId <= 0)
+        if (atlasFrameCacheTexture is not { TextureId: > 0 })
         {
             screenshotStatusOverride = "Atlas frame is not ready yet.";
             screenshotStatusShownUntilMilliseconds = capi.ElapsedMilliseconds + 4000;

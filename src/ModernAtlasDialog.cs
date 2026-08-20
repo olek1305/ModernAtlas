@@ -1778,7 +1778,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
 
     private bool ShouldRenderFreshAtlasFrame()
     {
-        if (atlasFrameCacheTexture?.TextureId <= 0) return true;
+        if (atlasFrameCacheTexture is not { TextureId: > 0 }) return true;
 
         int interval = IsAtlasCameraMoving()
             ? MovingAtlasRefreshMilliseconds
@@ -2158,6 +2158,10 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         }
         preparedGameViewDistance = -1;
         surfaceHeightTexture.Reset();
+        // The ore hover card keeps its own inspection state. Clearing it here
+        // keeps that state consistent with the released textures so a frame
+        // drawn during world teardown cannot reference a released card.
+        ClearOreHover();
         ReleaseAtlasFrameCache();
         capi.Logger.Notification(
             "[ModernAtlas] Released world-specific atlas rendering resources."
