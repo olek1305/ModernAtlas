@@ -181,6 +181,17 @@ public sealed partial class ModernAtlasDialog
         SyncCreativeSettingsControls();
     }
 
+    private void OnCloseAtlasOnDamageToggled(bool enabled)
+    {
+        config.CloseAtlasOnDamage = enabled;
+        saveConfig();
+        capi.Logger.Notification(
+            "[ModernAtlas] Close atlas when taking damage: {0} (effective now: {1}).",
+            enabled,
+            AutoCloseOnDamageActive
+        );
+    }
+
     private void OnAnimationsToggled(bool enabled)
     {
         if (!enabled && config.AnimationsEnabled)
@@ -318,6 +329,11 @@ public sealed partial class ModernAtlasDialog
         settingsModal.GetAtlasSwitch("search-mode")!.Enabled =
             CreativeCheatSettingsAvailable;
         settingsModal.GetAtlasSwitch("animations")?.SetValue(config.AnimationsEnabled);
+        // The switch shows the stored preference in every mode; actual Creative
+        // only suppresses its effect, so the value survives a mode change.
+        settingsModal.GetAtlasSwitch("close-on-damage")?.SetValue(
+            config.CloseAtlasOnDamage
+        );
         settingsModal.GetAtlasSwitch("skip-opening-animation")?.SetValue(
             config.SkipOpeningAnimation
         );

@@ -177,6 +177,7 @@ public sealed class ModernAtlasSystem : ModSystem
             serverPolicy,
             SaveConfig,
             RequestCloseAtlas,
+            RequestEmergencyCloseAtlas,
             GetStableLiquidShader,
             GetAtlasCloudShader,
             GetAtlasBoundaryShader,
@@ -451,6 +452,29 @@ public sealed class ModernAtlasSystem : ModSystem
             onCompleted?.Invoke(false);
         }
         return true;
+    }
+
+    /// <summary>
+    /// Safety close used by the atlas damage warning. It closes the atlas
+    /// without the scroll stowing transition so the player regains control in
+    /// the same frame, and releases the transition state that a normal close
+    /// would have handed over.
+    /// </summary>
+    private bool RequestEmergencyCloseAtlas()
+    {
+        if (dialog?.IsOpened() != true) return false;
+
+        bool closed = dialog.TryClose();
+        // CancelWithoutOpening also unlocks the ordinary-world snapshot, so the
+        // backdrop resumes refreshing after the emergency close.
+        openingTransition?.CancelWithoutOpening();
+        if (!closed)
+        {
+            clientApi?.Logger.Error(
+                "[ModernAtlas] The atlas could not be closed after damage was detected."
+            );
+        }
+        return closed;
     }
 
     private void StartOpeningTransition()

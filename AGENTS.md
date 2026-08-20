@@ -465,8 +465,8 @@ empty while the automated exact-terrain check still reported success.
 - `ModernAtlasDialog` and `ExactChunkRendererAdapter` are split into `partial`
   files by concern. `ModernAtlasDialog.cs` keeps the fields, constructor,
   lifecycle, input handling and `OnRenderGUI`, with `.SmokeTest`, `.Interface`,
-  `.Screenshot`, `.ScreenshotCapture`, `.Layers`, `.Camera`, `.Settings` and
-  `.Inspection` beside it. `ExactChunkRendererAdapter.cs` keeps creation,
+  `.Screenshot`, `.ScreenshotCapture`, `.Layers`, `.Camera`, `.Settings`,
+  `.Inspection` and `.DamageWarning` beside it. `ExactChunkRendererAdapter.cs` keeps creation,
   `Render` and the reflection helpers, with `.Shaders`, `.Visibility`,
   `.Liquids` and `.Lighting` beside it. The split is a pure move: reassembling
   the partial files reproduces the previous single-file sources exactly, and
@@ -482,6 +482,49 @@ empty while the automated exact-terrain check still reported success.
 - Guard optional GPU resources with `is not { TextureId: > 0 }`. The lifted
   comparison `texture?.TextureId <= 0` evaluates to `false` for `null`, so a
   missing texture passes a guard that was meant to reject it.
+
+## Atlas damage warning
+
+- Losing health while the atlas is open draws a dark red edge vignette plus a
+  short caption over the atlas framebuffer: `TAKING DAMAGE — CLOSE THE ATLAS`
+  while the pulse runs, `LOW HEALTH` below 25 percent health. The pulse lasts
+  about 1.2 seconds, is driven by real render time so it animates while
+  singleplayer is paused, and a further hit restarts and slightly strengthens it.
+- It is a GUI overlay only. No shader, no world rendering and no engine state is
+  involved, it adds no composer element, and it never captures mouse or keyboard
+  input: `G`, `Escape` and `Exit` keep closing the atlas immediately. Do not turn
+  it into a full-screen red layer; that would hide the map and resemble the old
+  red-border defect.
+- Every source of health loss counts, including fire, falling and hunger. Never
+  show a direction or any hint of the attacker: that could disclose an entity the
+  atlas was not allowed to draw and would break the multiplayer disclosure
+  policy.
+- The warning and the optional emergency close are decided by the local player's
+  actual game mode only. Survival, Survival with accepted Cheat Mode, and
+  multiplayer all keep the warning; real Creative suppresses both. Never gate
+  this on `CreativeCheatSettingsAvailable` or `UnitInspectionEnabled`: Cheat Mode
+  is a protected feature switch and must not disable a safety warning.
+- `CloseAtlasOnDamage` is one persisted preference defaulting to true. Its
+  effective value is `actual game mode != Creative && config.CloseAtlasOnDamage`,
+  and the switch stays visible in every mode so the stored value still applies
+  after leaving Creative.
+- The emergency close skips the scroll stowing transition and the compass stow so
+  the player regains control in the same frame. A running tiled capture or an
+  open screenshot preview is cancelled and the camera restored first; a capture
+  must never block the safety close.
+- The warning is never drawn while a tiled capture or the screenshot preview owns
+  the frame, so it cannot be baked into a saved PNG or the BEFORE/AFTER preview.
+- The automated test drives the warning through its direct signal, never by
+  hurting the player or writing to the save, changes `CloseAtlasOnDamage` in
+  memory only, and verifies the emergency close between frames so the atlas
+  dialog is never closed from inside its own render pass.
+- The standard smoke world runs in actual Creative, where the warning is
+  correctly suppressed. The test therefore resolves the policy mode through an
+  in-memory override so both branches are exercised by behavior: resolved
+  Creative must leave the overlay and the auto-close inert, and resolved
+  Survival with accepted Cheat Mode must still warn. The override never changes
+  the player, the game mode or anything on disk, and production code always
+  resolves the real mode.
 
 ## Build and in-game test workflow
 

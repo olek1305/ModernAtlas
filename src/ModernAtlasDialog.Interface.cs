@@ -773,6 +773,22 @@ public sealed partial class ModernAtlasDialog
         AddSettingSwitch(composer, "Animations", OnAnimationsToggled, "animations", left, top + row * 2 - contentOffset, column, row, labelWidth, switchWidth);
         AddSettingSwitch(composer, "Skip transitions", OnSkipOpeningAnimationToggled, "skip-opening-animation", left, top + row * 3 - contentOffset, column, row, labelWidth, switchWidth);
         AddSettingSwitch(composer, "Live clouds", OnCloudsToggled, "clouds", left, top + row * 4 - contentOffset, column, row, labelWidth, switchWidth);
+        // The stored value stays meaningful after leaving Creative, so the row
+        // keeps its full label wherever the column is wide enough for it.
+        AddSettingSwitch(
+            composer,
+            column < 260
+                ? "Close on damage"
+                : "Close atlas when taking damage (Survival/Cheat)",
+            OnCloseAtlasOnDamageToggled,
+            "close-on-damage",
+            left,
+            top + row * 5 - contentOffset,
+            column,
+            row,
+            labelWidth,
+            switchWidth
+        );
 
         double middle = left + column + 8;
         AddSettingSwitch(composer, "3D scroll", OnRenderOnScrollToggled, "render-on-scroll", middle, top - contentOffset, column, row, labelWidth, switchWidth);

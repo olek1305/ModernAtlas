@@ -321,6 +321,8 @@ public sealed partial class ModernAtlasDialog
         automatedSmokeTestMapLayerPhase = 0;
         automatedSmokeTestOreLayerZoom = 0;
         automatedSmokeTestMapLayerPassed = false;
+        automatedSmokeTestDamagePhase = 0;
+        automatedSmokeTestDamageWarningPassed = false;
         pendingAutomatedMapLayerScreenshotSuffix = null;
         automatedSmokeTestPerformanceModeSelected = false;
         automatedSmokeTestPerformanceModeRendered = false;
@@ -704,11 +706,185 @@ public sealed partial class ModernAtlasDialog
             );
         }
 
+        if (passed && automatedSmokeTestDamagePhase < 3)
+        {
+            AdvanceAutomatedDamageWarningTest();
+            if (automatedSmokeTestDamagePhase < 3) return;
+        }
+        passed = passed && automatedSmokeTestDamageWarningPassed;
+
         automatedSmokeTestActive = false;
         Action<bool>? completion = automatedSmokeTestCompletion;
         automatedSmokeTestCompletion = null;
         RestoreAutomatedSmokeTestPreferences();
         completion?.Invoke(passed);
+    }
+
+    /// <summary>
+    /// Drives the damage-warning test across frames: the checks and the vignette
+    /// frame first, then the emergency close. Nothing hurts the player and
+    /// nothing is written to the save; the auto-close preference is changed in
+    /// memory only and restored.
+    /// </summary>
+    private void AdvanceAutomatedDamageWarningTest()
+    {
+        if (automatedSmokeTestDamagePhase == 0)
+        {
+            if (!ExerciseAutomatedDamageWarningChecks())
+            {
+                automatedSmokeTestDamagePhase = 3;
+                return;
+            }
+            // Leave the steady LOW HEALTH state on and capture the next frame:
+            // the warning is drawn before the screenshot is taken, so the stored
+            // image really shows it.
+            TriggerDamageWarningForAutomatedTest(true);
+            QueueAutomatedMapLayerScreenshot("damage-warning");
+            automatedSmokeTestDamagePhase = 1;
+            return;
+        }
+
+        if (automatedSmokeTestDamagePhase == 1)
+        {
+            // Wait for the queued frame to be stored before the state is reset.
+            if (pendingAutomatedMapLayerScreenshotSuffix != null) return;
+
+            ResetDamageWarning();
+            // Raise the signal exactly as production does from the render pass;
+            // the close itself is deferred to the next frame start.
+            config.CloseAtlasOnDamage = true;
+            automatedSmokeTestDamageWasOpenBeforeSignal = IsOpened();
+            TriggerDamageWarningForAutomatedTest(false);
+            ScheduleAutomatedEmergencyCloseCheck();
+            automatedSmokeTestDamagePhase = 2;
+        }
+    }
+
+    private bool ExerciseAutomatedDamageWarningChecks()
+    {
+        EnumGameMode mode = LocalGameModeForAutomatedTest;
+        // The policy must depend on the actual game mode only. Cheat Mode is a
+        // protected feature switch and may never suppress a safety warning.
+        bool policyRules =
+            DamageWarningPolicyForModeForAutomatedTest(EnumGameMode.Survival)
+            && DamageWarningPolicyForModeForAutomatedTest(EnumGameMode.Guest)
+            && !DamageWarningPolicyForModeForAutomatedTest(EnumGameMode.Creative);
+        bool livePolicy = DamageWarningPolicyActive
+            == DamageWarningPolicyForModeForAutomatedTest(mode);
+
+        // Behavioural Creative check: resolved as Creative the signal must leave
+        // the overlay and the auto-close inert.
+        SetDamageWarningModeOverrideForAutomatedTest(EnumGameMode.Creative);
+        ResetDamageWarning();
+        TriggerDamageWarningForAutomatedTest(false);
+        bool creativeSuppressed = !DamageWarningWouldRenderForAutomatedTest
+            && !AutoCloseOnDamageActiveForAutomatedTest
+            && IsOpened();
+
+        // The Survival behaviour is exercised through the in-memory override so
+        // it does not depend on the test world's mode. Cheat Mode stays enabled
+        // here, which is exactly the case that must not suppress the warning.
+        SetDamageWarningModeOverrideForAutomatedTest(EnumGameMode.Survival);
+        bool cheatStillWarns = DamageWarningPolicyActive;
+
+        automatedSmokeTestCloseOnDamageBefore = config.CloseAtlasOnDamage;
+        config.CloseAtlasOnDamage = false;
+
+        ResetDamageWarning();
+        TriggerDamageWarningForAutomatedTest(false);
+        bool pulseActive = DamageWarningWouldRenderForAutomatedTest
+            && !DamageWarningLowHealthForAutomatedTest;
+
+        TriggerDamageWarningForAutomatedTest(true);
+        bool lowHealthActive = DamageWarningWouldRenderForAutomatedTest
+            && DamageWarningLowHealthForAutomatedTest;
+
+        // A capture must never bake the warning into its image.
+        pendingScreenshotRequest = true;
+        bool suppressedDuringCapture = !DamageWarningWouldRenderForAutomatedTest;
+        pendingScreenshotRequest = false;
+
+        // The overlay must be drawable, not merely flagged active.
+        bool texturesReady = DamageWarningTexturesReadyForAutomatedTest;
+
+        ResetDamageWarning();
+        bool clearedAfterReset = !DamageWarningActiveForAutomatedTest;
+        bool stillInteractive = IsOpened() && CaptureAllInputs();
+
+        bool passed = texturesReady
+            && policyRules
+            && livePolicy
+            && creativeSuppressed
+            && cheatStillWarns
+            && pulseActive
+            && lowHealthActive
+            && suppressedDuringCapture
+            && clearedAfterReset
+            && stillInteractive;
+        if (!passed)
+        {
+            config.CloseAtlasOnDamage = automatedSmokeTestCloseOnDamageBefore;
+            SetDamageWarningModeOverrideForAutomatedTest(null);
+            automatedSmokeTestDamageWarningPassed = false;
+            capi.Logger.Error(
+                "[ModernAtlas] Automated damage-warning check failed: texturesReady={10}, mode={0}, rules={1}, live={2}, creativeSuppressed={3}, cheatStillWarns={4}, pulse={5}, lowHealth={6}, suppressedDuringCapture={7}, cleared={8}, interactive={9}.",
+                mode,
+                policyRules,
+                livePolicy,
+                creativeSuppressed,
+                cheatStillWarns,
+                pulseActive,
+                lowHealthActive,
+                suppressedDuringCapture,
+                clearedAfterReset,
+                stillInteractive,
+                texturesReady
+            );
+            return false;
+        }
+
+        capi.Logger.Notification(
+            "[ModernAtlas] Automated damage-warning check passed: actual world mode={0}; resolved Creative suppresses the overlay and auto-close, Survival with accepted Cheat Mode keeps warning, the pulse and LOW HEALTH states render, a capture stays clean and input remains live.",
+            mode
+        );
+        return true;
+    }
+
+    /// <summary>
+    /// Verifies the deferred safety close between frames, so the atlas dialog is
+    /// never closed or reopened from inside its own render pass.
+    /// </summary>
+    private void ScheduleAutomatedEmergencyCloseCheck()
+    {
+        capi.Event.RegisterCallback(
+            _ =>
+            {
+                bool wasOpen = automatedSmokeTestDamageWasOpenBeforeSignal;
+                bool closed = !IsOpened();
+                bool reopened = closed && TryOpen();
+                config.CloseAtlasOnDamage = automatedSmokeTestCloseOnDamageBefore;
+                SetDamageWarningModeOverrideForAutomatedTest(null);
+                ResetDamageWarning();
+                automatedSmokeTestDamageWarningPassed = wasOpen && closed && reopened;
+                automatedSmokeTestDamagePhase = 3;
+                if (automatedSmokeTestDamageWarningPassed)
+                {
+                    capi.Logger.Notification(
+                        "[ModernAtlas] Automated emergency-close check passed: one damage signal closed the atlas at the next frame start without the stowing animation, and it reopened for the remaining checks."
+                    );
+                }
+                else
+                {
+                    capi.Logger.Error(
+                        "[ModernAtlas] Automated emergency-close check failed: wasOpen={0}, closed={1}, reopened={2}.",
+                        wasOpen,
+                        closed,
+                        reopened
+                    );
+                }
+            },
+            120
+        );
     }
 
     private void ExerciseAutomatedInterfaceControls()

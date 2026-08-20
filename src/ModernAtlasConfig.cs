@@ -45,6 +45,7 @@ public sealed class ModernAtlasConfig
     public bool CaveModeEnabled { get; set; } = true;
     public bool SearchModeEnabled { get; set; }
     public bool CameraAngleLocked { get; set; }
+    public bool CloseAtlasOnDamage { get; set; } = true;
     public int AtlasExposurePercent { get; set; } = 150;
     public int MapLayerOpacityPercent { get; set; } = 75;
     public int CaveMaskBrightnessPercent { get; set; } = 100;

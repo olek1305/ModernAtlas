@@ -31,6 +31,8 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private const int PresentationChangeDebounceMilliseconds = 125;
     private const int BottomPanelAnimationMilliseconds = 170;
     private const int AutomatedUiScreenshotPhaseCount = 9;
+    private const float DamageWarningDurationSeconds = 1.2f;
+    private const float LowHealthWarningFraction = 0.25f;
     private const string AllOresFilterValue = "__all__";
     private const string SmokeScreenshotEnvironmentVariable =
         "MODERNATLAS_SMOKE_SCREENSHOT";
@@ -67,6 +69,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private readonly ModernAtlasServerPolicy visibleEntityPolicy = new();
     private readonly Action saveConfig;
     private readonly Func<bool> requestClose;
+    private readonly Func<bool> requestEmergencyClose;
     private readonly Func<IShaderProgram?> stableLiquidShaderProvider;
     private readonly Func<IShaderProgram?> atlasCloudShaderProvider;
     private readonly Func<IShaderProgram?> atlasBoundaryShaderProvider;
@@ -317,6 +320,20 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         AtlasMapLayer.Temperature,
         AtlasMapLayer.OreDensity
     };
+    private float damageWarningBaselineHealth = float.NaN;
+    private float damageWarningElapsedSeconds;
+    private float damageWarningPulseStrength;
+    private bool damageWarningLowHealth;
+    private bool damageWarningAutoCloseRequested;
+    private int automatedSmokeTestDamagePhase;
+    private bool automatedSmokeTestDamageWarningPassed;
+    private bool automatedSmokeTestCloseOnDamageBefore = true;
+    private EnumGameMode? automatedDamageWarningModeOverride;
+    private bool damageWarningEmergencyClosePending;
+    private bool automatedSmokeTestDamageWasOpenBeforeSignal;
+    private LoadedTexture? damageVignetteTexture;
+    private LoadedTexture? damageWarningCaptionTexture;
+    private string? damageWarningCaptionValue;
     private bool synchronizingMapLayerChoice;
     private bool synchronizingOreFilterChoice;
     private int oreFilterLabelLimit = 40;
@@ -728,6 +745,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         ModernAtlasServerPolicy serverPolicy,
         Action saveConfig,
         Func<bool> requestClose,
+        Func<bool> requestEmergencyClose,
         Func<IShaderProgram?> stableLiquidShaderProvider,
         Func<IShaderProgram?> atlasCloudShaderProvider,
         Func<IShaderProgram?> atlasBoundaryShaderProvider,
@@ -741,6 +759,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         this.serverPolicy = serverPolicy;
         this.saveConfig = saveConfig;
         this.requestClose = requestClose;
+        this.requestEmergencyClose = requestEmergencyClose;
         this.stableLiquidShaderProvider = stableLiquidShaderProvider;
         this.atlasCloudShaderProvider = atlasCloudShaderProvider;
         this.atlasBoundaryShaderProvider = atlasBoundaryShaderProvider;
@@ -771,6 +790,9 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         worldTeardownStarted = false;
         base.OnGuiOpened();
         presentationChangeCoordinator.Reset(config.RenderOnScroll);
+        // Opening the atlas must not raise the warning by itself; the first
+        // frame only records the health baseline.
+        ResetDamageWarning();
         // The dialog is constructed before a world/player necessarily exists.
         // Recompose now that Survival, Creative and accepted Cheat Mode access
         // can be resolved, so unavailable controls leave no empty slot.
@@ -880,6 +902,11 @@ public sealed partial class ModernAtlasDialog : GuiDialog
 
     public override void OnRenderGUI(float deltaTime)
     {
+        // The damage auto-close is deferred to this point on purpose: the atlas
+        // has not bound any framebuffer yet, so OnGuiClosed sees the clean
+        // engine state its close check requires.
+        if (FlushPendingEmergencyClose()) return;
+
         IRenderAPI renderStateApi = capi.Render;
         AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(
             renderStateApi
@@ -958,6 +985,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         // Enforce access before the layer task advances: a revoked Ore density
         // must not run even one more preparation step.
         EnforceMapLayerAccess();
+        AdvanceDamageWarning();
         mapLayerTexture.Advance();
         SynchronizeOreFilterOptions();
         bool pointerOverMapPanel = searchPanelBounds?.PointInside(
@@ -1161,6 +1189,9 @@ public sealed partial class ModernAtlasDialog : GuiDialog
             // failed or throttled atlas frame look like a one-frame world leak.
             RenderCachedAtlasFullscreen();
         }
+        // The damage warning belongs above the atlas frame but below the atlas
+        // panels, so controls stay readable while it pulses.
+        RenderDamageWarning();
         if (screenshotPreviewOpening && freshAtlasFrame && rendered)
         {
             BeginScreenshotPreviewFromFreshFrame();
@@ -2176,6 +2207,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         // keeps that state consistent with the released textures so a frame
         // drawn during world teardown cannot reference a released card.
         ClearOreHover();
+        ResetDamageWarning();
         ReleaseAtlasFrameCache();
         capi.Logger.Notification(
             "[ModernAtlas] Released world-specific atlas rendering resources."
@@ -2199,6 +2231,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         searchMarkerTexture = null;
         oreHoverTexture?.Dispose();
         oreHoverTexture = null;
+        DisposeDamageWarningTextures();
         compassRenderer.Dispose();
         ReleaseAtlasFrameCache();
         opacityQuad?.Dispose();
