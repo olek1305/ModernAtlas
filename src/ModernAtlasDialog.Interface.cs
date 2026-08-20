@@ -2064,7 +2064,7 @@ public sealed partial class ModernAtlasDialog
                 ElementBounds.Fixed(28, 233, 404, 42)
             )
             .AddStaticText(
-                "Atlas refresh: 60 FPS moving • 12 FPS idle.",
+                "Atlas refresh: 60 FPS focused • 12 FPS background.",
                 AtlasUiStyle.DetailFont(11),
                 ElementBounds.Fixed(28, 284, 404, 20)
             )

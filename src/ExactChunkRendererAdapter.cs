@@ -159,6 +159,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
     private readonly object chunkRenderer;
     private readonly object mainCamera;
     private readonly object platform;
+    private readonly PropertyInfo? platformIsFocusedProperty;
     private readonly object beforeOitRenderer;
     private readonly object afterOitRenderer;
     private readonly VolumetricCloudRendererAdapter? cloudRenderer;
@@ -474,6 +475,10 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
         this.chunkRenderer = chunkRenderer;
         this.mainCamera = mainCamera;
         this.platform = platform;
+        platformIsFocusedProperty = platform.GetType().GetProperty(
+            "IsFocused",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
+        );
         this.beforeOitRenderer = beforeOitRenderer;
         this.afterOitRenderer = afterOitRenderer;
         this.cloudRenderer = cloudRenderer;
@@ -740,6 +745,28 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
     {
         return !disposed
             && ReferenceEquals(chunkRendererField.GetValue(game), chunkRenderer);
+    }
+
+    /// <summary>
+    /// Reads the native client window focus without changing it. Focus is an
+    /// optional performance hint only; an unavailable compatibility member
+    /// must keep the foreground-safe smooth cadence.
+    /// </summary>
+    public bool IsGameWindowFocused
+    {
+        get
+        {
+            try
+            {
+                return platformIsFocusedProperty?.GetValue(platform)
+                    is not bool focused
+                    || focused;
+            }
+            catch
+            {
+                return true;
+            }
+        }
     }
 
     public bool TryBeginScreenshotAnimationFreeze(out string diagnostic)

@@ -1845,20 +1845,14 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     {
         if (atlasFrameCacheTexture is not { TextureId: > 0 }) return true;
 
-        int interval = IsAtlasCameraMoving()
+        // Releasing a camera button must not reduce visible atlas motion to
+        // the idle cadence. Keep every foreground atlas frame smooth and save
+        // the lower cadence exclusively for an unfocused/background game.
+        int interval = exactChunkRenderer?.IsGameWindowFocused != false
             ? MovingAtlasRefreshMilliseconds
             : IdleAtlasRefreshMilliseconds;
         return capi.ElapsedMilliseconds - lastAtlasWorldRenderMilliseconds >= interval;
     }
-
-    private bool IsAtlasCameraMoving() =>
-        leftDragging
-        || rightDragging
-        || Math.Abs(targetCenterX - centerX) > 0.001
-        || Math.Abs(targetCenterZ - centerZ) > 0.001
-        || Math.Abs(NormalizeSignedDegrees(targetYawDegrees - yawDegrees)) > 0.001f
-        || Math.Abs(targetPitchDegrees - pitchDegrees) > 0.001f
-        || Math.Abs(targetZoom - zoom) > 0.001f;
 
     private void CaptureAtlasFrameCache()
     {
@@ -1938,7 +1932,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
             {
                 loggedAtlasRefreshThrottle = true;
                 capi.Logger.Notification(
-                    "[ModernAtlas] Atlas refresh throttling is active at up to 60 FPS while the camera moves and 12 FPS while idle; world ticks and client chunk streaming remain active."
+                    "[ModernAtlas] Atlas refresh runs at up to 60 FPS while the Vintage Story window is focused and 12 FPS while it is in the background; world ticks and client chunk streaming remain active."
                 );
             }
         }

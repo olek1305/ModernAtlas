@@ -328,6 +328,9 @@ empty while the automated exact-terrain check still reported success.
 
 - Apply strict per-frame and per-tick budgets. Opening the atlas must not cause
   a large synchronous scan or visible gameplay freeze.
+- Keep the focused Vintage Story atlas on its smooth refresh cadence even when
+  no camera button is held. The reduced 12 FPS cadence is reserved for an
+  unfocused/background game window, not for an idle foreground atlas.
 - Do not register terrain-cache tick listeners or scan chunks for atlas-owned
   fallback data. Rendering should consume the game's already completed meshes.
 - Prefer public Vintage Story APIs. Isolate any unavoidable game-content API
