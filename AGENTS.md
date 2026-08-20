@@ -505,7 +505,12 @@ empty while the automated exact-terrain check still reported success.
   margin that the stitcher linearly crossfades, hiding the sub-pixel drift
   between camera positions. Wind, water and cloud offsets are frozen for all
   tiles (`screenshotFrozen*`, `GetLiveCloudOffset`) so animated surfaces
-  cannot tear at seams; the 0-degree Creative pitch capture is covered.
+  cannot tear at seams. Native mechanical devices are snapshotted before
+  tile 0 as well: every tile must read the same captured `AngleRad` through
+  an atlas-render-call-only override that is cleared in `finally`, without
+  pausing or mutating the mechanical network. Devices loaded after tile 0 are
+  excluded from that capture instead of appearing halfway across the PNG.
+  The 0-degree Creative pitch capture is covered.
   The smoke test queues a 2x capture only after every other exercise
   (including the presentation debounce test) has passed, returns the
   presentation to scroll first without re-requesting the debounce every

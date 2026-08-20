@@ -129,6 +129,7 @@ public sealed partial class ModernAtlasDialog
                 0,
                 config.PerformanceLightingEnabled,
                 config.HideVegetation,
+                config.AnimationsEnabled,
                 Math.Clamp(config.AtlasExposurePercent, 50, 150) / 100f,
                 Math.Clamp(config.CaveMaskBrightnessPercent, 50, 150) / 100f,
                 windWaveCounter,

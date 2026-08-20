@@ -237,6 +237,14 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
     public int LastRenderedMechanicalDeviceCount { get; private set; }
     public int LastLoadedMechanicalDeviceCount =>
         mechanicalRenderer.LastLoadedDeviceCount;
+    public bool ScreenshotAnimationFreezeActive =>
+        mechanicalRenderer.ScreenshotFreezeActive;
+    public int ScreenshotFrozenMechanicalDeviceCount =>
+        mechanicalRenderer.ScreenshotFrozenDeviceCount;
+    public int LastScreenshotFrozenMechanicalAngleReadCount =>
+        mechanicalRenderer.LastScreenshotFrozenAngleReadCount;
+    public int ScreenshotFrozenMechanicalAngleReadCount =>
+        mechanicalRenderer.ScreenshotFrozenAngleReadCount;
     public int LastSuppressedHeldItemCount =>
         entityModelRenderer.LastSuppressedHeldItemCount;
     public IReadOnlyList<AtlasRenderedEntity> LastRenderedEntities =>
@@ -470,7 +478,10 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
         this.afterOitRenderer = afterOitRenderer;
         this.cloudRenderer = cloudRenderer;
         entityModelRenderer = new AtlasEntityModelRendererAdapter(capi);
-        mechanicalRenderer = new AtlasMechanicalRendererAdapter(capi);
+        mechanicalRenderer = new AtlasMechanicalRendererAdapter(
+            capi,
+            visibilityHarmony
+        );
         oreTextureReplacement = new AtlasOreTextureReplacement(capi);
         vegetationTextureMask = new AtlasVegetationTextureMask(capi);
         boundaryResolver = new AtlasBoundaryResolver(
@@ -731,6 +742,21 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
             && ReferenceEquals(chunkRendererField.GetValue(game), chunkRenderer);
     }
 
+    public bool TryBeginScreenshotAnimationFreeze(out string diagnostic)
+    {
+        if (disposed)
+        {
+            diagnostic = "the exact atlas renderer is already disposed";
+            return false;
+        }
+        return mechanicalRenderer.TryBeginScreenshotFreeze(out diagnostic);
+    }
+
+    public void EndScreenshotAnimationFreeze()
+    {
+        mechanicalRenderer.EndScreenshotFreeze();
+    }
+
     public void ResetTerrainCoverageDiagnostics()
     {
         loggedTerrainCoverage = false;
@@ -755,6 +781,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
         int textureDetailReduction,
         bool performanceLightingEnabled,
         bool hideVegetation,
+        bool animationsEnabled,
         float visualExposureMultiplier,
         float caveMaskBrightness,
         float windWaveCounter,
@@ -1161,7 +1188,8 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
                 capi.World.Player.Entity.Pos.X,
                 capi.World.Player.Entity.Pos.Z,
                 viewDistanceBlocks,
-                hideUndergroundCaves ? surfaceHeightTexture : null
+                hideUndergroundCaves ? surfaceHeightTexture : null,
+                animationsEnabled
             );
             LastRenderedEntityCount = entityModelRenderer.Render(
                 deltaTime,
@@ -1333,6 +1361,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
         if (disposed) return;
         disposed = true;
         lastAtlasCameraReady = false;
+        mechanicalRenderer.ClearAnimationFreezes();
 
         // LeaveWorld is raised after the engine has started clearing its
         // DefaultShaderUniforms arrays. Activating an engine chunk shader at

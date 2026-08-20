@@ -316,6 +316,23 @@ public sealed partial class ModernAtlasDialog
                 exactChunkRenderer?.BoundaryValidityTextureId > 0
             );
         }
+        string mechanicalFreezeDiagnostic =
+            "the exact atlas renderer is unavailable";
+        if (exactChunkRenderer == null
+            || !exactChunkRenderer.TryBeginScreenshotAnimationFreeze(
+                out mechanicalFreezeDiagnostic
+            ))
+        {
+            screenshotStatusOverride =
+                $"Screenshot animation freeze failed: {mechanicalFreezeDiagnostic}";
+            screenshotStatusShownUntilMilliseconds =
+                capi.ElapsedMilliseconds + 6000;
+            capi.Logger.Error(
+                "[ModernAtlas] Refused screenshot job before tile 0 because its animation frame could not be frozen: {0}",
+                mechanicalFreezeDiagnostic
+            );
+            return true;
+        }
         if (!tileScreenshot.StartCapture(
             gridSize,
             captureAreaPercent,
@@ -327,6 +344,7 @@ public sealed partial class ModernAtlasDialog
             frozenFilterMode
         ))
         {
+            exactChunkRenderer.EndScreenshotAnimationFreeze();
             screenshotStatusOverride = "Screenshot failed to start; see the log for details.";
             screenshotStatusShownUntilMilliseconds = capi.ElapsedMilliseconds + 4000;
             return true;
@@ -341,9 +359,9 @@ public sealed partial class ModernAtlasDialog
         screenshotBaselineTargetCenterZ = targetCenterZ;
         screenshotCameraSnapshotted = true;
 
-        // Pin wind, water and cloud counters to one captured frame so every
-        // tile renders identical animated surfaces and the stitched image
-        // has no moving-water, drifting-cloud or waving-vegetation seams.
+        // Pin every atlas-owned animation input to one captured frame so each
+        // tile uses identical vegetation, liquid, cloud and native mechanical
+        // poses. The world simulation remains live and unmodified.
         CaptureAnimationFrame();
         screenshotFrozenWindWaveCounter = frozenWindWaveCounter;
         screenshotFrozenWindWaveCounterHighFrequency =
@@ -366,6 +384,10 @@ public sealed partial class ModernAtlasDialog
             BuildScreenshotPreviewText().Replace('\n', ' '),
             captureLabel
         );
+        capi.Logger.Notification(
+            "[ModernAtlas] Screenshot animation frame frozen before tile 0: wind, water, clouds and {0}.",
+            mechanicalFreezeDiagnostic
+        );
         return true;
     }
 
@@ -387,6 +409,16 @@ public sealed partial class ModernAtlasDialog
         bool shouldReadValidityMask = automatedScreenshotMaskDiagnosticsEnabled
             && (!filteredJob || requiresValidityMask);
         int currentTile = tileScreenshot.CurrentTile;
+        if (exactChunkRenderer?.ScreenshotAnimationFreezeActive == true
+            && exactChunkRenderer.LastRenderedMechanicalDeviceCount
+                != exactChunkRenderer.LastScreenshotFrozenMechanicalAngleReadCount)
+        {
+            tileScreenshot.FailCapture(
+                $"Screenshot tile {currentTile + 1} rendered "
+                + $"{exactChunkRenderer.LastRenderedMechanicalDeviceCount} native mechanical poses but intercepted "
+                + $"{exactChunkRenderer.LastScreenshotFrozenMechanicalAngleReadCount} frozen angle reads."
+            );
+        }
         if (shouldReadValidityMask
             && resolvedFramebuffer != null
             && exactChunkRenderer != null
@@ -545,12 +577,22 @@ public sealed partial class ModernAtlasDialog
 
         // The last tile is stored; the background stitcher now assembles the
         // image while the camera returns to the player's original view.
+        int frozenMechanicalDeviceCount =
+            exactChunkRenderer?.ScreenshotFrozenMechanicalDeviceCount ?? 0;
+        int frozenMechanicalAngleReadCount =
+            exactChunkRenderer?.ScreenshotFrozenMechanicalAngleReadCount ?? 0;
         RestoreScreenshotCamera();
         pendingScreenshotRequest = false;
         capi.Logger.Notification(
             "[ModernAtlas] Captured {0} atlas tiles at {1}; stitching in the background.",
             tileScreenshot.TotalTiles,
             tileScreenshot.PendingPath
+        );
+        capi.Logger.Notification(
+            "[ModernAtlas] Screenshot animation freeze passed: one wind/water/cloud frame and {0} native mechanical poses ({1} frozen angle reads) across {2} tiles.",
+            frozenMechanicalDeviceCount,
+            frozenMechanicalAngleReadCount,
+            tileScreenshot.TotalTiles
         );
     }
 
@@ -574,6 +616,8 @@ public sealed partial class ModernAtlasDialog
 
     private void RestoreScreenshotCamera()
     {
+        exactChunkRenderer?.EndScreenshotAnimationFreeze();
+        screenshotFrozenCloudOffset = null;
         if (screenshotCameraSnapshotted)
         {
             screenshotCameraSnapshotted = false;

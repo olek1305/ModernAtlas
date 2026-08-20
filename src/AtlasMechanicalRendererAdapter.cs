@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
+using HarmonyLib;
 using Vintagestory.API.Client;
 using Vintagestory.API.Config;
 using Vintagestory.GameContent.Mechanics;
@@ -19,12 +20,24 @@ internal sealed class AtlasMechanicalRendererAdapter
 {
     private const int ExteriorSafetyAllowance = 3;
 
+    [ThreadStatic]
+    private static IReadOnlyDictionary<IMechanicalPowerRenderable, float>?
+        activeScreenshotAngles;
+
+    [ThreadStatic]
+    private static int activeScreenshotAngleReadCount;
+
     private readonly ICoreClientAPI capi;
+    private readonly Harmony harmony;
     private readonly MechNetworkRenderer? renderer;
     private readonly FieldInfo? rendererGroupsField;
     private readonly FieldInfo? renderedDevicesField;
     private readonly FieldInfo? quantityBlocksField;
     private readonly MethodInfo? renderGroupMethod;
+    private readonly HashSet<MethodInfo> patchedAngleGetters = new();
+    private Dictionary<IMechanicalPowerRenderable, float>?
+        pausedAnimationAngles;
+    private Dictionary<IMechanicalPowerRenderable, float>? screenshotAngles;
     private bool disabled;
     private bool loggedAvailability;
     private bool loggedFailure;
@@ -33,10 +46,15 @@ internal sealed class AtlasMechanicalRendererAdapter
     public int LastRenderedDeviceCount { get; private set; }
     public int LastRendererGroupCount { get; private set; }
     public bool NativeCollectionsRestored { get; private set; } = true;
+    public bool ScreenshotFreezeActive => screenshotAngles != null;
+    public int ScreenshotFrozenDeviceCount => screenshotAngles?.Count ?? 0;
+    public int LastScreenshotFrozenAngleReadCount { get; private set; }
+    public int ScreenshotFrozenAngleReadCount { get; private set; }
 
-    public AtlasMechanicalRendererAdapter(ICoreClientAPI capi)
+    public AtlasMechanicalRendererAdapter(ICoreClientAPI capi, Harmony harmony)
     {
         this.capi = capi;
+        this.harmony = harmony;
         try
         {
             MechanicalPowerMod mechanicalPower = capi.ModLoader
@@ -72,6 +90,46 @@ internal sealed class AtlasMechanicalRendererAdapter
         }
     }
 
+    /// <summary>
+    /// Captures the native mechanism angles once for an entire tiled PNG job.
+    /// The world simulation remains untouched. During the atlas-only native
+    /// renderer call a narrowly scoped Harmony prefix returns these captured
+    /// values, then the override is cleared before ordinary rendering resumes.
+    /// </summary>
+    public bool TryBeginScreenshotFreeze(out string diagnostic)
+    {
+        EndScreenshotFreeze();
+        LastScreenshotFrozenAngleReadCount = 0;
+        ScreenshotFrozenAngleReadCount = 0;
+        if (!TryCaptureCurrentAngles(
+                pausedAnimationAngles,
+                out Dictionary<IMechanicalPowerRenderable, float> captured,
+                out diagnostic
+            ))
+        {
+            return false;
+        }
+
+        screenshotAngles = captured;
+        diagnostic = captured.Count == 1
+            ? "1 native mechanical pose captured"
+            : $"{captured.Count} native mechanical poses captured";
+        return true;
+    }
+
+    public void EndScreenshotFreeze()
+    {
+        screenshotAngles = null;
+        activeScreenshotAngles = null;
+        activeScreenshotAngleReadCount = 0;
+    }
+
+    public void ClearAnimationFreezes()
+    {
+        EndScreenshotFreeze();
+        pausedAnimationAngles = null;
+    }
+
     public int Render(
         float deltaTime,
         double[] atlasView,
@@ -79,13 +137,19 @@ internal sealed class AtlasMechanicalRendererAdapter
         double disclosureCenterX,
         double disclosureCenterZ,
         int disclosureRadius,
-        AtlasSurfaceHeightTexture? surfaceHeightTexture
+        AtlasSurfaceHeightTexture? surfaceHeightTexture,
+        bool animationsEnabled
     )
     {
         LastLoadedDeviceCount = 0;
         LastRenderedDeviceCount = 0;
         LastRendererGroupCount = 0;
+        LastScreenshotFrozenAngleReadCount = 0;
         NativeCollectionsRestored = true;
+        if (animationsEnabled)
+        {
+            pausedAnimationAngles = null;
+        }
         if (disabled
             || renderer == null
             || rendererGroupsField == null
@@ -94,6 +158,32 @@ internal sealed class AtlasMechanicalRendererAdapter
             || renderGroupMethod == null)
         {
             return 0;
+        }
+
+        if (!animationsEnabled && pausedAnimationAngles == null)
+        {
+            if (!TryCaptureCurrentAngles(
+                    null,
+                    out Dictionary<IMechanicalPowerRenderable, float> captured,
+                    out string freezeDiagnostic
+                ))
+            {
+                disabled = true;
+                if (!loggedFailure)
+                {
+                    loggedFailure = true;
+                    capi.Logger.Error(
+                        "[ModernAtlas] Native mechanical animations could not be frozen; their atlas pass was disabled without affecting the world: {0}",
+                        freezeDiagnostic
+                    );
+                }
+                return 0;
+            }
+            pausedAnimationAngles = captured;
+            capi.Logger.Notification(
+                "[ModernAtlas] Atlas mechanical animations paused on one captured pose: {0} devices.",
+                captured.Count
+            );
         }
 
         if (rendererGroupsField.GetValue(renderer) is not IList rendererGroups)
@@ -131,6 +221,14 @@ internal sealed class AtlasMechanicalRendererAdapter
                         continue;
                     }
 
+                    if (screenshotAngles == null
+                        && pausedAnimationAngles != null
+                        && !pausedAnimationAngles.ContainsKey(device))
+                    {
+                        EnsureAngleGetterPatched(device);
+                        pausedAnimationAngles.Add(device, device.AngleRad);
+                    }
+
                     double dx = device.Position.X + 0.5 - disclosureCenterX;
                     double dz = device.Position.Z + 0.5 - disclosureCenterZ;
                     if (dx * dx + dz * dz >= radiusSquared) continue;
@@ -143,6 +241,18 @@ internal sealed class AtlasMechanicalRendererAdapter
                             || device.Position.InternalY
                                 < surfaceHeight - ExteriorSafetyAllowance))
                     {
+                        continue;
+                    }
+
+                    IReadOnlyDictionary<IMechanicalPowerRenderable, float>?
+                        effectiveFrozenAngles = screenshotAngles
+                            ?? pausedAnimationAngles;
+                    if (screenshotAngles != null
+                        && !effectiveFrozenAngles!.ContainsKey(device))
+                    {
+                        // A mechanism loaded after tile 0 is not part of the
+                        // captured scene. Excluding it avoids introducing a
+                        // different object set halfway across the PNG.
                         continue;
                     }
 
@@ -209,13 +319,28 @@ internal sealed class AtlasMechanicalRendererAdapter
                     Array.ConvertAll(atlasView, value => (float)value)
                 );
 
-                foreach (FilteredGroupState state in filteredGroups)
+                activeScreenshotAngles = screenshotAngles
+                    ?? pausedAnimationAngles;
+                activeScreenshotAngleReadCount = 0;
+                try
                 {
-                    if (state.VisibleDeviceCount <= 0) continue;
-                    renderGroupMethod.Invoke(
-                        state.RendererGroup,
-                        new object[] { deltaTime, shader }
-                    );
+                    foreach (FilteredGroupState state in filteredGroups)
+                    {
+                        if (state.VisibleDeviceCount <= 0) continue;
+                        renderGroupMethod.Invoke(
+                            state.RendererGroup,
+                            new object[] { deltaTime, shader }
+                        );
+                    }
+                    LastScreenshotFrozenAngleReadCount =
+                        activeScreenshotAngleReadCount;
+                    ScreenshotFrozenAngleReadCount +=
+                        LastScreenshotFrozenAngleReadCount;
+                }
+                finally
+                {
+                    activeScreenshotAngles = null;
+                    activeScreenshotAngleReadCount = 0;
                 }
                 shader.Stop();
             }
@@ -309,6 +434,175 @@ internal sealed class AtlasMechanicalRendererAdapter
                 }
             }
         }
+    }
+
+    private bool TryCaptureCurrentAngles(
+        IReadOnlyDictionary<IMechanicalPowerRenderable, float>? preferredAngles,
+        out Dictionary<IMechanicalPowerRenderable, float> captured,
+        out string diagnostic
+    )
+    {
+        captured = new Dictionary<IMechanicalPowerRenderable, float>(
+            ReferenceEqualityComparer.Instance
+        );
+        if (disabled
+            || renderer == null
+            || rendererGroupsField == null
+            || renderedDevicesField == null)
+        {
+            diagnostic = "native mechanical rendering is unavailable, so no animated mechanisms are present";
+            return true;
+        }
+
+        try
+        {
+            if (rendererGroupsField.GetValue(renderer) is not IList rendererGroups)
+            {
+                throw new InvalidOperationException(
+                    "The native mechanical renderer group collection is unavailable."
+                );
+            }
+
+            foreach (object? rendererGroup in rendererGroups)
+            {
+                if (rendererGroup == null
+                    || renderedDevicesField.GetValue(rendererGroup)
+                        is not IDictionary loadedDevices)
+                {
+                    continue;
+                }
+
+                foreach (DictionaryEntry entry in loadedDevices)
+                {
+                    if (entry.Value is not IMechanicalPowerRenderable device
+                        || captured.ContainsKey(device))
+                    {
+                        continue;
+                    }
+
+                    EnsureAngleGetterPatched(device);
+                    captured.Add(
+                        device,
+                        preferredAngles != null
+                            && preferredAngles.TryGetValue(
+                                device,
+                                out float preferredAngle
+                            )
+                                ? preferredAngle
+                                : device.AngleRad
+                    );
+                }
+            }
+
+            diagnostic = captured.Count == 1
+                ? "1 native mechanical pose captured"
+                : $"{captured.Count} native mechanical poses captured";
+            return true;
+        }
+        catch (Exception exception)
+        {
+            captured.Clear();
+            diagnostic = exception.Message;
+            return false;
+        }
+    }
+
+    private void EnsureAngleGetterPatched(IMechanicalPowerRenderable device)
+    {
+        MethodInfo angleGetter = ResolveAngleGetter(device.GetType());
+        if (patchedAngleGetters.Contains(angleGetter)) return;
+
+        MethodInfo prefix = typeof(AtlasMechanicalRendererAdapter)
+            .GetMethod(
+                nameof(UseFrozenAtlasAngle),
+                BindingFlags.Static | BindingFlags.NonPublic
+            )
+            ?? throw new MissingMethodException(nameof(UseFrozenAtlasAngle));
+        harmony.Patch(
+            angleGetter,
+            prefix: new HarmonyMethod(prefix)
+        );
+        // Record the method only after Harmony accepted it. A failed patch
+        // must remain retryable instead of silently producing live angles on
+        // every later capture attempt.
+        patchedAngleGetters.Add(angleGetter);
+    }
+
+    private static MethodInfo ResolveAngleGetter(Type deviceType)
+    {
+        // GetInterfaceMap can return a virtual slot projected onto the most
+        // derived runtime type even though that type does not declare a body.
+        // Harmony correctly rejects such a MethodInfo and asks for the
+        // declared implementation (for windmills this is
+        // BEBehaviorMPRotor.get_AngleRad). Walk the hierarchy explicitly and
+        // choose the first concrete declared getter.
+        for (Type? current = deviceType; current != null; current = current.BaseType)
+        {
+            foreach (MethodInfo method in current.GetMethods(
+                BindingFlags.Instance
+                    | BindingFlags.Public
+                    | BindingFlags.NonPublic
+                    | BindingFlags.DeclaredOnly
+            ))
+            {
+                if (method.IsAbstract
+                    || method.ReturnType != typeof(float)
+                    || method.GetParameters().Length != 0
+                    || !(method.Name.Equals(
+                            "get_AngleRad",
+                            StringComparison.Ordinal
+                        )
+                        || method.Name.EndsWith(
+                            ".get_AngleRad",
+                            StringComparison.Ordinal
+                        )))
+                {
+                    continue;
+                }
+                return method;
+            }
+        }
+
+        MethodInfo interfaceGetter = typeof(IMechanicalPowerRenderable)
+            .GetProperty(nameof(IMechanicalPowerRenderable.AngleRad))
+            ?.GetMethod
+            ?? throw new MissingMethodException(
+                typeof(IMechanicalPowerRenderable).FullName,
+                "get_AngleRad"
+            );
+        InterfaceMapping mapping = deviceType.GetInterfaceMap(
+            typeof(IMechanicalPowerRenderable)
+        );
+        for (int index = 0; index < mapping.InterfaceMethods.Length; index++)
+        {
+            if (mapping.InterfaceMethods[index] == interfaceGetter)
+            {
+                MethodInfo target = mapping.TargetMethods[index];
+                if (!target.IsAbstract) return target;
+                break;
+            }
+        }
+        throw new MissingMethodException(
+            deviceType.FullName,
+            "IMechanicalPowerRenderable.get_AngleRad"
+        );
+    }
+
+    private static bool UseFrozenAtlasAngle(
+        object __instance,
+        ref float __result
+    )
+    {
+        if (__instance is not IMechanicalPowerRenderable device
+            || activeScreenshotAngles == null
+            || !activeScreenshotAngles.TryGetValue(device, out float angle))
+        {
+            return true;
+        }
+
+        __result = angle;
+        activeScreenshotAngleReadCount++;
+        return false;
     }
 
     private static FieldInfo? FindField(Type type, string name)
