@@ -439,6 +439,7 @@ public sealed class ModernAtlasSystem : ModSystem
                 false,
                 passed =>
                 {
+                    openingTransition?.UnlockOrdinaryWorldSnapshot();
                     onCompleted?.Invoke(passed);
                 }
             ))
@@ -458,8 +459,10 @@ public sealed class ModernAtlasSystem : ModSystem
 
         if (ShouldSkipScrollTransitions())
         {
+            openingTransition.LockOrdinaryWorldSnapshot();
             if (!dialog.TryOpen())
             {
+                openingTransition?.UnlockOrdinaryWorldSnapshot();
                 clientApi?.Logger.Error(
                     "[ModernAtlas] The atlas could not be opened while its opening animation was skipped."
                 );
@@ -473,6 +476,7 @@ public sealed class ModernAtlasSystem : ModSystem
             {
                 if (!passed)
                 {
+                    openingTransition?.UnlockOrdinaryWorldSnapshot();
                     clientApi?.Logger.Error(
                         "[ModernAtlas] The atlas transition did not release its input layer; atlas activation was cancelled."
                     );
@@ -480,6 +484,7 @@ public sealed class ModernAtlasSystem : ModSystem
                 }
                 if (openingTransition?.IsOpened() == true)
                 {
+                    openingTransition.CancelWithoutOpening();
                     clientApi?.Logger.Error(
                         "[ModernAtlas] Refusing to open the atlas while the completed transition dialog is still active."
                     );
@@ -487,6 +492,7 @@ public sealed class ModernAtlasSystem : ModSystem
                 }
                 dialog.PrepareForTransitionHandoff();
                 if (dialog.TryOpen()) return;
+                openingTransition?.UnlockOrdinaryWorldSnapshot();
                 clientApi?.Logger.Error(
                     "[ModernAtlas] The atlas could not be opened after its transition."
                 );
@@ -497,7 +503,11 @@ public sealed class ModernAtlasSystem : ModSystem
             clientApi?.Logger.Warning(
                 "[ModernAtlas] The opening transition was unavailable; opening the atlas directly."
             );
-            dialog.TryOpen();
+            openingTransition.LockOrdinaryWorldSnapshot();
+            if (!dialog.TryOpen())
+            {
+                openingTransition.UnlockOrdinaryWorldSnapshot();
+            }
             return;
         }
 
@@ -1268,6 +1278,7 @@ public sealed class ModernAtlasSystem : ModSystem
         }
         if (!passed || (!dialog.IsOpened() && !dialog.TryOpen()))
         {
+            openingTransition?.UnlockOrdinaryWorldSnapshot();
             clientApi.Logger.Error(
                 "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: the opening transition or atlas open check failed."
             );
@@ -1324,6 +1335,7 @@ public sealed class ModernAtlasSystem : ModSystem
                     true,
                     closePassed =>
                     {
+                        openingTransition?.UnlockOrdinaryWorldSnapshot();
                         CompleteAutomatedAtlasClose(
                             worldIdentifier,
                             sessionGeneration,

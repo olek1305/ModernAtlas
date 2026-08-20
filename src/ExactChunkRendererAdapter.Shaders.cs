@@ -66,6 +66,14 @@ internal sealed partial class ExactChunkRendererAdapter
                 bool applyCaveFilter = hideUndergroundCaves
                     && !DeveloperDisableCaveFilter;
                 shader.Uniform("atlasHideCaves", applyCaveFilter ? 1 : 0);
+                if (shader.HasUniform("atlasRenderingEnabled"))
+                {
+                    // Keep this separate from atlasFilteringEnabled. The
+                    // developer may disable visual filtering while the atlas
+                    // is still rendering, but ordinary world rendering must
+                    // bypass every atlas-only branch in the injected program.
+                    shader.Uniform("atlasRenderingEnabled", 1);
+                }
                 if (shader.HasUniform("atlasBoundaryEnabled"))
                 {
                     shader.Uniform(
@@ -314,6 +322,7 @@ internal sealed partial class ExactChunkRendererAdapter
                 && shader.HasUniform("atlasDisclosureCenterXZ")
                 && shader.HasUniform("atlasDisclosureRadius")
                 && shader.HasUniform("atlasConcealOres")
+                && shader.HasUniform("atlasRenderingEnabled")
                 && shader.HasUniform("atlasHideVegetation")
                 && shader.HasUniform("atlasVegetationMaskTex")
                 && shader.HasUniform("atlasFilteringEnabled")
@@ -365,6 +374,7 @@ internal sealed partial class ExactChunkRendererAdapter
             && shader.HasUniform("atlasDisclosureCenterXZ")
             && shader.HasUniform("atlasDisclosureRadius")
             && shader.HasUniform("atlasConcealOres")
+            && shader.HasUniform("atlasRenderingEnabled")
             && shader.HasUniform("atlasHideVegetation")
             && shader.HasUniform("atlasVegetationMaskTex")
             && shader.HasUniform("atlasFilteringEnabled")
@@ -394,6 +404,13 @@ internal sealed partial class ExactChunkRendererAdapter
             {
                 capi.Render.CurrentActiveShader?.Stop();
                 shader.Use();
+                if (shader.HasUniform("atlasRenderingEnabled"))
+                {
+                    // Disable the master gate first. Even if a later cleanup
+                    // upload is rejected during a transient client handoff,
+                    // the normal world can never execute atlas-only code.
+                    shader.Uniform("atlasRenderingEnabled", 0);
+                }
                 if (shader.HasUniform("atlasHideCaves"))
                 {
                     shader.Uniform("atlasHideCaves", 0);
@@ -456,14 +473,11 @@ internal sealed partial class ExactChunkRendererAdapter
                 }
                 if (shader.HasUniform("atlasDisableHorizonFade"))
                 {
-                    // The compiled atlas variant cannot safely re-enter the
-                    // engine's haxyFade branch after the atlas closes. On
-                    // Vintage Story 1.22.x that branch can upload a bright
-                    // red horizon silhouette to the ordinary world even
-                    // after every atlas boundary switch is zeroed. Keep the
-                    // variant's horizon branch disabled until world teardown
-                    // restores the original source; no atlas framebuffer is
-                    // active during this handoff.
+                    // Keep this override at its safe value. Vintage Story's
+                    // compiled atlas variant can produce a bright red horizon
+                    // silhouette when haxyFade is re-enabled after closing;
+                    // the master gate already bypasses every other atlas-only
+                    // branch, so do not re-enable this one in the world.
                     shader.Uniform("atlasDisableHorizonFade", 1);
                 }
                 if (shader.HasUniform("atlasDisableLod0Fade"))
@@ -496,9 +510,10 @@ internal sealed partial class ExactChunkRendererAdapter
                 StringComparison.Ordinal
             ) == true)
         {
-            // The compiled program remains safe because both atlas switches
-            // were set to zero. Restoring the source ensures a later global
-            // shader reload compiles the unmodified game shader.
+            // The compiled program is safe between atlas passes because its
+            // master atlas gate is reset to zero. Restoring the source still
+            // ensures a later engine-owned shader rebuild compiles the
+            // unmodified game shader.
             state.Shader.FragmentShader.Code = state.OriginalFragmentCode;
         }
     }
@@ -591,7 +606,8 @@ internal sealed partial class ExactChunkRendererAdapter
         );
         renamed = renamed.Insert(
             mainIndex,
-            "uniform int atlasFilteringEnabled;\n"
+            "uniform int atlasRenderingEnabled;\n"
+                + "uniform int atlasFilteringEnabled;\n"
                 + "uniform float atlasMinimumTerrainBrightness;\n"
                 + "uniform float atlasVegetationMipBias;\n"
                 + "uniform float atlasVegetationAlphaCoverage;\n"
@@ -1368,6 +1384,16 @@ bool modernAtlasReadExteriorFloor(
 
 void main()
 {
+    if (atlasRenderingEnabled <= 0)
+    {
+        // The atlas variant remains compiled between openings to avoid a
+        // global shader reload. Once the atlas is closed, this is the native
+        // world path: no atlas boundary, cave, layer, depth or vegetation
+        // filter may execute.
+        modernAtlasOriginalMain();
+        return;
+    }
+
     vec3 modernAtlasAbsoluteWorldPosition = worldPos.xyz + atlasWorldOffset;
 """ + atlasBoundaryCode + opaqueDepthCode + """
     bool modernAtlasVegetation = modernAtlasIsWindVegetation()

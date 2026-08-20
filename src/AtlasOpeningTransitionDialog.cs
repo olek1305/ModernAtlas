@@ -58,11 +58,10 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     private LoadedTexture? ordinaryWorldSnapshotStagingTexture;
     private long lastOrdinaryWorldSnapshotMilliseconds = long.MinValue;
     private bool loggedOrdinaryWorldSnapshot;
-    // Closing is initiated from the atlas GUI before the next ordinary
-    // AfterBlit callback. Keep the last complete ordinary-world image locked
-    // across that handoff; otherwise the callback can read the one transient
-    // frame in which the atlas has just closed but the normal scene has not
-    // yet presented its complete lighting/composition.
+    // The last complete ordinary-world image stays locked from the opening
+    // hotkey through the atlas GUI and the complete closing animation. An
+    // AfterBlit callback must never replace it with a partially restored
+    // world frame while either presentation is visible.
     private bool ordinaryWorldSnapshotLocked;
     private MeshRef? scrollSheetMesh;
     private MeshRef? scrollCylinderMesh;
@@ -501,6 +500,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         RestorePlayerPresentation();
         publishAnimationPhase(AtlasScrollPhase.Stop);
         if (IsOpened()) TryClose();
+        ordinaryWorldSnapshotLocked = false;
     }
 
     public override void OnGuiOpened()
@@ -538,18 +538,28 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     public override void OnGuiClosed()
     {
         RestorePlayerPresentation();
-        ordinaryWorldSnapshotLocked = false;
+        // Do not unlock here. Opening closes this dialog immediately before
+        // the atlas GUI is shown, and closing closes it immediately before the
+        // normal world returns. ModernAtlasSystem releases the snapshot only
+        // after the complete presentation handoff, so neither interval can
+        // refresh the backdrop from a transient frame.
         base.OnGuiClosed();
     }
 
     /// <summary>
-    /// Locks the last complete ordinary-world snapshot before the atlas GUI
-    /// is closed. The next AfterBlit callback must not publish a partially
-    /// restored world frame as the closing backdrop.
+    /// Keeps the last complete ordinary-world snapshot for the entire atlas
+    /// presentation lifecycle. The opening transition calls this before its
+    /// dialog is shown; the close path calls it again before closing the atlas
+    /// GUI.
     /// </summary>
-    internal void LockOrdinaryWorldSnapshotForClosing()
+    internal void LockOrdinaryWorldSnapshot()
     {
         if (!disposed) ordinaryWorldSnapshotLocked = true;
+    }
+
+    internal void LockOrdinaryWorldSnapshotForClosing()
+    {
+        LockOrdinaryWorldSnapshot();
     }
 
     internal void UnlockOrdinaryWorldSnapshot()
