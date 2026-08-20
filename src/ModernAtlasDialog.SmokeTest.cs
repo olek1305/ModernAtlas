@@ -1016,19 +1016,13 @@ public sealed partial class ModernAtlasDialog
         OpenBottomPanelImmediately(AtlasPanelSection.MapOptions);
         GuiComposer? mapComposer = mapLayerPanel;
         bool mapControlsPresent = mapQueued
-            && mapComposer?.GetDropDown("map-layer") != null
+            && mapComposer?.GetElement("map-layer") is GuiElementAtlasChoice
             && mapComposer.GetElement("map-layers") == null;
-        bool mapLayerResetToTextured = false;
-        if (mapControlsPresent)
-        {
-            // Textured terrain is the explicit neutral state; no second
-            // Layers ON/OFF switch is needed in this panel.
-            OnMapLayerChanged("moisture", true);
-            bool overlaySelected = activeMapLayer == AtlasMapLayer.Moisture;
-            OnMapLayerChanged("textured", true);
-            mapLayerResetToTextured = overlaySelected
-                && activeMapLayer == AtlasMapLayer.TexturedTerrain;
-        }
+        bool mapLayerResetToTextured = mapControlsPresent
+            && ExerciseAutomatedMapLayerChoice();
+        // Every layer change rebuilds the bottom panel, so the captured
+        // composer reference is stale after the arrow sequence.
+        mapComposer = mapLayerPanel;
         bool mapClosed = ClickAtlasControlForAutomatedTest(mapComposer, "map-layer-toggle")
             && bottomPanelSection == AtlasPanelSection.MapOptions;
         OpenBottomPanelImmediately(AtlasPanelSection.MapOptions);
@@ -1427,7 +1421,7 @@ public sealed partial class ModernAtlasDialog
             RecomposeMapLayerPanel();
         }
         mapLayerReExpanded = mapLayerReExpanded
-            && mapLayerPanel?.GetElement("map-layer") is GuiElementDropDown;
+            && mapLayerPanel?.GetElement("map-layer") is GuiElementAtlasChoice;
         bool creativeOpenedByClick = accessAvailable
             && ClickAtlasControlForAutomatedTest(
                 creativeSettingsShortcut,
@@ -1486,7 +1480,7 @@ public sealed partial class ModernAtlasDialog
             && screenshotPanel?.GetElement("shot-preview") != null
             && screenshotPanel?.GetElement("shot-take")
                 is GuiElementAtlasButton
-            && mapLayerPanel?.GetElement("map-layer") is GuiElementDropDown;
+            && mapLayerPanel?.GetElement("map-layer") is GuiElementAtlasChoice;
         int renderedEntityCount = exactChunkRenderer?.LastRenderedEntityCount ?? 0;
         bool heldItemsSuppressed = renderedEntityCount > 0
             && exactChunkRenderer?.LastSuppressedHeldItemCount == renderedEntityCount;
@@ -2439,13 +2433,21 @@ public sealed partial class ModernAtlasDialog
         return TrySaveAutomatedSmokeScreenshot($"{prefix}-{suffix}.png");
     }
 
-    private bool ClickAtlasControlForAutomatedTest(GuiComposer? composer, string key)
+    private bool ClickAtlasControlForAutomatedTest(
+        GuiComposer? composer,
+        string key,
+        double horizontalFraction = 0.5
+    )
     {
         if (composer == null) return false;
         GuiElement? element = composer.GetElement(key);
         if (element == null) return false;
 
-        int x = (int)Math.Round(element.Bounds.absX + element.Bounds.OuterWidth * 0.5);
+        // GuiElementAtlasChoice decides the direction from the pressed half, so
+        // an arrow test must aim left or right of the centre; 0.5 advances.
+        int x = (int)Math.Round(
+            element.Bounds.absX + element.Bounds.OuterWidth * horizontalFraction
+        );
         int y = (int)Math.Round(element.Bounds.absY + element.Bounds.OuterHeight * 0.5);
         MouseEvent down = new(x, y, EnumMouseButton.Left, 0);
         // Exercise the same composer-owned press/release path as a real
@@ -2456,6 +2458,227 @@ public sealed partial class ModernAtlasDialog
         MouseEvent up = new(x, y, EnumMouseButton.Left, 0);
         composer.OnMouseUp(up);
         return down.Handled && up.Handled;
+    }
+
+    /// <summary>
+    /// Drives the MAP OPTIONS layer selector through its arrows. The drop-down
+    /// it replaced opened its list below the bottom panel, so Moisture,
+    /// Temperature and Ore density were covered and unclickable. This exercise
+    /// proves every allowed layer is reachable with a plain click, forwards,
+    /// backwards and across the wrap, and that the panel survives the rebuild
+    /// each change requests.
+    /// </summary>
+    private bool ExerciseAutomatedMapLayerChoice()
+    {
+        List<AtlasMapLayer> expected = new()
+        {
+            AtlasMapLayer.TexturedTerrain,
+            AtlasMapLayer.SoilFertility,
+            AtlasMapLayer.Moisture,
+            AtlasMapLayer.Temperature
+        };
+        if (UnitInspectionEnabled) expected.Add(AtlasMapLayer.OreDensity);
+
+        if (activeMapLayer != AtlasMapLayer.TexturedTerrain)
+        {
+            SetMapLayer(AtlasMapLayer.TexturedTerrain);
+        }
+        RefreshAutomatedMapLayerPanel();
+        if (mapLayerPanel?.GetAtlasChoice("map-layer") == null)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated map-layer selector test found no arrow selector."
+            );
+            return false;
+        }
+
+        for (int step = 1; step < expected.Count; step++)
+        {
+            if (!AdvanceAutomatedMapLayerChoice(true, expected[step])) return false;
+        }
+        // One more forward click has to wrap onto the neutral layer, and one
+        // backward click from there has to reach the last allowed layer. With
+        // Ore density filtered out of the list, that wrap can never select it.
+        if (!AdvanceAutomatedMapLayerChoice(true, AtlasMapLayer.TexturedTerrain))
+        {
+            return false;
+        }
+        if (!AdvanceAutomatedMapLayerChoice(false, expected[expected.Count - 1]))
+        {
+            return false;
+        }
+        if (!AdvanceAutomatedMapLayerChoice(true, AtlasMapLayer.TexturedTerrain))
+        {
+            return false;
+        }
+
+        capi.Logger.Notification(
+            "[ModernAtlas] Automated map-layer selector test reached all {0} allowed layers with arrow clicks, including the wrap in both directions, and returned to Textured terrain (ore access={1}).",
+            expected.Count,
+            UnitInspectionEnabled
+        );
+        return activeMapLayer == AtlasMapLayer.TexturedTerrain;
+    }
+
+    /// <summary>
+    /// Drives the MAP OPTIONS ore filter through its arrows. Its drop-down list
+    /// opened below the bottom panel, so ores past the first visible entries
+    /// could not be picked. With several ores the exercise steps forward, back
+    /// and across both wraps; with only "All ores" available it proves the
+    /// single option stays selected without reporting a change.
+    /// </summary>
+    private bool ExerciseAutomatedOreFilterChoice()
+    {
+        OpenBottomPanelImmediately(AtlasPanelSection.MapOptions);
+        GuiElementAtlasChoice? choice = mapLayerPanel?.GetAtlasChoice("ore-filter");
+        if (choice == null)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated ore-filter test found no arrow selector in MAP OPTIONS."
+            );
+            ResetBottomPanelState();
+            return false;
+        }
+
+        GetOreFilterOptions(
+            oreFilterLabelLimit,
+            out string[] values,
+            out _,
+            out _
+        );
+        bool passed;
+        if (values.Length <= 1)
+        {
+            passed = AdvanceAutomatedOreFilterChoice(true, AllOresFilterValue)
+                && selectedOreCode == null;
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated ore-filter test confirmed the single \"All ores\" option stays selected without a false change (stable={0}).",
+                passed
+            );
+        }
+        else
+        {
+            // Visit every ore in list order, then prove the forward wrap onto
+            // All ores, the backward wrap onto the last ore and the return.
+            passed = true;
+            for (int index = 1; index < values.Length && passed; index++)
+            {
+                passed = AdvanceAutomatedOreFilterChoice(true, values[index]);
+            }
+            passed = passed
+                && AdvanceAutomatedOreFilterChoice(true, AllOresFilterValue)
+                && AdvanceAutomatedOreFilterChoice(false, values[values.Length - 1])
+                && AdvanceAutomatedOreFilterChoice(true, AllOresFilterValue)
+                // Leave a filtered ore selected for the following ore-map phase.
+                && AdvanceAutomatedOreFilterChoice(true, values[1]);
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated ore-filter test clicked through every one of the {0} options ({1} ores), both wraps and the return, then left the filter on {2} (passed={3}).",
+                values.Length,
+                values.Length - 1,
+                selectedOreCode ?? "<all ores>",
+                passed
+            );
+        }
+
+        ResetBottomPanelState();
+        return passed;
+    }
+
+    private bool AdvanceAutomatedOreFilterChoice(bool forward, string expectedValue)
+    {
+        if (!ClickAtlasControlForAutomatedTest(
+                mapLayerPanel,
+                "ore-filter",
+                forward ? 0.75 : 0.25
+            ))
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated ore-filter arrow click was not handled by the selector."
+            );
+            return false;
+        }
+
+        GuiElementAtlasChoice? choice = mapLayerPanel?.GetAtlasChoice("ore-filter");
+        string? expectedCode = string.Equals(
+            expectedValue,
+            AllOresFilterValue,
+            StringComparison.Ordinal
+        ) ? null : expectedValue;
+        if (choice?.SelectedValue == expectedValue
+            && string.Equals(selectedOreCode, expectedCode, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        capi.Logger.Error(
+            "[ModernAtlas] Automated ore-filter arrow click ({0}) selected {1} with filter {2}; expected {3}.",
+            forward ? "next" : "previous",
+            choice?.SelectedValue ?? "<none>",
+            selectedOreCode ?? "<all ores>",
+            expectedValue
+        );
+        return false;
+    }
+
+    private void RefreshAutomatedMapLayerPanel()
+    {
+        if (!pendingMapLayerPanelRecompose) return;
+        // Switching to or from Ore density rebuilds the panel to add or remove
+        // the ore filter. The dialog does this between frames; the test has to
+        // do it explicitly before it inspects the new element tree.
+        pendingMapLayerPanelRecompose = false;
+        RecomposeMapLayerPanel();
+    }
+
+    private bool AdvanceAutomatedMapLayerChoice(
+        bool forward,
+        AtlasMapLayer expectedLayer
+    )
+    {
+        if (!ClickAtlasControlForAutomatedTest(
+                mapLayerPanel,
+                "map-layer",
+                forward ? 0.75 : 0.25
+            ))
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated map-layer arrow click was not handled by the selector."
+            );
+            return false;
+        }
+        RefreshAutomatedMapLayerPanel();
+
+        GuiElementAtlasChoice? choice = mapLayerPanel?.GetAtlasChoice("map-layer");
+        string expectedValue = AtlasMapLayerInfo.Values[(int)expectedLayer];
+        // The legend follows the layer immediately. The layer status is filled
+        // by the budgeted texture build, so it is not required in this frame;
+        // the later data-layer exercise waits for that state.
+        bool legendPresent = mapLayerPanel?.GetDynamicText("layer-legend") != null
+            && mapLayerPanel?.GetDynamicText("layer-status") != null
+            && activeMapLayer.DetailedLegend().Length > 0;
+        // Switching to or from Ore density has to rebuild the panel so the ore
+        // filter row appears with the layer and disappears with it.
+        bool oreFilterRowCorrect =
+            (mapLayerPanel?.GetElement("ore-filter") is GuiElementAtlasChoice)
+                == (expectedLayer == AtlasMapLayer.OreDensity);
+        if (activeMapLayer == expectedLayer
+            && choice?.SelectedValue == expectedValue
+            && legendPresent
+            && oreFilterRowCorrect)
+        {
+            return true;
+        }
+
+        capi.Logger.Error(
+            "[ModernAtlas] Automated map-layer arrow click ({0}) selected {1}/{2} instead of {3}; legend elements present={4}, ore filter row correct={5}.",
+            forward ? "next" : "previous",
+            activeMapLayer,
+            choice?.SelectedValue ?? "<none>",
+            expectedValue,
+            legendPresent,
+            oreFilterRowCorrect
+        );
+        return false;
     }
 
     private bool DragAtlasSliderBeyondBoundsForAutomatedTest(
@@ -2841,6 +3064,13 @@ public sealed partial class ModernAtlasDialog
         // comparison frame. This keeps the screenshot sequence deterministic
         // while the real UI still uses the short render-time slide animation.
         if (bottomPanelAnimationActive)
+        {
+            return;
+        }
+        // A layer change updates the selector label immediately but rebuilds
+        // the panel (adding or removing the ore filter row) on the next frame.
+        // Waiting for that rebuild keeps every stored UI frame representative.
+        if (pendingMapLayerPanelRecompose)
         {
             return;
         }
@@ -3673,14 +3903,18 @@ public sealed partial class ModernAtlasDialog
         {
             if (pendingAutomatedMapLayerScreenshotSuffix != null) return;
 
-            if (mapLayerTexture.DiscoveredOreCodes.Count > 0)
+            if (mapLayerTexture.DiscoveredOreCodes.Count > 0 || mapLayerTexture.Ready)
             {
-                selectedOreCode = mapLayerTexture.DiscoveredOreCodes[0];
+                if (!ExerciseAutomatedOreFilterChoice())
+                {
+                    automatedSmokeTestMapLayerPhase = -1;
+                    return;
+                }
                 PrepareMapLayer();
                 automatedSmokeTestMapLayerPhase = 3;
                 capi.Logger.Notification(
-                    "[ModernAtlas] Automated smoke test selected the loaded ore filter {0}.",
-                    selectedOreCode
+                    "[ModernAtlas] Automated smoke test selected the loaded ore filter {0} through the arrow selector.",
+                    selectedOreCode ?? "<all ores>"
                 );
                 return;
             }

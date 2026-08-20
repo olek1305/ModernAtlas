@@ -307,8 +307,19 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private int oreHoverCellZ = int.MinValue;
     private long lastOreHoverUpdateMilliseconds;
     private int synchronizedOreCodeRevision = -1;
-    private bool synchronizingMapLayerDropdown;
-    private bool synchronizingOreFilterDropdown;
+    // Field initializers of this partial class stay in the main file so their
+    // relative order cannot depend on compilation order (AGENTS.md).
+    private static readonly AtlasMapLayer[] MapLayerChoiceOrder =
+    {
+        AtlasMapLayer.TexturedTerrain,
+        AtlasMapLayer.SoilFertility,
+        AtlasMapLayer.Moisture,
+        AtlasMapLayer.Temperature,
+        AtlasMapLayer.OreDensity
+    };
+    private bool synchronizingMapLayerChoice;
+    private bool synchronizingOreFilterChoice;
+    private int oreFilterLabelLimit = 40;
     private bool synchronizingPerformanceControls;
     private int composedFrameWidth;
     private int composedFrameHeight;
@@ -944,6 +955,9 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         {
             AdvanceCamera(atlasRealDeltaTime);
         }
+        // Enforce access before the layer task advances: a revoked Ore density
+        // must not run even one more preparation step.
+        EnforceMapLayerAccess();
         mapLayerTexture.Advance();
         SynchronizeOreFilterOptions();
         bool pointerOverMapPanel = searchPanelBounds?.PointInside(

@@ -37,7 +37,7 @@ public sealed partial class ModernAtlasDialog
         SyncSettingsControls();
         SyncPerformanceControls();
         SyncCreativeSettingsControls();
-        SyncMapLayerDropdown();
+        SyncMapLayerChoice();
         SyncScreenshotSettingsControls();
         return;
 
@@ -87,7 +87,7 @@ public sealed partial class ModernAtlasDialog
         SyncSettingsControls();
         SyncPerformanceControls();
         SyncCreativeSettingsControls();
-        SyncMapLayerDropdown();
+        SyncMapLayerChoice();
     }
 #endif
     }
@@ -134,7 +134,7 @@ public sealed partial class ModernAtlasDialog
                 true
             );
         }
-        SyncMapLayerDropdown();
+        SyncMapLayerChoice();
     }
 #endif
     }
@@ -551,7 +551,7 @@ public sealed partial class ModernAtlasDialog
         SyncSettingsControls();
         SyncPerformanceControls();
         SyncCreativeSettingsControls();
-        SyncMapLayerDropdown();
+        SyncMapLayerChoice();
         SyncScreenshotSettingsControls();
         SyncToolbarControls();
     }
@@ -1172,16 +1172,33 @@ public sealed partial class ModernAtlasDialog
                 ElementBounds.Fixed(16, 43, 58, 20)
             );
         }
+        // The panel is anchored to the bottom edge, so a drop-down list opened
+        // here fell outside the card and left Moisture, Temperature and Ore
+        // density unreachable. The arrow selector keeps every option inside the
+        // control's own bounds.
+        GetMapLayerChoiceOptions(
+            selectorWidth < 220,
+            out string[] layerValues,
+            out string[] layerNames,
+            out int layerIndex
+        );
         composer
-            .AddDropDown(AtlasMapLayerInfo.Values, AtlasMapLayerInfo.Names, (int)activeMapLayer, OnMapLayerChanged, ElementBounds.Fixed(selectorX, selectorY, selectorWidth, 34), "map-layer")
+            .AddAtlasChoice(layerValues, layerNames, layerIndex, OnMapLayerChanged, ElementBounds.Fixed(selectorX, selectorY, selectorWidth, 34), "map-layer")
             .AddDynamicText("", AtlasUiStyle.DetailFont(9), ElementBounds.Fixed(16, statusY, Math.Max(120, width - 32), 16), "layer-status")
             .AddDynamicText(activeMapLayer.DetailedLegend(), AtlasUiStyle.DetailFont(9), ElementBounds.Fixed(16, statusY + 16, Math.Max(120, width - 32), 16), "layer-legend");
         if (activeMapLayer == AtlasMapLayer.OreDensity && CreativeCheatSettingsAvailable)
         {
-            GetOreFilterOptions(out string[] values, out string[] names, out int selectedIndex);
+            double oreSelectorWidth = Math.Max(120, width - 94);
+            oreFilterLabelLimit = OreFilterLabelLimit(oreSelectorWidth);
+            GetOreFilterOptions(
+                oreFilterLabelLimit,
+                out string[] values,
+                out string[] names,
+                out int selectedIndex
+            );
             composer
                 .AddStaticText("Ore", AtlasUiStyle.DetailFont(10), ElementBounds.Fixed(16, compact ? 137 : 114, 64, 20))
-                .AddDropDown(values, names, selectedIndex, OnOreFilterChanged, ElementBounds.Fixed(78, compact ? 132 : 109, Math.Max(120, width - 94), 34), "ore-filter");
+                .AddAtlasChoice(values, names, selectedIndex, OnOreFilterChanged, ElementBounds.Fixed(78, compact ? 132 : 109, oreSelectorWidth, 34), "ore-filter");
         }
     }
 

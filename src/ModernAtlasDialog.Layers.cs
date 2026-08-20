@@ -79,6 +79,12 @@ public sealed partial class ModernAtlasDialog
             height
         );
         mapLayerPanelBounds = root;
+        GetMapLayerChoiceOptions(
+            selectorWidth < 220,
+            out string[] legacyLayerValues,
+            out string[] legacyLayerNames,
+            out int legacyLayerIndex
+        );
         GuiComposer composer = capi.Gui.CreateCompo("modernatlas-map-layer", root)
             .AddStaticCustomDraw(
                 ElementBounds.Fixed(0, 0, panelWidth, height),
@@ -96,10 +102,10 @@ public sealed partial class ModernAtlasDialog
                 AtlasUiStyle.LabelFont(12),
                 ElementBounds.Fixed(58, 17, 124, 24)
             )
-            .AddDropDown(
-                AtlasMapLayerInfo.Values,
-                AtlasMapLayerInfo.Names,
-                (int)activeMapLayer,
+            .AddAtlasChoice(
+                legacyLayerValues,
+                legacyLayerNames,
+                legacyLayerIndex,
                 OnMapLayerChanged,
                 ElementBounds.Fixed(selectorX, selectorY, selectorWidth, 44),
                 "map-layer"
@@ -107,14 +113,20 @@ public sealed partial class ModernAtlasDialog
 
         if (oreControls)
         {
-            GetOreFilterOptions(out string[] values, out string[] names, out int selectedIndex);
+            oreFilterLabelLimit = OreFilterLabelLimit(selectorWidth);
+            GetOreFilterOptions(
+                oreFilterLabelLimit,
+                out string[] values,
+                out string[] names,
+                out int selectedIndex
+            );
             composer
                 .AddStaticText(
                     "ORE FILTER",
                     AtlasUiStyle.LabelFont(12),
                     ElementBounds.Fixed(18, compact ? 92 : 62, 124, 24)
                 )
-                .AddDropDown(
+                .AddAtlasChoice(
                     values,
                     names,
                     selectedIndex,
@@ -168,7 +180,14 @@ public sealed partial class ModernAtlasDialog
         }
     }
 
+    /// <summary>
+    /// Builds the ore filter options: "All ores" first, then every discovered
+    /// ore. Labels are truncated to the control's width so a long ore name
+    /// cannot run under the arrows; the asset code, the status text and the
+    /// hover card keep the full name.
+    /// </summary>
     private void GetOreFilterOptions(
+        int maximumLabelLength,
         out string[] values,
         out string[] names,
         out int selectedIndex
@@ -204,7 +223,10 @@ public sealed partial class ModernAtlasDialog
         for (int index = 0; index < options.Count; index++)
         {
             values[index + 1] = options[index].Code;
-            names[index + 1] = options[index].Name;
+            names[index + 1] = TruncateLabel(
+                options[index].Name,
+                maximumLabelLength
+            );
             if (string.Equals(options[index].Code, selectedOreCode, StringComparison.Ordinal))
             {
                 selectedIndex = index + 1;
@@ -220,35 +242,115 @@ public sealed partial class ModernAtlasDialog
             return;
         }
 
-        GuiElementDropDown? dropdown = mapLayerPanel?.GetDropDown("ore-filter");
-        if (dropdown == null) return;
-        GetOreFilterOptions(out string[] values, out string[] names, out int selectedIndex);
-        synchronizingOreFilterDropdown = true;
+        GuiElementAtlasChoice? choice = mapLayerPanel?.GetAtlasChoice("ore-filter");
+        if (choice == null) return;
+        GetOreFilterOptions(
+            oreFilterLabelLimit,
+            out string[] values,
+            out string[] names,
+            out int selectedIndex
+        );
+        synchronizingOreFilterChoice = true;
         try
         {
-            dropdown.SetList(values, names);
-            dropdown.SetSelectedIndex(selectedIndex);
+            // The list grows while ore data streams in. SetList only clamps the
+            // index to the new range; the selection is preserved because the
+            // provider keeps the chosen ore in the options and resolves its
+            // index, which the following SetSelectedIndex applies. When the
+            // code cannot be represented, that index is "All ores".
+            choice.SetList(values, names);
+            choice.SetSelectedIndex(selectedIndex);
             synchronizedOreCodeRevision = mapLayerTexture.OreCodeRevision;
         }
         finally
         {
-            synchronizingOreFilterDropdown = false;
+            synchronizingOreFilterChoice = false;
         }
     }
 
     private void OnOreFilterChanged(string value, bool selected)
     {
-        if (!selected || synchronizingOreFilterDropdown) return;
-        selectedOreCode = string.Equals(value, AllOresFilterValue, StringComparison.Ordinal)
+        if (!selected || synchronizingOreFilterChoice) return;
+        string? requested = string.Equals(value, AllOresFilterValue, StringComparison.Ordinal)
             ? null
             : value;
+        // An arrow click on a single-option list reports the same value again.
+        // Do not restart the budgeted ore build for an unchanged selection.
+        if (string.Equals(requested, selectedOreCode, StringComparison.Ordinal)) return;
+        selectedOreCode = requested;
         ClearOreHover();
         if (IsOpened()) PrepareMapLayer();
     }
 
+    /// <summary>
+    /// Builds the arrow selector's option list. Ore density is present only
+    /// with spoiler access, so a plain arrow click can never wrap onto a layer
+    /// that <see cref="OnMapLayerChanged"/> would have to reject with an
+    /// in-game error. Narrow controls use short labels because the centered
+    /// name would otherwise overlap the arrow zones; the full display names
+    /// and every legend stay unchanged outside this control.
+    /// </summary>
+    private void GetMapLayerChoiceOptions(
+        bool shortNames,
+        out string[] values,
+        out string[] names,
+        out int selectedIndex
+    )
+    {
+        var allowed = new List<AtlasMapLayer>();
+        foreach (AtlasMapLayer layer in MapLayerChoiceOrder)
+        {
+            if (layer.RequiresSpoilerAccess() && !UnitInspectionEnabled) continue;
+            allowed.Add(layer);
+        }
+
+        values = new string[allowed.Count];
+        names = new string[allowed.Count];
+        selectedIndex = 0;
+        for (int index = 0; index < allowed.Count; index++)
+        {
+            values[index] = AtlasMapLayerInfo.Values[(int)allowed[index]];
+            names[index] = MapLayerChoiceLabel(allowed[index], shortNames);
+            if (allowed[index] == activeMapLayer) selectedIndex = index;
+        }
+    }
+
+    /// <summary>
+    /// Label budget for an arrow selector: the centered name may use the space
+    /// between the two arrow zones, which cover the outer 18 percent each.
+    /// </summary>
+    private static int OreFilterLabelLimit(double selectorWidth) =>
+        (int)Math.Clamp(selectorWidth * 0.64 / 6.5, 8, 40);
+
+    private static string MapLayerChoiceLabel(AtlasMapLayer layer, bool shortNames)
+    {
+        if (!shortNames) return layer.DisplayName();
+        return layer switch
+        {
+            AtlasMapLayer.TexturedTerrain => "Terrain",
+            AtlasMapLayer.SoilFertility => "Fertility",
+            _ => layer.DisplayName()
+        };
+    }
+
+    /// <summary>
+    /// Corrects a layer that lost its spoiler access without an atlas event.
+    /// Leaving Creative through a console command does not raise a cheat-mode
+    /// change, so the renderer could stay on Ore density while the selector no
+    /// longer offers it. Reset the layer first; SetMapLayer then rebuilds the
+    /// panel with the reduced option list.
+    /// </summary>
+    private void EnforceMapLayerAccess()
+    {
+        if (activeMapLayer.RequiresSpoilerAccess() && !UnitInspectionEnabled)
+        {
+            SetMapLayer(AtlasMapLayer.TexturedTerrain);
+        }
+    }
+
     private void OnMapLayerChanged(string value, bool selected)
     {
-        if (!selected || synchronizingMapLayerDropdown) return;
+        if (!selected || synchronizingMapLayerChoice) return;
 
         AtlasMapLayer layer = AtlasMapLayerInfo.FromValue(value);
         if (layer.RequiresSpoilerAccess() && !UnitInspectionEnabled)
@@ -258,7 +360,7 @@ public sealed partial class ModernAtlasDialog
                 "modernatlas-layer-access",
                 "Ore density is available only in Creative or server-authorized Cheat Mode."
             );
-            SyncMapLayerDropdown();
+            SyncMapLayerChoice();
             return;
         }
         SetMapLayer(layer);
@@ -284,24 +386,29 @@ public sealed partial class ModernAtlasDialog
             // would invalidate the current element iteration.
             pendingMapLayerPanelRecompose = true;
         }
-        SyncMapLayerDropdown();
+        SyncMapLayerChoice();
         if (IsOpened()) PrepareMapLayer();
         else mapLayerTexture.Reset();
     }
 
-    private void SyncMapLayerDropdown()
+    private void SyncMapLayerChoice()
     {
-        GuiElementDropDown? dropdown = mapLayerPanel?.GetDropDown("map-layer");
-        if (dropdown == null) return;
+        GuiElementAtlasChoice? choice = mapLayerPanel?.GetAtlasChoice("map-layer");
+        if (choice == null) return;
 
-        synchronizingMapLayerDropdown = true;
+        // Every access change routes through SetMapLayer and a panel rebuild,
+        // so the element already holds the matching option list here. Only the
+        // selected entry is synchronized, and the index is resolved through the
+        // filtered list because it is not the AtlasMapLayer enum value.
+        GetMapLayerChoiceOptions(false, out _, out _, out int selectedIndex);
+        synchronizingMapLayerChoice = true;
         try
         {
-            dropdown.SetSelectedIndex((int)activeMapLayer);
+            choice.SetSelectedIndex(selectedIndex);
         }
         finally
         {
-            synchronizingMapLayerDropdown = false;
+            synchronizingMapLayerChoice = false;
         }
     }
 
@@ -311,7 +418,7 @@ public sealed partial class ModernAtlasDialog
         {
             activeMapLayer = AtlasMapLayer.TexturedTerrain;
             mapLayerTexture.Reset();
-            SyncMapLayerDropdown();
+            SyncMapLayerChoice();
             return;
         }
         mapLayerTexture.Begin(
