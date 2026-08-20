@@ -117,6 +117,53 @@ the product scope when the atlas itself is correct.
   into the same depth buffer as terrain before fluids so blocks and the
   disclosure boundary conceal them correctly.
 
+## Boundary and final-compositor guardrails
+
+These rules come from a failed boundary rewrite that left the atlas completely
+empty while the automated exact-terrain check still reported success.
+
+- Never let the final compositor fail closed on a newly introduced GPU mask
+  before that mask has been visualized in game and its coordinate system,
+  channel layout, dimensions and non-zero coverage have been confirmed.
+- `supportedTerrainColumns`, `visibleTerrainColumns` and
+  `consideredTerrainColumns` are not proof that a surface was rendered.
+  `consideredTerrainColumns` also holds the partial vertical mesh columns the
+  boundary is meant to reject, and a non-empty CPU set never proves that the
+  GPU texture contains readable markers at the reconstructed world coordinates.
+- Never feed an already filtered visible-column set into the next frame's mask.
+  That feedback repeatedly shrinks the atlas.
+- Introduce a completed-column mask and a below-surface compositor discard as
+  separate, independently tested changes, so an empty result has exactly one
+  diagnosable cause.
+- `BoundaryResolvedLastFrame`, a successful draw call and any exact-terrain
+  counter are not proof that the resulting color framebuffer contains map
+  pixels.
+- A failed optional refinement must never disable exact rendering for the whole
+  session. Preserve the last known visible atlas output or bypass only the
+  refinement that failed.
+- Before another boundary rewrite: render the proposed mask as a temporary
+  debug overlay in a distinct color and confirm it follows the intended
+  loaded-mesh footprint; log mask origin, dimensions, marked-cell count and the
+  player/camera chunk coordinates; analyze the resolved framebuffer and require
+  a reasonable number of non-background pixels; test one boundary rule at a
+  time, completed-column coverage before any vertical surface-envelope rule;
+  capture tilted views from both opposite yaw directions, because the original
+  defect changes appearance after a 180-degree rotation; keep water, lava,
+  leaves and plants on their existing material-specific paths, so the boundary
+  may reject pixels but never replaces those materials with opaque blocks; and
+  install the result only after a real captured image from that exact package
+  shows terrain with no isolated trunks, leaves or vertical chunk walls outside
+  the accepted footprint.
+- The automated checks validate renderer activity and lifecycle, not the
+  semantic content of the final image. A green log is necessary but not
+  sufficient: inspect a captured atlas image produced by that exact package. A
+  future test should read framebuffer pixels and fail when the atlas is
+  entirely or almost entirely background.
+- `KNOWN_VISUAL_ISSUES.md` records the open baseline image defects that a green
+  log does not cover: vertical stubs at the terrain boundary and the tiled
+  screenshot's central dark band plus per-tile brightness steps. Keep it current
+  when one of them is fixed or a new image defect is confirmed.
+
 ## Camera and controls
 
 - Support zoom, a freely rotatable 360-degree yaw and a useful top-down to
@@ -273,9 +320,10 @@ the product scope when the atlas itself is correct.
 
 ## Current verified baseline
 
-- The working public version is `0.6.6`. Do not change the version number
-  unless the project owner explicitly requests it. Package-content changes may
-  continue under this version during the current test cycle.
+- The working public version is `0.6.7`, matching `modinfo.json` and
+  `Releases/modernatlas_0.6.7.zip`. Do not change the version number unless the
+  project owner explicitly requests it. Package-content changes may continue
+  under this version during the current test cycle.
 - The verified liquid implementation uses completed liquid chunk meshes and a
   dedicated stable shader. Water and lava must remain anchored to their block
   coordinates when the atlas camera pans, rotates or tilts.
@@ -412,6 +460,29 @@ the product scope when the atlas itself is correct.
   `ClosingDurationSeconds - 0.2f`, not 1.78f, because the closing transition
   lasts only 1.5 seconds.
 
+## Source layout and code rules
+
+- `ModernAtlasDialog` and `ExactChunkRendererAdapter` are split into `partial`
+  files by concern. `ModernAtlasDialog.cs` keeps the fields, constructor,
+  lifecycle, input handling and `OnRenderGUI`, with `.SmokeTest`, `.Interface`,
+  `.Screenshot`, `.ScreenshotCapture`, `.Layers`, `.Camera`, `.Settings` and
+  `.Inspection` beside it. `ExactChunkRendererAdapter.cs` keeps creation,
+  `Render` and the reflection helpers, with `.Shaders`, `.Visibility`,
+  `.Liquids` and `.Lighting` beside it. The split is a pure move: reassembling
+  the partial files reproduces the previous single-file sources exactly, and
+  the analyzer diagnostics are identical before and after.
+- Keep every field initializer in the class' main file. The relative order of
+  field initializers declared in different partial files is not guaranteed by
+  the language, so moving one into a partial can silently change initialization
+  order.
+- `ExactChunkRendererAdapter.Shaders.cs` carries the injected GLSL in raw string
+  literals whose content depends on the indentation of the closing `"""`. Never
+  let an editor reformat that file; a reindent silently changes the shader and
+  can produce an empty atlas while the log stays clean.
+- Guard optional GPU resources with `is not { TextureId: > 0 }`. The lifted
+  comparison `texture?.TextureId <= 0` evaluates to `false` for `null`, so a
+  missing texture passes a guard that was meant to reject it.
+
 ## Build and in-game test workflow
 
 - For every rendering change, build `ModernAtlas.csproj` in Release mode,
@@ -433,12 +504,16 @@ the product scope when the atlas itself is correct.
   ```sh
   env MODERNATLAS_SMOKE_TEST=1 /opt/vintagestory/Vintagestory \
     --dataPath /home/arcylisz/.config/VintagestoryData -o 'arcyliszs cave world'
+  ```
 
   The default smoke target must be an existing standard generated world, not
-  the superflat `TESTCREATIVE` fixture. The repository helper
-  `bash scripts/run-smoke-test.sh` uses `arcyliszs cave world` and accepts
-  `MODERNATLAS_SMOKE_WORLD` when a different standard test world is needed.
-  ```
+  the superflat `TESTCREATIVE` fixture. `bash scripts/run-smoke-test.sh` is the
+  canonical runner: it defaults to `arcyliszs cave world`, records the
+  pre-launch log and crash-log timestamps, requires exit code zero, checks
+  every required log marker, verifies the captured screenshots and runs the
+  ordinary-world red-border check. It accepts `MODERNATLAS_SMOKE_WORLD`,
+  `MODERNATLAS_SMOKE_DATA_PATH` and `VINTAGE_STORY_PATH` overrides, and needs
+  `rg` plus ImageMagick (`magick`) when screenshots are requested.
 
   Add `MODERNATLAS_SMOKE_SCREENSHOT=/tmp/modernatlas-smoke` to capture the
   Survival-safe surface before Cave Mode is enabled, followed by the base
@@ -446,6 +521,14 @@ the product scope when the atlas itself is correct.
   Add `MODERNATLAS_SMOKE_FIXED_SUN_HOUR=6`, `12`, `18` or `0` together with
   the screenshot variable to inspect fixed dawn, noon, sunset and moonlit
   night without persisting the temporary lighting selection.
+
+  The client also honors `MODERNATLAS_SMOKE_SCREENSHOT_MASK`,
+  `MODERNATLAS_SMOKE_SCREENSHOT_SCALE`, `MODERNATLAS_SMOKE_CAPTURE_AREA`,
+  `MODERNATLAS_SMOKE_SCREENSHOT_SEQUENCE`,
+  `MODERNATLAS_SMOKE_SCREENSHOT_INTENSITY_ZERO`,
+  `MODERNATLAS_SMOKE_SCREENSHOT_CANCEL`, `MODERNATLAS_SMOKE_DISABLE_CLOUDS`,
+  `MODERNATLAS_SMOKE_EXPECT_VIEW_DISTANCE`, `MODERNATLAS_SMOKE_YAW` and
+  `MODERNATLAS_SMOKE_PITCH`. Every one of them stays out of normal play.
 
   The `-o` argument performs the world join. `OnLevelFinalize` waits for that
   world to be ready, then `BeginAutomatedSmokeTest` and `TryOpen` open the same
@@ -469,9 +552,15 @@ the product scope when the atlas itself is correct.
   `exitToMainMenu` can invalidate or bypass game-session teardown.
 - Record the pre-launch modification time of `client-crash.log`, wait for the
   game process to exit and require exit code zero. The fresh `client-main.log`
-  must contain `AUTOMATED ATLAS CHECKS PASSED`, `World leave received`,
+  must contain `AUTOMATED SMOKE GOD MODE ENABLED`,
+  `AUTOMATED SMOKE GOD MODE RESTORED`, `AUTOMATED ATLAS CHECKS PASSED` once per
+  atlas cycle, `AUTOMATED ATLAS TWO-CYCLE CHECK PASSED`,
+  `Automated resolved-atlas alpha validation passed`,
+  `Atlas close state check passed`, `World leave received`,
   `Released world-specific atlas rendering resources` and
-  `AUTOMATED WORLD-EXIT CHECK PASSED`. It must not contain a new critical
+  `AUTOMATED WORLD-EXIT CHECK PASSED`; a screenshot run additionally requires
+  `Automated screenshot filter preview passed`.
+  `scripts/run-smoke-test.sh` enforces exactly this list. It must not contain a new critical
   error, ModernAtlas exception, shader failure, disposed-shader report or
   ModernAtlas-attributable OpenGL error, and the test must not create a newer
   crash log or core dump. Record failures from unrelated mods separately.
