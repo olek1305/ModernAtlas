@@ -38,7 +38,23 @@ public sealed partial class ModernAtlasDialog
     private void SyncVisualLabControls()
     {
         ConfigureVisualLabSliders();
+        // Current values live on the sliders; the neutral defaults are stated
+        // next to them so "neutral" is a number, not a guess.
+        visualLabModal?.GetDynamicText("visual-lab-exposure-default")?.SetNewText(
+            FormattableString.Invariant(
+                $"now {Math.Clamp(config.AtlasExposurePercent, 50, 150)}% · default {DefaultAtlasExposurePercent}%"
+            )
+        );
+        visualLabModal?.GetDynamicText("visual-lab-cave-default")?.SetNewText(
+            FormattableString.Invariant(
+                $"now {Math.Clamp(config.CaveMaskBrightnessPercent, 50, 150)}% · default {DefaultCaveMaskBrightnessPercent}%"
+            )
+        );
     }
+
+    internal const int DefaultAtlasExposurePercent = 150;
+    internal const int DefaultCaveMaskBrightnessPercent = 100;
+    internal const int DefaultMapLayerOpacityPercent = 75;
 
     private bool OnAtlasExposureChanged(int value)
     {
@@ -56,9 +72,9 @@ public sealed partial class ModernAtlasDialog
 
     private bool ResetVisualTuning()
     {
-        config.AtlasExposurePercent = 150;
-        config.MapLayerOpacityPercent = 75;
-        config.CaveMaskBrightnessPercent = 100;
+        config.AtlasExposurePercent = DefaultAtlasExposurePercent;
+        config.MapLayerOpacityPercent = DefaultMapLayerOpacityPercent;
+        config.CaveMaskBrightnessPercent = DefaultCaveMaskBrightnessPercent;
         saveConfig();
         SyncVisualLabControls();
         return true;
@@ -277,7 +293,7 @@ public sealed partial class ModernAtlasDialog
 
     private bool OnFixedSunHourChanged(int hour)
     {
-        config.FixedSunHour = Math.Clamp(hour, 0, 23);
+        config.FixedSunHour = Math.Clamp(hour, 0, 24);
         config.LiveLightingEnabled = false;
         config.PerformanceLightingEnabled = true;
         saveConfig();
@@ -346,6 +362,13 @@ public sealed partial class ModernAtlasDialog
         bool solarLightingActive = config.PerformanceLightingEnabled;
         settingsModal.GetAtlasSwitch("live-lighting")?.SetValue(
             solarLightingActive && config.LiveLightingEnabled
+        );
+        settingsModal.GetAtlasSlider("fixed-sun-hour")?.SetValues(
+            Math.Clamp(config.FixedSunHour, 0, 24),
+            0,
+            24,
+            1,
+            "h"
         );
         // When neutral flat lighting is active, allow either solar control to
         // opt back into directional lighting. Do not show a live switch as on

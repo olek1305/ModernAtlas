@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 game_path="${VINTAGE_STORY_PATH:-/opt/vintagestory}"
 data_path="${MODERNATLAS_SMOKE_DATA_PATH:-/home/arcylisz/.config/VintagestoryData}"
 smoke_world="${MODERNATLAS_SMOKE_WORLD:-arcyliszs cave world}"
@@ -13,6 +14,35 @@ fi
 crash_mtime_before=0
 if [[ -f "$crash_log" ]]; then
     crash_mtime_before="$(stat -c '%Y' "$crash_log")"
+fi
+
+# A second client on the same data path would share the world save and rotate
+# client-main.log underneath the marker checks below, which reports a passing
+# run as a failure. Refuse to start and let the operator close the game; never
+# terminate somebody else's client from here.
+running_clients_on_data_path() {
+    local pid args
+    for pid in $(pgrep -f 'Vintagestory' 2>/dev/null || true); do
+        [[ "$pid" == "$$" ]] && continue
+        args="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+        [[ -z "$args" ]] && continue
+        # Only the game binary itself, not this script, an editor or a pgrep.
+        [[ "$args" == *"/Vintagestory "* || "$args" == *"/Vintagestory" ]] || continue
+        if [[ "$args" == *"--dataPath"* ]]; then
+            [[ "$args" == *"--dataPath $data_path"* ]] || continue
+        else
+            [[ "$data_path" == "$HOME/.config/VintagestoryData" ]] || continue
+        fi
+        printf '    pid %s: %s\n' "$pid" "$args"
+    done
+}
+
+active_clients="$(running_clients_on_data_path)"
+if [[ -n "$active_clients" ]]; then
+    printf '[ModernAtlas] smoke test not started: a Vintage Story client is already running on this data path (%s).\n' "$data_path" >&2
+    printf '%s\n' "$active_clients" >&2
+    printf '[ModernAtlas] Close that client and run this script again. No process was terminated.\n' >&2
+    exit 1
 fi
 
 printf '[ModernAtlas] Starting the automated smoke test in standard world: %s\n' "$smoke_world"
@@ -68,6 +98,17 @@ if [[ -n "${MODERNATLAS_SMOKE_SCREENSHOT:-}" ]]; then
         "${screenshot_prefix}-ordinary-after-cycle-1.png"
         "${screenshot_prefix}-ordinary-after-cycle-2.png"
         "${screenshot_prefix}-resolved-atlas.png"
+        "${screenshot_prefix}-layer-moisture.png"
+        "${screenshot_prefix}-layer-ore-panel.png"
+        "${screenshot_prefix}-toolbar-scroll.png"
+        "${screenshot_prefix}-toolbar-narrow.png"
+        "${screenshot_prefix}-settings-narrow-bottom.png"
+        "${screenshot_prefix}-search-wide.png"
+        "${screenshot_prefix}-search-narrow.png"
+        "${screenshot_prefix}-unit-wide.png"
+        "${screenshot_prefix}-unit-narrow.png"
+        "${screenshot_prefix}-layer-moisture-opacity-000.png"
+        "${screenshot_prefix}-layer-moisture-opacity-100.png"
         "${screenshot_prefix}-screenshot-filter-preview.png"
         "${screenshot_prefix}-opening-immediate.png"
         "${screenshot_prefix}-opening-pocket.png"
@@ -105,50 +146,24 @@ if [[ -n "${MODERNATLAS_SMOKE_SCREENSHOT:-}" ]]; then
         printf '[ModernAtlas] ImageMagick is required for the ordinary-world red-border check.\n' >&2
         exit 1
     fi
-    count_red_border_pixels() {
-        local ordinary_screenshot="$1"
-        local width="$(magick identify -format '%w' "$ordinary_screenshot")"
-        local height="$(magick identify -format '%h' "$ordinary_screenshot")"
-        if (( width < 16 || height < 16 )); then
-            printf '[ModernAtlas] Ordinary-world screenshot is too small for the border check: %s\n' "$ordinary_screenshot" >&2
-            exit 1
-        fi
-        {
-            magick "$ordinary_screenshot" -crop "${width}x8+0+0" +repage \
-                -fx '(r > 0.55 && r > g*1.35 && r > b*1.35) ? 1 : 0' \
-                -format '%[fx:mean] %[fx:w*h]\n' info:
-            magick "$ordinary_screenshot" -crop "${width}x8+0+$((height - 8))" +repage \
-                -fx '(r > 0.55 && r > g*1.35 && r > b*1.35) ? 1 : 0' \
-                -format '%[fx:mean] %[fx:w*h]\n' info:
-            magick "$ordinary_screenshot" -crop "8x$((height - 16))+0+8" +repage \
-                -fx '(r > 0.55 && r > g*1.35 && r > b*1.35) ? 1 : 0' \
-                -format '%[fx:mean] %[fx:w*h]\n' info:
-            magick "$ordinary_screenshot" -crop "8x$((height - 16))+$((width - 8))+8" +repage \
-                -fx '(r > 0.55 && r > g*1.35 && r > b*1.35) ? 1 : 0' \
-                -format '%[fx:mean] %[fx:w*h]\n' info:
-        } | awk '{ pixels += $1 * $2 } END { printf "%.0f\n", pixels }'
-    }
-    ordinary_before="${screenshot_prefix}-ordinary-before-atlas.png"
-    ordinary_after_one="${screenshot_prefix}-ordinary-after-cycle-1.png"
-    ordinary_after_two="${screenshot_prefix}-ordinary-after-cycle-2.png"
-    baseline_red_border_pixels="$(count_red_border_pixels "$ordinary_before")"
-    allowed_red_border_pixels=$((baseline_red_border_pixels + 32))
-    for ordinary_screenshot in "$ordinary_after_one" "$ordinary_after_two"; do
-        red_border_pixels="$(count_red_border_pixels "$ordinary_screenshot")"
-        if (( red_border_pixels > allowed_red_border_pixels )); then
-            printf '[ModernAtlas] Ordinary-world red-border check failed: %s has %s red-dominant edge pixels (baseline %s, allowed %s).\n' \
-                "$ordinary_screenshot" "$red_border_pixels" "$baseline_red_border_pixels" "$allowed_red_border_pixels" >&2
-            exit 1
-        fi
-    done
-    printf '[ModernAtlas] Automated ordinary-world red-border check passed: baseline=%s, after-cycle-1=%s, after-cycle-2=%s, tolerance=32.\n' \
-        "$baseline_red_border_pixels" \
-        "$(count_red_border_pixels "$ordinary_after_one")" \
-        "$(count_red_border_pixels "$ordinary_after_two")"
+    # The defect is a continuous red frame around the ordinary world, so the
+    # check tests for that shape rather than for an amount of red: scene
+    # content legitimately changes how many red pixels touch an edge between
+    # two frames. scripts/check-red-border.sh still reports the old per-frame
+    # pixel totals as diagnostics.
+    if ! "$project_dir/scripts/check-red-border.sh" \
+        "${screenshot_prefix}-ordinary-before-atlas.png" \
+        "${screenshot_prefix}-ordinary-after-cycle-1.png" \
+        "${screenshot_prefix}-ordinary-after-cycle-2.png"
+    then
+        printf '[ModernAtlas] Ordinary-world red-border check failed.\n' >&2
+        exit 1
+    fi
+    printf '[ModernAtlas] Automated ordinary-world red-border check passed: no continuous red frame on three or more sides in any ordinary-world frame.\n'
 fi
 
 if rg -n \
-    'AUTOMATED .*FAILED|ModernAtlas.*(Critical|Exception|shader failure|disposed)|ModernAtlas.*OpenGL' \
+    'AUTOMATED .*(FAILED|ABORTED)|ModernAtlas.*(Critical|Exception|shader failure|disposed)|ModernAtlas.*OpenGL' \
     "$main_log"; then
     printf '[ModernAtlas] A ModernAtlas failure marker was found in the fresh client log.\n' >&2
     exit 1

@@ -222,8 +222,15 @@ public sealed partial class ModernAtlasDialog
             return "PNG preview unavailable: the game window is too small.";
         }
 
+        // Same preview object the capture will use, plus the world extent the
+        // pixel numbers cannot express.
+        string worldSpan = AtlasScreenshotEstimate.FormatWorldSpan(
+            zoom,
+            viewport.Width / (float)Math.Max(1, viewport.Height),
+            captureAreaPercent
+        );
         string firstLine =
-            $"PNG: {preview.OutputWidth} × {preview.OutputHeight} — {preview.OutputMegapixels:0.0} MP";
+            $"PNG: {preview.OutputWidth} × {preview.OutputHeight} — {preview.OutputMegapixels:0.0} MP  ·  {worldSpan}";
         string detailLine = preview.WasDownsampled
             ? $"Detail: {preview.EffectiveDetailFactor:0.#}× effective ({preview.RequestedDetailFactor:0.#}× requested) | Area: {captureAreaPercent}%"
             : $"Detail: {preview.RequestedDetailFactor:0.#}× | Area: {captureAreaPercent}% | Grid: {resolutionScale}×{resolutionScale}";
@@ -232,7 +239,7 @@ public sealed partial class ModernAtlasDialog
             return $"{firstLine}\n{detailLine}";
         }
 
-        return $"{firstLine}\n{detailLine}\nWARNING: requested {preview.RequestedWidth} × {preview.RequestedHeight} ({preview.RequestedMegapixels:0.0} MP) exceeds the {AtlasTiledScreenshot.MaximumStitchedPixels / 1_000_000d:0} MP safety limit; the PNG will be reduced.";
+        return $"{firstLine}\n{detailLine}\nREDUCED: the requested {preview.RequestedWidth} × {preview.RequestedHeight} ({preview.RequestedMegapixels:0.0} MP) exceeds the {AtlasTiledScreenshot.MaximumStitchedPixels / 1_000_000d:0} MP safety limit, so the PNG is downsampled to the size above.";
     }
 
     /// <summary>
@@ -732,6 +739,11 @@ public sealed partial class ModernAtlasDialog
             panelStatus = $"Saving to: {ShortenScreenshotPath(pendingPath, 72)}";
         }
         screenshotPanel?.GetDynamicText("shot-status")?.SetNewText(panelStatus);
+        // Zoom and viewport changes never touch a control, so the estimate is
+        // refreshed every frame rather than only when a selector changes.
+        screenshotPanel?.GetDynamicText("shot-preview")?.SetNewText(
+            BuildScreenshotPreviewText()
+        );
         screenshotPanel?.GetDynamicText("shot-collapsed-status")?.SetNewText(
             BuildScreenshotCollapsedStatus()
         );

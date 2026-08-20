@@ -47,6 +47,13 @@ the product scope when the atlas itself is correct.
   block and texture-atlas APIs. Do not hard-code only vanilla block IDs.
 - Render terrain, buildings, ruins, vegetation and fluids when they are made
   from blocks.
+- Vintage Story renders loaded windmill sails, axles, gears and other
+  mechanical-power devices outside the chunk meshes. Render those instances
+  through the narrowly isolated native mechanical renderer only inside the
+  atlas framebuffer. Filter its transient device lists to the player-anchored
+  disclosure radius and the exterior surface allowance, restore the native
+  lists and render state in `finally`, and never invoke the global world stage
+  or advance a mechanical network from the atlas pass.
 - Preserve the game's live material appearance: texture-atlas coordinates,
   biome tint, directional daylight and connected or multipart block geometry.
   Do not sample the normal camera's shadow map from the atlas camera; it causes
@@ -238,9 +245,66 @@ empty while the automated exact-terrain check still reported success.
   columns from already loaded chunks and recognizes registered blocks through
   `EnumBlockMaterial.Ore`; it must not request, unpack or generate a chunk.
 - `Atlas visual lab` is the supported replacement for relying on the engine's
-  `~` ambient editor while `G` owns input. Its exposure, layer opacity and
-  cave-mask brightness controls affect only the atlas framebuffer. Keep their
-  defaults neutral and their ranges bounded.
+  `~` ambient editor while `G` owns input. Its exposure and cave-mask
+  brightness controls affect only the atlas framebuffer. Keep their defaults
+  neutral and their ranges bounded. Overlay opacity belongs to the layer it
+  applies to and is exposed in `Map options` next to the layer selector.
+- GuiComposer paints static elements first and interactive ones (buttons,
+  switches, sliders, dynamic custom draws) afterwards in insertion order. Any
+  overlay that must cover controls — a panel header a scrolling body slides
+  under, an indicator next to a button — has to be an interactive element
+  added after them. A static strip is painted under every control and will
+  not cover anything.
+- Settings is one scrolling panel of five named sections — `Map & Data`,
+  `Presentation & Lighting`, `Entities`, `Safety`, `Advanced` — flowed into
+  three columns on a wide panel, two on a medium one and a single column when
+  the viewport is narrow. Content height and the scroll range are measured
+  from that layout, never from a constant, and every control must be
+  reachable by scrolling. Control keys are stable API for the smoke test; do
+  not rename them when moving a control between sections. A control that is
+  disabled says why: `Creative/Cheat only`, `Disabled by server policy` or
+  `Requires volumetric clouds`. `Performance`, `Visual lab` and
+  `Creative / Cheat` live in `Advanced`, and returning from one of them keeps
+  the Settings scroll position.
+- The toolbar reads `Settings`, `Shot`, `Setup`, `Layers`, `Search`, `Hand`,
+  `Hide`, `Exit`. `Exit` is always present and enabled. A small code-drawn dot
+  on the `Layers` button reports the active layer: neutral grey for textured
+  terrain, the layer's own mid-ramp color otherwise. It is drawn inside the
+  toolbar's existing width — the button yields the space — so the interface
+  never covers more of the map than before. Active, hover and disabled states
+  stay visually distinct, and every button keeps its tooltip.
+- Layer status lines follow one shape: `Preparing · 63% · loaded data only`
+  while sampling, `Ready · 1,842 loaded samples · 8 × 8 grid` when done,
+  `Waiting for streamed data` when nothing is loaded in range and
+  `Unavailable · textured terrain remains active` after a failure. The ore
+  layer replaces the sample count with its sources: regional maps report maps
+  and regions, loaded columns report columns and observed blocks, and a mixed
+  radius reports both groups separately — finding one OreMap must never hide
+  the columns that filled the rest. The active filter appears by readable
+  name, with the asset code as secondary detail in the caption.
+- Branches that a given test world cannot reach — regional ore potential in a
+  world whose loaded regions carry no OreMaps, and the mixed status that needs
+  both sources at once — are covered by pure functions with deterministic
+  self-checks (`AtlasRegionalOreReadings.Validate`,
+  `AtlasOreStatusText.Validate`) invoked from the smoke test. Those never
+  replace the in-game path: the smoke log must keep stating when the real
+  branch was not exercised.
+- The Creative/Cheat ore layer is presented as `Ore analysis`; its stored
+  config value and enum stay `ore`/`OreDensity`. Both its panel status and its
+  pointer card must name the source they speak for — `Regional potential` from
+  loaded regional OreMaps, or `Loaded column` from blocks actually seen in the
+  exact loaded column — and must never present one as the other. With no ore
+  filter the color is the strongest single reading in that cell, never a sum,
+  and the UI has to say so. Ore names are shown in readable form with the
+  asset code kept as secondary detail, and the filter carries an `All` entry
+  plus an `n/total` position counter.
+- `Map options` must state what the active layer means without relying on
+  color alone: a legend ramp painted from the same palette the overlay uses,
+  named low/middle/high stops, the separate "unavailable" swatch of the ore
+  layer, and a caption naming the world-generation source, the eight-block
+  grid and the loaded-data-only limit. The pointer read-out works for every
+  data layer, reads only samples the layer already holds and must name
+  world-generation climate as such so it is never read as current weather.
 
 ## View distance and multiplayer rules
 
@@ -554,7 +618,19 @@ empty while the automated exact-terrain check still reported success.
   canonical runner: it defaults to `arcyliszs cave world`, records the
   pre-launch log and crash-log timestamps, requires exit code zero, checks
   every required log marker, verifies the captured screenshots and runs the
-  ordinary-world red-border check. It accepts `MODERNATLAS_SMOKE_WORLD`,
+  ordinary-world red-border check. That check tests for the defect's shape —
+  a continuous red run along the outer 8 px of at least three sides, measured
+  against a control band 16-24 px into the image — because a red pixel count
+  cannot separate the defect from ordinary scene content such as wood or dry
+  grass touching an edge. `scripts/check-red-border.sh` holds the detector and
+  still prints the historical pixel totals as diagnostics;
+  `scripts/test-red-border-detector.sh` validates it against the committed
+  frames in `tests/fixtures/red-border/` (lossless PNG, expectation "no
+  border"), synthetic 1/2/8 px frames generated at run time, and red objects
+  touching one or two sides. Every PNG in `tests/fixtures/red-border-defect/`
+  is a required failing case, so a captured real defect frame belongs there.
+  Test data never enters the mod ZIP: `scripts/package.sh` packs only
+  `modinfo.json`, `LICENSE`, `NOTICE.md`, the built DLL and `assets/`. It accepts `MODERNATLAS_SMOKE_WORLD`,
   `MODERNATLAS_SMOKE_DATA_PATH` and `VINTAGE_STORY_PATH` overrides, and needs
   `rg` plus ImageMagick (`magick`) when screenshots are requested.
 

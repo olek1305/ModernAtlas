@@ -50,6 +50,8 @@ internal sealed partial class ExactChunkRendererAdapter
             shaderUniforms.SunsetMod = 0f;
             atlasSunDirection = overheadLight;
             atlasSunColor = neutralLight;
+            atlasSkyDaylight = 1f;
+            atlasSceneBrightness = Math.Clamp(visualExposure, 0.5f, 1.5f);
             atlasExposure = visualExposure;
             return;
         }
@@ -75,10 +77,23 @@ internal sealed partial class ExactChunkRendererAdapter
                     calendar.Dusk,
                     calendar.SunColor
                 );
-            Vec3f tintedAmbient = TintAmbientColor(
+            float nightReadability = GetNightReadabilityAmount(daylight);
+            Vec3f readableAmbient = MaxColor(
                 liveAmbientColor,
+                ScaleColor(NightLightColor, 0.72f * nightReadability)
+            );
+            Vec3f tintedAmbient = TintAmbientColor(
+                readableAmbient,
                 atmosphericColor,
                 0.52f
+            );
+            float readableSceneBrightness = Math.Max(
+                liveSceneBrightness,
+                NightSceneBrightnessFloor * nightReadability
+            );
+            float readableSkyDaylight = Math.Max(
+                daylight,
+                NightSkyDaylightFloor * nightReadability
             );
             ambientColorProperty.SetValue(
                 ambient,
@@ -86,7 +101,7 @@ internal sealed partial class ExactChunkRendererAdapter
             );
             ambientSceneBrightnessProperty.SetValue(
                 ambient,
-                Math.Clamp(liveSceneBrightness * visualExposure, 0.02f, 1.5f)
+                Math.Clamp(readableSceneBrightness * visualExposure, 0.02f, 1.5f)
             );
             shaderUniforms.LightPosition3D = lightDirection;
             // Chunk programs read lightPosition for directional face shading
@@ -95,13 +110,24 @@ internal sealed partial class ExactChunkRendererAdapter
             // sunset in the west and the seasonal north/south arc remain
             // visible instead of retaining the normal camera's stale sun.
             shaderUniforms.SunPosition3D = sunDirection;
-            skyDaylightUniformField.SetValue(shaderUniforms, daylight);
+            skyDaylightUniformField.SetValue(shaderUniforms, readableSkyDaylight);
             shaderUniforms.SunsetMod = calendar.SunsetMod;
             atlasSunDirection = lightDirection;
             atlasSunColor = atmosphericColor;
+            atlasSkyDaylight = readableSkyDaylight;
+            atlasSceneBrightness = Math.Clamp(
+                readableSceneBrightness * visualExposure,
+                0.02f,
+                1.5f
+            );
+            float readableCelestialBrightness = Math.Max(
+                daylight * Math.Max(0.2f, liveSceneBrightness),
+                NightSceneBrightnessFloor
+                    * nightReadability
+                    * Math.Max(0.70f, liveSceneBrightness)
+            );
             atlasExposure = Math.Clamp(
-                Math.Max(0.12f, daylight) * Math.Max(0.2f, liveSceneBrightness)
-                    * visualExposure,
+                readableCelestialBrightness * visualExposure,
                 0.04f,
                 1.5f
             );
@@ -109,13 +135,27 @@ internal sealed partial class ExactChunkRendererAdapter
         }
         if (liveLightingEnabled)
         {
+            float fallbackDaylight = Math.Clamp(liveSkyDaylight, 0f, 1f);
+            float nightReadability = GetNightReadabilityAmount(fallbackDaylight);
+            Vec3f readableAmbient = MaxColor(
+                liveAmbientColor,
+                ScaleColor(NightLightColor, 0.72f * nightReadability)
+            );
+            float readableSceneBrightness = Math.Max(
+                liveSceneBrightness,
+                NightSceneBrightnessFloor * nightReadability
+            );
+            float readableSkyDaylight = Math.Max(
+                fallbackDaylight,
+                NightSkyDaylightFloor * nightReadability
+            );
             ambientColorProperty.SetValue(
                 ambient,
-                ScaleColor(liveAmbientColor, visualExposure)
+                ScaleColor(readableAmbient, visualExposure)
             );
             ambientSceneBrightnessProperty.SetValue(
                 ambient,
-                Math.Clamp(liveSceneBrightness * visualExposure, 0.02f, 1.5f)
+                Math.Clamp(readableSceneBrightness * visualExposure, 0.02f, 1.5f)
             );
             shaderUniforms.LightPosition3D = liveLightPosition;
             Vec3f fallbackSunDirection = NormalizeDirection(
@@ -124,17 +164,35 @@ internal sealed partial class ExactChunkRendererAdapter
             );
             shaderUniforms.SunPosition3D = fallbackSunDirection;
             atlasSunDirection = fallbackSunDirection;
-            atlasSunColor = DayLightColor;
+            atlasSunColor = GetAtmosphericLightColor(
+                fallbackDaylight,
+                fallbackSunDirection.Y,
+                false,
+                null
+            );
+            skyDaylightUniformField.SetValue(shaderUniforms, readableSkyDaylight);
+            atlasSkyDaylight = readableSkyDaylight;
+            atlasSceneBrightness = Math.Clamp(
+                readableSceneBrightness * visualExposure,
+                0.02f,
+                1.5f
+            );
+            float readableCelestialBrightness = Math.Max(
+                fallbackDaylight * Math.Max(0.2f, liveSceneBrightness),
+                NightSceneBrightnessFloor
+                    * nightReadability
+                    * Math.Max(0.70f, liveSceneBrightness)
+            );
             atlasExposure = Math.Clamp(
-                liveSkyDaylight * Math.Max(0.2f, liveSceneBrightness)
-                    * visualExposure,
+                readableCelestialBrightness * visualExposure,
                 0.04f,
                 1.5f
             );
             return;
         }
 
-        int hour = Math.Clamp(fixedSunHour, 0, 23);
+        int selectedHour = Math.Clamp(fixedSunHour, 0, 24);
+        int hour = selectedHour == 24 ? 0 : selectedHour;
         Vec3f fixedSunDirection;
         Vec3f fixedMoonDirection;
         if (calendar != null)
@@ -197,11 +255,23 @@ internal sealed partial class ExactChunkRendererAdapter
         // so a fixed hour still has the world's real east/west and seasonal
         // north/south direction.
         shaderUniforms.SunPosition3D = fixedSunDirection;
-        skyDaylightUniformField.SetValue(shaderUniforms, fixedDaylight);
+        float fixedNightReadability = GetNightReadabilityAmount(fixedDaylight);
+        float fixedSkyDaylight = Math.Max(
+            fixedDaylight,
+            NightSkyDaylightFloor * fixedNightReadability
+        );
+        skyDaylightUniformField.SetValue(shaderUniforms, fixedSkyDaylight);
         shaderUniforms.SunsetMod = calendar?.SunsetMod ?? 0f;
         atlasSunDirection = fixedLightDirection;
         atlasSunColor = fixedLightColor;
-        float fixedBrightness = 0.20f + fixedDaylight * 0.80f;
+        atlasSkyDaylight = fixedSkyDaylight;
+        float fixedBrightness = NightSceneBrightnessFloor
+            + fixedDaylight * (1f - NightSceneBrightnessFloor);
+        atlasSceneBrightness = Math.Clamp(
+            fixedBrightness * visualExposure,
+            0.02f,
+            1.5f
+        );
         atlasExposure = Math.Clamp(
             fixedBrightness * visualExposure,
             0.04f,
@@ -213,11 +283,13 @@ internal sealed partial class ExactChunkRendererAdapter
         );
         ambientSceneBrightnessProperty.SetValue(
             ambient,
-            Math.Clamp(fixedBrightness * visualExposure, 0.02f, 1.5f)
+            atlasSceneBrightness
         );
     }
 
-    private static readonly Vec3f NightLightColor = new(0.30f, 0.42f, 0.72f);
+    private const float NightSkyDaylightFloor = 0.18f;
+    private const float NightSceneBrightnessFloor = 0.42f;
+    private static readonly Vec3f NightLightColor = new(0.52f, 0.60f, 0.76f);
     private static readonly Vec3f DayLightColor = new(1.00f, 0.97f, 0.88f);
     private static readonly Vec3f DawnLightColor = new(1.00f, 0.68f, 0.34f);
     private static readonly Vec3f DuskLightColor = new(1.00f, 0.43f, 0.18f);
@@ -248,6 +320,15 @@ internal sealed partial class ExactChunkRendererAdapter
     private static float GetHorizonAmount(float daylight, float solarAltitude) =>
         Math.Clamp(daylight, 0f, 1f)
             * (1f - SmoothStep(0.08f, 0.55f, solarAltitude));
+
+    private static float GetNightReadabilityAmount(float daylight) =>
+        1f - SmoothStep(0.08f, 0.50f, Math.Clamp(daylight, 0f, 1f));
+
+    private static Vec3f MaxColor(Vec3f first, Vec3f second) => new(
+        Math.Max(first.X, second.X),
+        Math.Max(first.Y, second.Y),
+        Math.Max(first.Z, second.Z)
+    );
 
     private static Vec3f TintAmbientColor(Vec3f ambient, Vec3f tint, float amount)
     {

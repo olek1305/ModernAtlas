@@ -37,7 +37,7 @@ public sealed partial class ModernAtlasDialog
         SyncSettingsControls();
         SyncPerformanceControls();
         SyncCreativeSettingsControls();
-        SyncMapLayerChoice();
+        SyncMapLayerControls();
         SyncScreenshotSettingsControls();
         return;
 
@@ -205,26 +205,35 @@ public sealed partial class ModernAtlasDialog
                 AtlasButtonStyle.Compact
             )
             .AddAtlasButton(
-                "SF",
+                "Shot",
                 TakeQuickScreenshot,
                 ElementBounds.Fixed(buttonX, pairY, pairWidth, rowHeight),
                 "quick-screenshot-button",
                 AtlasButtonStyle.Compact
             )
             .AddAtlasButton(
-                "SP",
+                "Setup",
                 ToggleScreenshotOptions,
                 ElementBounds.Fixed(buttonX + pairWidth + 4, pairY, pairWidth, rowHeight),
                 "screenshot-options-button",
                 AtlasButtonStyle.Compact
             )
+            // The indicator lives inside the toolbar's existing width: the
+            // Layers button gives up the space, so nothing more of the map is
+            // covered.
             .AddAtlasButton(
-                "Map",
+                "Layers",
                 ToggleMapOptions,
-                ElementBounds.Fixed(buttonX, mapY, buttonWidth, rowHeight),
+                ElementBounds.Fixed(
+                    buttonX,
+                    mapY,
+                    Math.Max(40, buttonWidth - LayerIndicatorReservedWidth),
+                    rowHeight
+                ),
                 "map-options-button",
                 AtlasButtonStyle.Compact
             )
+
             .AddAtlasButton(
                 "Search",
                 ToggleSearchPanel,
@@ -271,9 +280,120 @@ public sealed partial class ModernAtlasDialog
         SyncToolbarControls();
     }
 
+    private const double LayerIndicatorReservedWidth = 16;
+    private const double LayerIndicatorDotSize = 11;
+
+    /// <summary>
+    /// Builds the active-layer dot: neutral while textured terrain is live,
+    /// otherwise the layer's own mid-ramp color. It is a small texture drawn
+    /// over the toolbar rather than a composer element, because the toolbar's
+    /// interactive buttons are painted after the composer's static pass and
+    /// would cover it.
+    /// </summary>
+    private void EnsureToolbarLayerIndicatorTexture()
+    {
+        if (layerIndicatorTexture is { TextureId: > 0 }
+            && layerIndicatorTextureLayer == activeMapLayer)
+        {
+            return;
+        }
+
+        double scale = Math.Max(0.5, RuntimeEnv.GUIScale);
+        int size = Math.Max(8, (int)Math.Ceiling(LayerIndicatorDotSize * scale));
+        layerIndicatorTexture ??= new LoadedTexture(capi);
+        using ImageSurface surface = new(Format.Argb32, size, size);
+        using Context context = new(surface);
+        AtlasUiStyle.Clear(context);
+
+        (float red, float green, float blue) = AtlasToolbarLayerIndicator.Color(activeMapLayer);
+        bool neutral = AtlasToolbarLayerIndicator.IsNeutral(activeMapLayer);
+        double center = size * 0.5;
+        double radius = size * 0.34;
+        context.Arc(center, center + Math.Max(1, scale * 0.6), radius, 0, Math.PI * 2);
+        context.SetSourceRGBA(0.02, 0.03, 0.04, 0.38);
+        context.Fill();
+        context.Arc(center, center, radius, 0, Math.PI * 2);
+        context.SetSourceRGBA(red, green, blue, neutral ? 0.58 : 0.98);
+        context.FillPreserve();
+        context.SetSourceRGBA(1, 1, 1, neutral ? 0.34 : 0.68);
+        context.LineWidth = Math.Max(1, scale * 0.8);
+        context.Stroke();
+
+        capi.Gui.LoadOrUpdateCairoTexture(surface, true, ref layerIndicatorTexture);
+        layerIndicatorTextureLayer = activeMapLayer;
+    }
+
+    /// <summary>
+    /// Draws the dot in the space the Layers button gave up, so the toolbar
+    /// keeps its footprint.
+    /// </summary>
+    private void RenderToolbarLayerIndicator()
+    {
+        if (interfaceHidden) return;
+        if (!TryResolveToolbarLayerIndicatorPlacement(
+            out float x,
+            out float y,
+            out float size
+        ))
+        {
+            return;
+        }
+        capi.Render.Render2DTexture(
+            layerIndicatorTexture!.TextureId,
+            x,
+            y,
+            size,
+            size,
+            51,
+            ColorUtil.WhiteArgbVec
+        );
+    }
+
+    /// <summary>
+    /// Where the dot goes: centered in the strip the Layers button gave up.
+    /// Shared with the automated test, which checks that the dot exists and
+    /// stays inside that strip instead of trusting that it was drawn.
+    /// </summary>
+    private bool TryResolveToolbarLayerIndicatorPlacement(
+        out float x,
+        out float y,
+        out float size
+    )
+    {
+        x = 0;
+        y = 0;
+        size = 0;
+        GuiElementAtlasButton? layersButton = overlay?.GetAtlasButton("map-options-button");
+        if (layersButton == null) return false;
+
+        EnsureToolbarLayerIndicatorTexture();
+        if (layerIndicatorTexture is not { TextureId: > 0 }) return false;
+
+        double scale = Math.Max(0.5, RuntimeEnv.GUIScale);
+        size = layerIndicatorTexture.Width;
+        x = (float)(layersButton.Bounds.absX
+            + layersButton.Bounds.OuterWidth
+            + (LayerIndicatorReservedWidth * scale - size) * 0.5);
+        y = (float)(layersButton.Bounds.absY
+            + (layersButton.Bounds.OuterHeight - size) * 0.5);
+        return true;
+    }
+
+    /// <summary>
+    /// Invalidates the toolbar dot after the active layer changed.
+    /// </summary>
+    private void RefreshToolbarLayerIndicator()
+    {
+        if (layerIndicatorTextureLayer != activeMapLayer)
+        {
+            layerIndicatorTextureLayer = null;
+        }
+    }
+
     private void SyncToolbarControls()
     {
         if (overlay == null) return;
+        RefreshToolbarLayerIndicator();
 
         bool settingsActive = SettingsHierarchyOpen;
         overlay.GetAtlasButton("settings-button")?.SetActive(settingsActive);
@@ -298,8 +418,8 @@ public sealed partial class ModernAtlasDialog
         {
             ("settings-button", "Settings"),
             ("quick-screenshot-button", "Quick screenshot"),
-            ("screenshot-options-button", "Screenshot options"),
-            ("map-options-button", "Map options"),
+            ("screenshot-options-button", "Screenshot setup"),
+            ("map-options-button", $"Map layers · {activeMapLayer.DisplayName()}"),
             ("search-button", "Search loaded data"),
             ("instrument-button", "Handheld instrument"),
             ("hide-ui-button", "Hide atlas UI"),
@@ -333,13 +453,13 @@ public sealed partial class ModernAtlasDialog
             AtlasPanelSection.Settings => 236,
             AtlasPanelSection.ScreenshotOptions => compact ? 286 : 214,
             AtlasPanelSection.ScreenshotFilterTuning => compact ? 320 : 262,
-            AtlasPanelSection.MapOptions => 158,
-            AtlasPanelSection.Search => 124,
+            AtlasPanelSection.MapOptions => MapOptionsPanelHeightGui(compact),
+            AtlasPanelSection.Search => compact ? 168 : 148,
             AtlasPanelSection.Instrument => 118,
             AtlasPanelSection.Performance => 152,
             AtlasPanelSection.Creative => 132,
             AtlasPanelSection.VisualLab => 158,
-            AtlasPanelSection.Unit => 188,
+            AtlasPanelSection.Unit => compact ? 200 : 190,
             _ => 0
         };
         // Keep the panel inside the viewport. Content that does not fit is
@@ -474,6 +594,7 @@ public sealed partial class ModernAtlasDialog
         toolbarTooltipText = "";
         toolbarTooltipLocalY = 0;
         settingsScrollOffset = 0;
+        settingsSectionScrollOffset = 0;
     }
 
     private void SetLogicalBottomPanel(AtlasPanelSection section)
@@ -551,7 +672,10 @@ public sealed partial class ModernAtlasDialog
         SyncSettingsControls();
         SyncPerformanceControls();
         SyncCreativeSettingsControls();
-        SyncMapLayerChoice();
+        SyncMapLayerControls();
+        // The visual lab was missing here, so its sliders and the new
+        // current/default read-outs only refreshed on a reset.
+        SyncVisualLabControls();
         SyncScreenshotSettingsControls();
         SyncToolbarControls();
     }
@@ -734,93 +858,16 @@ public sealed partial class ModernAtlasDialog
         try
         {
             bottomPanel.Render(deltaTime);
+            // Drawn after the panel so it sits above its controls, and inside
+            // the same scissor so it cannot leak past the panel edge.
+            if (bottomPanelSection == AtlasPanelSection.Search) RenderSearchLegend();
+            if (bottomPanelSection == AtlasPanelSection.Unit) RenderUnitHealthBar();
         }
         finally
         {
             render.GlScissorFlag(false);
         }
     }
-
-    private void ComposeSettingsBottomPanel(
-        GuiComposer composer,
-        double width,
-        double height
-    )
-    {
-        double row = height < 180 ? 22 : 28;
-        double left = 14;
-        double top = 38;
-        double column = Math.Max(132, (width - 42) / 3);
-        double switchWidth = Math.Min(50, Math.Max(42, column * 0.22));
-        double labelWidth = Math.Max(70, column - switchWidth - 6);
-        double contentOffset = Math.Clamp(settingsScrollOffset, 0, SettingsScrollMaximum(width, height));
-        composer
-            .AddStaticText(
-                "SETTINGS",
-                AtlasUiStyle.TitleFont(15),
-                ElementBounds.Fixed(left, 9, 190, 24)
-            )
-            .AddAtlasButton(
-                "×",
-                CloseSettingsModal,
-                ElementBounds.Fixed(width - 42, 7, 32, 28),
-                "settings-close",
-                AtlasButtonStyle.Icon
-            );
-
-        AddSettingSwitch(composer, "Map layers", OnMapLayersToggled, "map-layers", left, top - contentOffset, column, row, labelWidth, switchWidth);
-        AddSettingSwitch(composer, "Search loaded data", OnSearchModeToggled, "search-mode", left, top + row - contentOffset, column, row, labelWidth, switchWidth);
-        AddSettingSwitch(composer, "Animations", OnAnimationsToggled, "animations", left, top + row * 2 - contentOffset, column, row, labelWidth, switchWidth);
-        AddSettingSwitch(composer, "Skip transitions", OnSkipOpeningAnimationToggled, "skip-opening-animation", left, top + row * 3 - contentOffset, column, row, labelWidth, switchWidth);
-        AddSettingSwitch(composer, "Live clouds", OnCloudsToggled, "clouds", left, top + row * 4 - contentOffset, column, row, labelWidth, switchWidth);
-        // The stored value stays meaningful after leaving Creative, so the row
-        // keeps its full label wherever the column is wide enough for it.
-        AddSettingSwitch(
-            composer,
-            column < 260
-                ? "Close on damage"
-                : "Close atlas when taking damage (Survival/Cheat)",
-            OnCloseAtlasOnDamageToggled,
-            "close-on-damage",
-            left,
-            top + row * 5 - contentOffset,
-            column,
-            row,
-            labelWidth,
-            switchWidth
-        );
-
-        double middle = left + column + 8;
-        AddSettingSwitch(composer, "3D scroll", OnRenderOnScrollToggled, "render-on-scroll", middle, top - contentOffset, column, row, labelWidth, switchWidth);
-        AddSettingSwitch(composer, "Scroll weather", OnScrollRealtimeWeatherToggled, "scroll-realtime-weather", middle, top + row - contentOffset, column, row, labelWidth, switchWidth);
-        AddSettingSwitch(composer, "Live sun", OnLiveLightingToggled, "live-lighting", middle, top + row * 2 - contentOffset, column, row, labelWidth, switchWidth);
-        composer
-            .AddStaticText("Fixed sun hour", AtlasUiStyle.DetailFont(10), ElementBounds.Fixed(middle, top + row * 3 + 3 - contentOffset, labelWidth, row - 4))
-            .AddAtlasSlider(OnFixedSunHourChanged, ElementBounds.Fixed(middle + labelWidth - 4, top + row * 3 - contentOffset, column - labelWidth + 4, row), "fixed-sun-hour");
-        composer
-            .AddStaticText("Advanced", AtlasUiStyle.LabelFont(10), ElementBounds.Fixed(middle, top + row * 4 - contentOffset, 90, row))
-            .AddAtlasButton("Performance", OpenPerformanceModal, ElementBounds.Fixed(middle + 72, top + row * 4 - contentOffset, Math.Max(70, column - 76), row), "performance-open", AtlasButtonStyle.Compact);
-        composer.AddAtlasButton("Visual lab", OpenVisualLab, ElementBounds.Fixed(middle, top + row * 5 - contentOffset, column, row), "visual-lab-open", AtlasButtonStyle.Compact);
-
-        double right = middle + column + 8;
-        AddSettingSwitch(composer, "Living models", OnLivingEntitiesToggled, "entities", right, top - contentOffset, column, row, labelWidth, switchWidth);
-        AddSettingSwitch(composer, "Players", OnPlayersToggled, "players", right, top + row - contentOffset, column, row, labelWidth, switchWidth);
-        AddSettingSwitch(composer, "Animals", OnAnimalsToggled, "animals", right, top + row * 2 - contentOffset, column, row, labelWidth, switchWidth);
-        AddSettingSwitch(composer, "Hostile mobs", OnMobsToggled, "mobs", right, top + row * 3 - contentOffset, column, row, labelWidth, switchWidth);
-        AddSettingSwitch(composer, "NPCs", OnNpcsToggled, "npcs", right, top + row * 4 - contentOffset, column, row, labelWidth, switchWidth);
-        if (CreativeCheatSettingsAvailable)
-        {
-            composer.AddAtlasButton("Creative / Cheat", OpenCreativeSettingsModal, ElementBounds.Fixed(right, top + row * 5 - contentOffset, column, row), "creative-settings-button", AtlasButtonStyle.Compact);
-        }
-        composer.AddDynamicText(
-            SettingsScrollMaximum(width, height) > 0 ? "Scroll panel for more controls" : "",
-            AtlasUiStyle.DetailFont(9),
-            ElementBounds.Fixed(left, height - 19, Math.Max(120, width - 60), 14),
-            "settings-scroll-status"
-        );
-    }
-
-    private double SettingsScrollMaximum(double width, double height) => height < 180 ? 74 : 0;
 
     private double ScreenshotFilterTuningScrollMaximum(
         double width,
@@ -1173,10 +1220,11 @@ public sealed partial class ModernAtlasDialog
     private void ComposeMapBottomPanel(GuiComposer composer, double width, double height)
     {
         bool compact = width < 460;
+        bool oreControls = activeMapLayer == AtlasMapLayer.OreDensity
+            && CreativeCheatSettingsAvailable;
+        double contentWidth = Math.Max(120, width - 32);
         double selectorX = compact ? 16 : 82;
-        double selectorY = compact ? 42 : 38;
         double selectorWidth = Math.Max(120, width - (compact ? 32 : 98));
-        double statusY = compact ? 82 : 78;
         composer
             .AddStaticText("MAP OPTIONS", AtlasUiStyle.TitleFont(15), ElementBounds.Fixed(14, 9, 220, 24))
             .AddAtlasButton("×", CloseMapOptions, ElementBounds.Fixed(width - 42, 7, 32, 28), "map-layer-toggle", AtlasButtonStyle.Icon);
@@ -1198,13 +1246,19 @@ public sealed partial class ModernAtlasDialog
             out string[] layerNames,
             out int layerIndex
         );
-        composer
-            .AddAtlasChoice(layerValues, layerNames, layerIndex, OnMapLayerChanged, ElementBounds.Fixed(selectorX, selectorY, selectorWidth, 34), "map-layer")
-            .AddDynamicText("", AtlasUiStyle.DetailFont(9), ElementBounds.Fixed(16, statusY, Math.Max(120, width - 32), 16), "layer-status")
-            .AddDynamicText(activeMapLayer.DetailedLegend(), AtlasUiStyle.DetailFont(9), ElementBounds.Fixed(16, statusY + 16, Math.Max(120, width - 32), 16), "layer-legend");
-        if (activeMapLayer == AtlasMapLayer.OreDensity && CreativeCheatSettingsAvailable)
+        composer.AddAtlasChoice(
+            layerValues,
+            layerNames,
+            layerIndex,
+            OnMapLayerChanged,
+            ElementBounds.Fixed(selectorX, compact ? 42 : 38, selectorWidth, 34),
+            "map-layer"
+        );
+
+        double y = compact ? 84 : 80;
+        if (oreControls)
         {
-            double oreSelectorWidth = Math.Max(120, width - 94);
+            double oreSelectorWidth = Math.Max(120, width - (compact ? 32 : 94));
             oreFilterLabelLimit = OreFilterLabelLimit(oreSelectorWidth);
             GetOreFilterOptions(
                 oreFilterLabelLimit,
@@ -1212,11 +1266,163 @@ public sealed partial class ModernAtlasDialog
                 out string[] names,
                 out int selectedIndex
             );
+            if (!compact)
+            {
+                composer.AddStaticText(
+                    "Ore",
+                    AtlasUiStyle.DetailFont(10),
+                    ElementBounds.Fixed(16, y + 5, 64, 20)
+                );
+            }
+            composer.AddAtlasChoice(
+                values,
+                names,
+                selectedIndex,
+                OnOreFilterChanged,
+                ElementBounds.Fixed(compact ? 16 : 78, y, oreSelectorWidth, 34),
+                "ore-filter"
+            );
+            y += 42;
+        }
+
+        if (activeMapLayer.HasLegendRamp())
+        {
+            // The overlay strength was configurable only through the config
+            // file. The layer it applies to is chosen here, so the slider
+            // belongs here too.
             composer
-                .AddStaticText("Ore", AtlasUiStyle.DetailFont(10), ElementBounds.Fixed(16, compact ? 137 : 114, 64, 20))
-                .AddAtlasChoice(values, names, selectedIndex, OnOreFilterChanged, ElementBounds.Fixed(78, compact ? 132 : 109, oreSelectorWidth, 34), "ore-filter");
+                .AddStaticText(
+                    "Opacity",
+                    AtlasUiStyle.DetailFont(10),
+                    ElementBounds.Fixed(16, y + 6, 62, 20)
+                )
+                .AddAtlasSlider(
+                    OnMapLayerOpacityChanged,
+                    ElementBounds.Fixed(82, y, Math.Max(90, width - 98), 30),
+                    "layer-opacity"
+                );
+            y += 38;
+
+            AtlasMapLayer legendLayer = activeMapLayer;
+            // The ore ramp changes meaning with its source, and the source is
+            // only known once data has streamed in, so the stops are dynamic.
+            (string low, string middle, string high) = MapLayerLegendStops();
+            double stopWidth = Math.Max(40, contentWidth / 3);
+            composer
+                .AddStaticCustomDraw(
+                    ElementBounds.Fixed(16, y, contentWidth, 14),
+                    (context, surface, bounds) =>
+                        DrawLayerLegendRamp(context, bounds, legendLayer)
+                )
+                .AddDynamicText(
+                    low,
+                    AtlasUiStyle.DetailFont(9),
+                    ElementBounds.Fixed(16, y + 16, stopWidth, 15),
+                    "legend-low"
+                )
+                .AddDynamicText(
+                    middle,
+                    AtlasUiStyle.DetailFont(9)
+                        .WithOrientation(EnumTextOrientation.Center),
+                    ElementBounds.Fixed(16 + stopWidth, y + 16, stopWidth, 15),
+                    "legend-middle"
+                )
+                .AddDynamicText(
+                    high,
+                    AtlasUiStyle.DetailFont(9)
+                        .WithOrientation(EnumTextOrientation.Right),
+                    ElementBounds.Fixed(16 + stopWidth * 2, y + 16, stopWidth, 15),
+                    "legend-high"
+                );
+            y += 33;
+
+            if (legendLayer == AtlasMapLayer.OreDensity)
+            {
+                composer
+                    .AddStaticCustomDraw(
+                        ElementBounds.Fixed(16, y + 2, 13, 13),
+                        DrawUnavailableLegendSwatch
+                    )
+                    .AddStaticText(
+                        "Unavailable — no loaded data for this column",
+                        AtlasUiStyle.DetailFont(9),
+                        ElementBounds.Fixed(35, y, Math.Max(90, width - 51), 16)
+                    );
+                y += 20;
+            }
+        }
+
+        composer
+            .AddDynamicText("", AtlasUiStyle.DetailFont(9), ElementBounds.Fixed(16, y, contentWidth, 16), "layer-status")
+            .AddDynamicText(MapLayerLegendCaption, AtlasUiStyle.DetailFont(9), ElementBounds.Fixed(16, y + 16, contentWidth, 16), "layer-legend");
+    }
+
+    /// <summary>
+    /// Height the Map options panel needs for the active layer. Ore adds its
+    /// filter row and the unavailable swatch; textured terrain shows neither
+    /// an opacity slider nor a legend ramp.
+    /// </summary>
+    private double MapOptionsPanelHeightGui(bool compact)
+    {
+        double height = compact ? 84 : 80;
+        if (activeMapLayer == AtlasMapLayer.OreDensity
+            && CreativeCheatSettingsAvailable)
+        {
+            height += 42;
+        }
+        if (activeMapLayer.HasLegendRamp())
+        {
+            height += 38 + 33;
+            if (activeMapLayer == AtlasMapLayer.OreDensity) height += 20;
+        }
+        return height + 44;
+    }
+
+    /// <summary>
+    /// The caption under the legend: what the layer measures and how coarse
+    /// and how limited the underlying data is.
+    /// </summary>
+    private string MapLayerLegendCaption
+    {
+        get
+        {
+            if (!activeMapLayer.HasLegendRamp()) return activeMapLayer.Description();
+
+            string grid = $"{AtlasMapLayerTexture.HorizontalSampleSize} × {AtlasMapLayerTexture.HorizontalSampleSize} block grid · loaded data only";
+            if (activeMapLayer != AtlasMapLayer.OreDensity)
+            {
+                return $"{activeMapLayer.Description()} · {grid}";
+            }
+            if (selectedOreCode != null)
+            {
+                // Readable name first, asset code as the secondary detail.
+                return $"Single ore: {searchController.GetEnglishOreName(selectedOreCode)} · {selectedOreCode} · {grid}";
+            }
+            // With no filter the cell is painted from the strongest reading
+            // found there. The wording follows the source, because a regional
+            // map carries a potential grade and a loaded column does not.
+            string meaning = mapLayerTexture.OreLayerSource switch
+            {
+                AtlasOreLayerSource.RegionalPotential =>
+                    "All ores: color shows the highest potential here, never a sum",
+                AtlasOreLayerSource.LoadedColumns =>
+                    "All ores: color shows the strongest ore seen here, never a sum",
+                AtlasOreLayerSource.Mixed =>
+                    "All ores: highest mapped potential where mapped, strongest observed ore elsewhere, never a sum",
+                _ => "All ores: color shows the strongest single reading, never a sum"
+            };
+            return $"{meaning} · {grid}";
         }
     }
+
+    /// <summary>
+    /// Legend stop labels for the active layer, resolved against the ore
+    /// layer's current data source.
+    /// </summary>
+    private (string Low, string Middle, string High) MapLayerLegendStops() =>
+        activeMapLayer == AtlasMapLayer.OreDensity
+            ? AtlasMapLayerInfo.OreLegendStops(mapLayerTexture.OreLayerSource)
+            : activeMapLayer.LegendStops();
 
     private void ComposeSearchBottomPanel(GuiComposer composer, double width, double height)
     {
@@ -1225,7 +1431,7 @@ public sealed partial class ModernAtlasDialog
             .AddAtlasButton("×", CloseSearchPanel, ElementBounds.Fixed(width - 42, 7, 32, 28), "search-close", AtlasButtonStyle.Icon)
             .AddAtlasTextInput(ElementBounds.Fixed(16, 38, Math.Max(120, width - 82), 34), OnSearchTextChanged, AtlasUiStyle.InputFont(12), "search-input")
             .AddAtlasButton("×", ClearSearch, ElementBounds.Fixed(width - 58, 38, 42, 34), "search-clear", AtlasButtonStyle.Icon)
-            .AddDynamicText("", AtlasUiStyle.DetailFont(9), ElementBounds.Fixed(16, height - 30, Math.Max(120, width - 32), 22), "search-status");
+            .AddDynamicText("", AtlasUiStyle.DetailFont(9), ElementBounds.Fixed(16, 78, Math.Max(120, width - 32), 16), "search-status");
         composer.GetTextInput("search-input")?.SetMaxLength(80);
         composer.GetTextInput("search-input")?.SetPlaceHolderText(
             $"Block, creature, player or item — {searchController.SearchLanguageSummary}"
@@ -1268,25 +1474,92 @@ public sealed partial class ModernAtlasDialog
 
     private void ComposeVisualLabBottomPanel(GuiComposer composer, double width, double height)
     {
+        double sliderWidth = Math.Max(110, width - 226);
         composer
             .AddStaticText("ATLAS VISUAL LAB", AtlasUiStyle.TitleFont(15), ElementBounds.Fixed(44, 9, 220, 24))
             .AddAtlasButton("‹", CloseVisualLab, ElementBounds.Fixed(10, 7, 32, 28), "visual-lab-back", AtlasButtonStyle.Icon)
-            .AddStaticText("Exposure", AtlasUiStyle.DetailFont(10), ElementBounds.Fixed(16, 45, 100, 20))
-            .AddAtlasSlider(OnAtlasExposureChanged, ElementBounds.Fixed(118, 38, Math.Max(120, width - 134), 32), "atlas-exposure")
-            .AddStaticText("Cave mask", AtlasUiStyle.DetailFont(10), ElementBounds.Fixed(16, 82, 100, 20))
-            .AddAtlasSlider(OnCaveMaskBrightnessChanged, ElementBounds.Fixed(118, 75, Math.Max(120, width - 134), 32), "cave-mask-brightness")
-            .AddAtlasButton("Reset tuning", ResetVisualTuning, ElementBounds.Fixed(16, height - 35, Math.Max(120, width - 32), 28), "visual-lab-reset", AtlasButtonStyle.Compact);
-        ConfigureVisualLabSliders();
+            .AddStaticText("Exposure", AtlasUiStyle.DetailFont(10), ElementBounds.Fixed(16, 39, 190, 18))
+            .AddAtlasSlider(OnAtlasExposureChanged, ElementBounds.Fixed(210, 38, sliderWidth, 32), "atlas-exposure")
+            // The old "Cave mask" label named an implementation detail; this
+            // says what the control actually does.
+            .AddStaticText("Cave occlusion brightness", AtlasUiStyle.DetailFont(10), ElementBounds.Fixed(16, 76, 190, 18))
+            .AddAtlasSlider(OnCaveMaskBrightnessChanged, ElementBounds.Fixed(210, 75, sliderWidth, 32), "cave-mask-brightness")
+            .AddDynamicText(
+                "",
+                AtlasUiStyle.DetailFont(8.5f),
+                ElementBounds.Fixed(16, 55, 190, 14),
+                "visual-lab-exposure-default"
+            )
+            .AddDynamicText(
+                "",
+                AtlasUiStyle.DetailFont(8.5f),
+                ElementBounds.Fixed(16, 92, 190, 14),
+                "visual-lab-cave-default"
+            )
+            .AddAtlasButton("Reset tuning", ResetVisualTuning, ElementBounds.Fixed(16, height - 37, Math.Max(120, width * 0.4), 28), "visual-lab-reset", AtlasButtonStyle.Compact)
+            .AddStaticText(
+                "Developer visual controls: they affect only the atlas framebuffer, never the ordinary world.",
+                AtlasUiStyle.DetailFont(9),
+                ElementBounds.Fixed(Math.Max(150, width * 0.4) + 26, height - 32, Math.Max(120, width * 0.6 - 42), 18),
+                "visual-lab-note"
+            );
     }
 
     private void ComposeUnitBottomPanel(GuiComposer composer, double width, double height)
     {
+        double labelWidth = width < 460 ? 74 : 92;
+        double rowsHeight = Math.Max(20, height - UnitRowsTop - 8);
+        // Six rows need roughly this much; when the panel is capped shorter
+        // than that, the rows continue in a second column instead of being
+        // silently cut off.
+        unitRowsSplit = rowsHeight < UnitRowCount * UnitRowHeight;
+        int firstColumnRows = unitRowsSplit ? (UnitRowCount + 1) / 2 : UnitRowCount;
+        double columnWidth = unitRowsSplit
+            ? Math.Max(150, (width - 32 - 16) * 0.5)
+            : Math.Max(120, width - 32);
+        double valueX = 16 + labelWidth + 6;
         composer
             .AddStaticText("UNIT", AtlasUiStyle.TitleFont(15), ElementBounds.Fixed(14, 9, 160, 24))
             .AddAtlasButton("×", CloseUnitInspection, ElementBounds.Fixed(width - 42, 7, 32, 28), "unit-close", AtlasButtonStyle.Icon)
-            .AddDynamicText("", AtlasUiStyle.LabelFont(12), ElementBounds.Fixed(16, 42, Math.Max(120, width - 32), 20), "unit-name")
-            .AddDynamicText("", AtlasUiStyle.DetailFont(10), ElementBounds.Fixed(16, 68, Math.Max(120, width - 32), Math.Max(28, height - 82)), "unit-details");
+            .AddDynamicText("", AtlasUiStyle.LabelFont(12), ElementBounds.Fixed(16, 36, Math.Max(120, width - 32), 20), "unit-name")
+            // The health bar itself is a texture drawn over the panel; the
+            // rows below start under the space it reserves.
+            .AddDynamicText(
+                "",
+                AtlasUiStyle.DetailFont(10),
+                ElementBounds.Fixed(16, UnitRowsTop, labelWidth, firstColumnRows * UnitRowHeight),
+                "unit-labels"
+            )
+            .AddDynamicText(
+                "",
+                AtlasUiStyle.DetailFont(10),
+                ElementBounds.Fixed(valueX, UnitRowsTop, Math.Max(60, columnWidth - labelWidth - 6), firstColumnRows * UnitRowHeight),
+                "unit-details"
+            );
+        if (!unitRowsSplit) return;
+
+        double secondX = 16 + columnWidth + 16;
+        composer
+            .AddDynamicText(
+                "",
+                AtlasUiStyle.DetailFont(10),
+                ElementBounds.Fixed(secondX, UnitRowsTop, labelWidth, firstColumnRows * UnitRowHeight),
+                "unit-labels-2"
+            )
+            .AddDynamicText(
+                "",
+                AtlasUiStyle.DetailFont(10),
+                ElementBounds.Fixed(secondX + labelWidth + 6, UnitRowsTop, Math.Max(60, columnWidth - labelWidth - 6), firstColumnRows * UnitRowHeight),
+                "unit-details-2"
+            );
     }
+
+    private const double UnitHealthBarTop = 60;
+    private const double UnitHealthBarHeight = 15;
+    private const double UnitHealthBarMaximumWidth = 320;
+    private const double UnitRowsTop = 84;
+    private const double UnitRowHeight = 17;
+    private const int UnitRowCount = 6;
 
     private void ComposeOverlay(bool viewportOnly = false)
     {
@@ -1700,7 +1973,7 @@ public sealed partial class ModernAtlasDialog
                 "live-lighting"
             )
             .AddStaticText(
-                "Sun hour (fixed)",
+                "Fixed hour (0–24)",
                 AtlasUiStyle.DetailFont(12),
                 ElementBounds.Fixed(28, 709, 180, 24)
             )
@@ -1718,9 +1991,9 @@ public sealed partial class ModernAtlasDialog
             )
             .Compose();
         settingsModal.GetAtlasSlider("fixed-sun-hour")?.SetValues(
-            Math.Clamp(config.FixedSunHour, 0, 23),
+            Math.Clamp(config.FixedSunHour, 0, 24),
             0,
-            23,
+            24,
             1,
             "h"
         );
@@ -1916,6 +2189,10 @@ public sealed partial class ModernAtlasDialog
 
     private bool OpenSettingsModal()
     {
+        // Opening Settings from the toolbar starts at the top; only a return
+        // from a sub-panel restores the remembered position.
+        settingsScrollOffset = 0;
+        settingsSectionScrollOffset = 0;
         RequestBottomPanel(AtlasPanelSection.Settings);
         return true;
     }
@@ -1935,36 +2212,48 @@ public sealed partial class ModernAtlasDialog
 
     private bool OpenCreativeSettingsModal()
     {
+        // Sub-panels share one scroll offset with Settings. Remember where the
+        // reader was so returning does not throw them back to the top.
+        settingsSectionScrollOffset = settingsScrollOffset;
         RequestBottomPanel(AtlasPanelSection.Creative);
         return true;
     }
 
     private bool CloseCreativeSettingsModal()
     {
+        settingsScrollOffset = settingsSectionScrollOffset;
         RequestBottomPanel(AtlasPanelSection.Settings);
         return true;
     }
 
     private bool OpenPerformanceModal()
     {
+        // Sub-panels share one scroll offset with Settings. Remember where the
+        // reader was so returning does not throw them back to the top.
+        settingsSectionScrollOffset = settingsScrollOffset;
         RequestBottomPanel(AtlasPanelSection.Performance);
         return true;
     }
 
     private bool ClosePerformanceModal()
     {
+        settingsScrollOffset = settingsSectionScrollOffset;
         RequestBottomPanel(AtlasPanelSection.Settings);
         return true;
     }
 
     private bool OpenVisualLab()
     {
+        // Sub-panels share one scroll offset with Settings. Remember where the
+        // reader was so returning does not throw them back to the top.
+        settingsSectionScrollOffset = settingsScrollOffset;
         RequestBottomPanel(AtlasPanelSection.VisualLab);
         return true;
     }
 
     private bool CloseVisualLab()
     {
+        settingsScrollOffset = settingsSectionScrollOffset;
         RequestBottomPanel(AtlasPanelSection.Settings);
         return true;
     }

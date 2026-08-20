@@ -106,6 +106,14 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private long lastInterfaceRestoreMilliseconds = -10000;
     private LoadedTexture? searchMarkerTexture;
     private LoadedTexture? oreHoverTexture;
+    private LoadedTexture? layerIndicatorTexture;
+    private LoadedTexture? searchLegendTexture;
+    private LoadedTexture? unitHealthBarTexture;
+    private string? unitHealthBarSignature;
+    private AtlasUnitHealthReading unitHealthReading;
+    private bool unitRowsSplit;
+    private string? searchLegendSignature;
+    private AtlasMapLayer? layerIndicatorTextureLayer;
     private LoadedTexture? atlasFrameCacheTexture;
     private LoadedTexture? atlasFrameStagingTexture;
     private LoadedTexture? primaryAtlasSourceTexture;
@@ -209,6 +217,14 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private double automatedLanternBlockY;
     private double automatedLanternBlockZ;
     private int automatedSmokeTestMapLayerPhase;
+    private bool automatedSmokeTestMapLayerAbortLogged;
+    private int automatedSmokeTestRestoreMapLayerOpacityPercent = 75;
+    private long automatedSmokeTestOpacityChangeMilliseconds;
+    private float automatedSmokeTestGuiScaleBefore;
+    private bool automatedSmokeTestRevokeSpoilerAccess;
+    private bool automatedSmokeTestHoldLayerHover;
+    private int automatedSmokeTestOreCellX;
+    private int automatedSmokeTestOreCellZ;
     private float automatedSmokeTestOreLayerZoom;
     private bool automatedSmokeTestMapLayerPassed;
     private string? pendingAutomatedMapLayerScreenshotSuffix;
@@ -301,6 +317,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private AtlasMapLayer activeMapLayer = AtlasMapLayer.TexturedTerrain;
     private string? selectedOreCode;
     private AtlasOreInspection? oreHoverInspection;
+    private AtlasClimateInspection? climateHoverInspection;
     private ElementBounds? searchPanelBounds;
     private ElementBounds? mapLayerPanelBounds;
     private ElementBounds? screenshotPanelBounds;
@@ -459,6 +476,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private string toolbarTooltipText = "";
     private double toolbarTooltipLocalY;
     private double settingsScrollOffset;
+    private double settingsSectionScrollOffset;
 
     private readonly PresentationChangeCoordinator presentationChangeCoordinator = new();
 
@@ -586,6 +604,10 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     {
         get
         {
+            // Automated coverage for a revoked spoiler grant: the smoke test
+            // takes the access away for a few statements and checks that the
+            // ore layer, its selector entry and its read-out all withdraw.
+            if (automatedSmokeTestRevokeSpoilerAccess) return false;
             if (cheatModeEnabled
                 && (capi.IsSinglePlayer || serverPolicy.CheatModeAllowed))
             {
@@ -1002,7 +1024,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
             ) == true;
         if (!screenshotPreviewOpen && !screenshotPreviewOpening)
         {
-            UpdateOreHover(capi.Input.MouseX, capi.Input.MouseY, pointerOverMapPanel);
+            UpdateLayerHover(capi.Input.MouseX, capi.Input.MouseY, pointerOverMapPanel);
         }
         if (!loggedFirstRender)
         {
@@ -1211,16 +1233,13 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         }
         if (!screenshotPreviewOpen)
         {
-            RenderOreHoverCard();
+            RenderLayerHoverCard();
         }
         overlay?.GetDynamicText("status").SetNewText(
             $"View distance: {GameViewDistance}"
         );
-        searchPanel?.GetDynamicText("search-status").SetNewText(searchController.StatusText);
-        mapLayerPanel?.GetDynamicText("layer-status")?.SetNewText(mapLayerTexture.StatusText);
-        mapLayerPanel?.GetDynamicText("layer-legend")?.SetNewText(
-            activeMapLayer.DetailedLegend()
-        );
+        searchPanel?.GetDynamicText("search-status").SetNewText(SearchStatusText);
+        if (mapLayerPanel != null) UpdateMapLayerPanelText();
         // The handheld instrument belongs to the atlas scene, but the atlas
         // controls must remain on top of it. Render the instrument before the
         // GUI composers so an open bottom panel can never be obscured by the
@@ -1246,6 +1265,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         {
             UpdateToolbarTooltip(capi.Input.MouseX, capi.Input.MouseY);
             overlay?.Render(deltaTime);
+            RenderToolbarLayerIndicator();
             RenderActiveBottomPanel(deltaTime);
             screenshotProgressModal?.Render(deltaTime);
         }
@@ -1479,7 +1499,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         }
         UpdateToolbarTooltip(args.X, args.Y);
         bool overPanel = PanelCoversPoint(args.X, args.Y);
-        UpdateOreHover(args.X, args.Y, args.Handled || overPanel);
+        UpdateLayerHover(args.X, args.Y, args.Handled || overPanel);
         // The atlas covers the entire screen. Do not leak hover interaction to
         // hotbar slots, creative inventory elements or dialogs underneath it.
         args.Handled = true;
@@ -2231,6 +2251,15 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         searchMarkerTexture = null;
         oreHoverTexture?.Dispose();
         oreHoverTexture = null;
+        layerIndicatorTexture?.Dispose();
+        layerIndicatorTexture = null;
+        searchLegendTexture?.Dispose();
+        searchLegendTexture = null;
+        searchLegendSignature = null;
+        unitHealthBarTexture?.Dispose();
+        unitHealthBarTexture = null;
+        unitHealthBarSignature = null;
+        layerIndicatorTextureLayer = null;
         DisposeDamageWarningTextures();
         compassRenderer.Dispose();
         ReleaseAtlasFrameCache();

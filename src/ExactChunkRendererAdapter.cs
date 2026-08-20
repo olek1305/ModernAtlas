@@ -163,6 +163,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
     private readonly object afterOitRenderer;
     private readonly VolumetricCloudRendererAdapter? cloudRenderer;
     private readonly AtlasEntityModelRendererAdapter entityModelRenderer;
+    private readonly AtlasMechanicalRendererAdapter mechanicalRenderer;
     private readonly AtlasOreTextureReplacement oreTextureReplacement;
     private readonly AtlasVegetationTextureMask vegetationTextureMask;
     private readonly AtlasBoundaryResolver boundaryResolver;
@@ -202,6 +203,8 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
     private int rejectedLiquidLocationCount;
     private Vec3f atlasSunDirection = new(-0.34f, 0.86f, -0.38f);
     private Vec3f atlasSunColor = new(1f, 0.96f, 0.86f);
+    private float atlasSkyDaylight = 1f;
+    private float atlasSceneBrightness = 1f;
     private float atlasExposure = 1f;
     private float atlasTextureMipBias;
     private float atlasVegetationMipBias;
@@ -231,6 +234,9 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
     private bool lastAtlasCameraReady;
 
     public int LastRenderedEntityCount { get; private set; }
+    public int LastRenderedMechanicalDeviceCount { get; private set; }
+    public int LastLoadedMechanicalDeviceCount =>
+        mechanicalRenderer.LastLoadedDeviceCount;
     public int LastSuppressedHeldItemCount =>
         entityModelRenderer.LastSuppressedHeldItemCount;
     public IReadOnlyList<AtlasRenderedEntity> LastRenderedEntities =>
@@ -245,6 +251,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
 
     public bool AtlasStateIsClear =>
         !atlasUniformsActive
+        && mechanicalRenderer.NativeCollectionsRestored
         && !atlasVisibilityOverride
         && !atlasTerrainCollectionOverride
         && !atlasTransparentVisibilityOverride
@@ -463,6 +470,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
         this.afterOitRenderer = afterOitRenderer;
         this.cloudRenderer = cloudRenderer;
         entityModelRenderer = new AtlasEntityModelRendererAdapter(capi);
+        mechanicalRenderer = new AtlasMechanicalRendererAdapter(capi);
         oreTextureReplacement = new AtlasOreTextureReplacement(capi);
         vegetationTextureMask = new AtlasVegetationTextureMask(capi);
         boundaryResolver = new AtlasBoundaryResolver(
@@ -892,18 +900,20 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
             {
                 loggedLightingDiagnostics = true;
                 capi.Logger.Notification(
-                    "[ModernAtlas] Solar lighting: mode={0}, direction=({1:0.000}, {2:0.000}, {3:0.000}), color=({4:0.000}, {5:0.000}, {6:0.000}), exposure={7:0.000}.",
+                    "[ModernAtlas] Solar lighting: mode={0}, direction=({1:0.000}, {2:0.000}, {3:0.000}), color=({4:0.000}, {5:0.000}, {6:0.000}), skyDaylight={7:0.000}, sceneBrightness={8:0.000}, exposure={9:0.000}.",
                     !performanceLightingEnabled
                         ? "neutral"
                         : liveLightingEnabled
                             ? "live"
-                            : $"fixed-{Math.Clamp(fixedSunHour, 0, 23):00}:00",
+                            : $"fixed-{Math.Clamp(fixedSunHour, 0, 24):00}:00",
                     atlasSunDirection.X,
                     atlasSunDirection.Y,
                     atlasSunDirection.Z,
                     atlasSunColor.X,
                     atlasSunColor.Y,
                     atlasSunColor.Z,
+                    atlasSkyDaylight,
+                    atlasSceneBrightness,
                     atlasExposure
                 );
             }
@@ -1144,6 +1154,15 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
             }
             opaqueCompletedMilliseconds = capi.ElapsedMilliseconds;
             LogTerrainCoverage(viewDistanceBlocks);
+            LastRenderedMechanicalDeviceCount = mechanicalRenderer.Render(
+                deltaTime,
+                view,
+                projection,
+                capi.World.Player.Entity.Pos.X,
+                capi.World.Player.Entity.Pos.Z,
+                viewDistanceBlocks,
+                hideUndergroundCaves ? surfaceHeightTexture : null
+            );
             LastRenderedEntityCount = entityModelRenderer.Render(
                 deltaTime,
                 view,

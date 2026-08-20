@@ -251,7 +251,7 @@ public sealed partial class ModernAtlasDialog
         if (int.TryParse(forcedSunHour, out int parsedSunHour))
         {
             config.LiveLightingEnabled = false;
-            config.FixedSunHour = Math.Clamp(parsedSunHour, 0, 23);
+            config.FixedSunHour = Math.Clamp(parsedSunHour, 0, 24);
             config.PerformanceLightingEnabled = true;
             capi.Logger.Notification(
                 "[ModernAtlas] Automated smoke test forced the atlas sun to {0}:00 for lighting inspection.",
@@ -319,11 +319,13 @@ public sealed partial class ModernAtlasDialog
         automatedLanternBlockY = 0;
         automatedLanternBlockZ = 0;
         automatedSmokeTestMapLayerPhase = 0;
+        automatedSmokeTestMapLayerAbortLogged = false;
         automatedSmokeTestOreLayerZoom = 0;
         automatedSmokeTestMapLayerPassed = false;
         automatedSmokeTestDamagePhase = 0;
         automatedSmokeTestDamageWarningPassed = false;
         pendingAutomatedMapLayerScreenshotSuffix = null;
+        automatedSmokeTestHoldLayerHover = false;
         automatedSmokeTestPerformanceModeSelected = false;
         automatedSmokeTestPerformanceModeRendered = false;
         automatedSmokeTestPresentationPassed = false;
@@ -494,7 +496,8 @@ public sealed partial class ModernAtlasDialog
                                 : automatedSecondScreenshotPath;
                         automatedScreenshotSequenceStep =
                             automatedScreenshotSequenceEnabled ? 2 : 1;
-                        automatedScreenshotCapturePassed = true;
+                        automatedScreenshotCapturePassed =
+                            ExerciseAutomatedScreenshotEstimate(capturedPath);
                         CloseScreenshotProgressModal();
                         capi.Logger.Notification(
                             "[ModernAtlas] Automated tiled-screenshot capture passed: {0}; the atlas camera was restored.",
@@ -892,6 +895,11 @@ public sealed partial class ModernAtlasDialog
         if (automatedSmokeTestInterfaceControlsAttempted) return;
         automatedSmokeTestInterfaceControlsAttempted = true;
 
+        // This exercise clicks the toolbar from a neutral state: with a panel
+        // still open, the first click only queues a section behind a close
+        // animation and every later assertion fails for the wrong reason.
+        ResetBottomPanelState();
+
         bool accessAvailable = CreativeCheatSettingsAvailable;
         bool toolbarPresent = overlay?.GetElement("settings-button")
                 is GuiElementAtlasButton
@@ -978,18 +986,32 @@ public sealed partial class ModernAtlasDialog
         bool fixedLightingPrepared = true;
         if (config.LiveLightingEnabled)
         {
+            // This exercise selected flat performance lighting a few steps
+            // earlier, and the Settings panel deliberately shows the live-sun
+            // switch as off while that override suppresses it. The first click
+            // then only restores directional lighting and leaves the live
+            // preference on, so a second click is what reaches fixed lighting.
             fixedLightingPrepared = ClickAtlasControlForAutomatedTest(
                 settingsComposer,
                 "live-lighting"
-            ) && !config.LiveLightingEnabled;
+            );
+            if (fixedLightingPrepared && config.LiveLightingEnabled)
+            {
+                fixedLightingPrepared = ClickAtlasControlForAutomatedTest(
+                    settingsComposer,
+                    "live-lighting"
+                );
+            }
+            fixedLightingPrepared = fixedLightingPrepared
+                && !config.LiveLightingEnabled;
         }
         int fixedHourBefore = config.FixedSunHour;
         bool sliderBoundaryHandled = DragAtlasSliderBeyondBoundsForAutomatedTest(
             settingsComposer,
             "fixed-sun-hour",
-            fixedHourBefore != 23
+            fixedHourBefore != 24
         );
-        bool sliderBoundaryClamped = config.FixedSunHour == (fixedHourBefore != 23 ? 23 : 0);
+        bool sliderBoundaryClamped = config.FixedSunHour == (fixedHourBefore != 24 ? 24 : 0);
         OnFixedSunHourChanged(fixedHourBefore);
         settingsComposer?.GetAtlasSlider("fixed-sun-hour")?.SetValue(fixedHourBefore);
         bool liveLightingRestored = !config.LiveLightingEnabled
@@ -1252,9 +1274,25 @@ public sealed partial class ModernAtlasDialog
                 )
                 && queuedBottomPanelSection == AtlasPanelSection.VisualLab;
             OpenBottomPanelImmediately(AtlasPanelSection.VisualLab);
+            GuiElement? exposureDefault = visualLabModal?.GetElement(
+                "visual-lab-exposure-default"
+            );
+            GuiElement? caveDefault = visualLabModal?.GetElement(
+                "visual-lab-cave-default"
+            );
+            double visualPanelWidth = bottomPanelBounds?.fixedWidth ?? 0;
+            bool visualReadoutsInside = exposureDefault != null
+                && caveDefault != null
+                && exposureDefault.Bounds.fixedX >= 0
+                && caveDefault.Bounds.fixedX >= 0
+                && exposureDefault.Bounds.fixedX
+                    + exposureDefault.Bounds.fixedWidth <= visualPanelWidth
+                && caveDefault.Bounds.fixedX + caveDefault.Bounds.fixedWidth
+                    <= visualPanelWidth;
             visualOpened = visualOpened
                 && visualLabModal?.GetAtlasSlider("atlas-exposure") != null
-                && visualLabModal?.GetAtlasSlider("cave-mask-brightness") != null;
+                && visualLabModal?.GetAtlasSlider("cave-mask-brightness") != null
+                && visualReadoutsInside;
             visualClosed = visualOpened
                 && ClickAtlasControlForAutomatedTest(
                     visualLabModal,
@@ -1303,8 +1341,12 @@ public sealed partial class ModernAtlasDialog
         bool heldItemsSuppressed = renderedEntityCount > 0
             && exactChunkRenderer?.LastSuppressedHeldItemCount == renderedEntityCount;
 
+        bool toolbarExercised = ExerciseAutomatedToolbar();
+        bool settingsLayoutExercised = ExerciseAutomatedSettingsLayout();
         ResetBottomPanelState();
-        automatedSmokeTestInterfaceControlsPassed = toolbarPresent
+        automatedSmokeTestInterfaceControlsPassed = toolbarExercised
+            && settingsLayoutExercised
+            && toolbarPresent
             && accessAvailable
             && initialFocusReleased
             && settingsOpenedByClick
@@ -1393,6 +1435,28 @@ public sealed partial class ModernAtlasDialog
                 automatedSmokeTestPerformanceModeSelected,
                 exactChunkRenderer?.LastSuppressedHeldItemCount ?? 0,
                 renderedEntityCount
+            );
+            // The line above omits every flag that is not a UI control click.
+            // Without them a failure cannot be attributed, so report the rest.
+            capi.Logger.Error(
+                "[ModernAtlas] Automated compact UI test failed (remaining flags): access={0}, initialFocus={1}, mapLayers={2}/{3}, skipOpening={4}/{5}, presentationControl={6}, fixedLighting={7}, sunSlider={8}/{9}, liveLightingRestored={10}, timeInstrument={11}, settingsClosed={12}, mapClosed={13}, caveMode={14}, cameraLock={15}, cameraYaw={16}.",
+                accessAvailable,
+                initialFocusReleased,
+                mapLayersToggled,
+                mapLayersRestored,
+                skipToggled,
+                skipRestored,
+                presentationControlPresent,
+                fixedLightingPrepared,
+                sliderBoundaryHandled,
+                sliderBoundaryClamped,
+                liveLightingRestored,
+                timeInstrumentSelected,
+                settingsClosed,
+                mapClosed,
+                caveModeActivated,
+                cameraAngleStayedLocked,
+                cameraYawStayedFree
             );
         }
         return;
@@ -1486,7 +1550,7 @@ public sealed partial class ModernAtlasDialog
                 )
                 && !config.LiveLightingEnabled);
         int fixedSunHourBeforeDrag = config.FixedSunHour;
-        bool dragSliderToMaximum = fixedSunHourBeforeDrag != 23;
+        bool dragSliderToMaximum = fixedSunHourBeforeDrag != 24;
         bool sliderBoundaryDragHandled = fixedLightingPrepared
             && DragAtlasSliderBeyondBoundsForAutomatedTest(
                 settingsModal,
@@ -1494,7 +1558,7 @@ public sealed partial class ModernAtlasDialog
                 dragSliderToMaximum
             );
         bool sliderBoundaryDragClamped = config.FixedSunHour
-            == (dragSliderToMaximum ? 23 : 0);
+            == (dragSliderToMaximum ? 24 : 0);
         OnFixedSunHourChanged(fixedSunHourBeforeDrag);
         settingsModal?.GetAtlasSlider("fixed-sun-hour")?.SetValue(fixedSunHourBeforeDrag);
         bool liveLightingRestored = !liveLightingBeforeSliderTest
@@ -2313,6 +2377,15 @@ public sealed partial class ModernAtlasDialog
             || automatedSmokeTestPresentationPhase >= 5)
         {
             return;
+        }
+
+        // The presentation frames are final captures: release any read-out the
+        // layer exercise armed, so a test-held card cannot sit under the
+        // toolbar in them.
+        if (automatedSmokeTestHoldLayerHover)
+        {
+            automatedSmokeTestHoldLayerHover = false;
+            ClearOreHover();
         }
 
         switch (automatedSmokeTestPresentationPhase)
@@ -3984,6 +4057,20 @@ public sealed partial class ModernAtlasDialog
         {
             return;
         }
+        if (automatedSmokeTestMapLayerPhase < 0)
+        {
+            // A failed sub-check parks this sequence, and everything gated
+            // behind it then waits for a phase that will never advance. Say so
+            // once instead of leaving the run looking merely slow.
+            if (!automatedSmokeTestMapLayerAbortLogged)
+            {
+                automatedSmokeTestMapLayerAbortLogged = true;
+                capi.Logger.Error(
+                    "[ModernAtlas] AUTOMATED MAP-LAYER SEQUENCE ABORTED after a failed check; the remaining atlas checks cannot run. See the error above for the cause."
+                );
+            }
+            return;
+        }
 
         if (automatedSmokeTestMapLayerPhase == 0)
         {
@@ -4010,21 +4097,235 @@ public sealed partial class ModernAtlasDialog
                 );
                 return;
             }
-            if (QueueAutomatedMapLayerScreenshot("layer-moisture"))
+            // The shared pointer read-out must work for the climate layers,
+            // not only for ore. Inspect the player's own loaded column and
+            // build the card the hover would show.
+            int climateX = (int)Math.Floor(
+                capi.World.Player.Entity.Pos.X / AtlasMapLayerTexture.HorizontalSampleSize
+            ) * AtlasMapLayerTexture.HorizontalSampleSize
+                + AtlasMapLayerTexture.HorizontalSampleSize / 2;
+            int climateZ = (int)Math.Floor(
+                capi.World.Player.Entity.Pos.Z / AtlasMapLayerTexture.HorizontalSampleSize
+            ) * AtlasMapLayerTexture.HorizontalSampleSize
+                + AtlasMapLayerTexture.HorizontalSampleSize / 2;
+            if (!mapLayerTexture.TryInspectClimate(
+                climateX,
+                climateZ,
+                out AtlasClimateInspection? climateInspection
+            ) || climateInspection == null)
             {
-                automatedSmokeTestMapLayerPhase = 10;
+                automatedSmokeTestMapLayerPhase = -1;
+                capi.Logger.Error(
+                    "[ModernAtlas] Automated map-layer test could not inspect the loaded moisture column."
+                );
                 return;
             }
+            climateHoverInspection = climateInspection;
+            oreHoverCellX = climateX;
+            oreHoverCellZ = climateZ;
+            oreHoverMouseX = AtlasViewport.X + AtlasViewport.Width / 2;
+            oreHoverMouseY = AtlasViewport.Y + AtlasViewport.Height / 2;
+            BuildClimateHoverTexture(climateInspection.Value);
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated map-layer test read the moisture inspector: {0} {1} at surface Y {2}.",
+                climateInspection.Value.Grade,
+                climateInspection.Value.ValueText,
+                climateInspection.Value.SurfaceY
+            );
+            if (!ValidateAutomatedHoverCardEdges())
+            {
+                automatedSmokeTestMapLayerPhase = -1;
+                return;
+            }
+            if (QueueAutomatedMapLayerScreenshot("layer-moisture"))
+            {
+                automatedSmokeTestMapLayerPhase = 5;
+                return;
+            }
+            automatedSmokeTestMapLayerPhase = 5;
+        }
+
+        // The Search and Unit panels are verified only once the compact-UI
+        // screenshot sequence has finished: until then it owns which panel is
+        // open for each of its frames, and opening one underneath it stalls
+        // that sequence and everything gated behind it, including the
+        // presentation and tiled-capture checks.
+        if (automatedSmokeTestMapLayerPhase == 5)
+        {
+            if (pendingAutomatedMapLayerScreenshotSuffix != null) return;
+            // Wait for the presentation exercise as well: it needs to find
+            // Settings open and reachable in one click, which a panel opened
+            // here would turn into a queued transition and a false failure.
+            if (automatedSmokeScreenshotPhase < AutomatedUiScreenshotPhaseCount
+                || !automatedSmokeTestPresentationPassed)
+            {
+                return;
+            }
+            // Panel frames: drop any read-out the layer exercise armed so it
+            // cannot hang over the panel being verified.
+            ClearOreHover();
+            // Keep the live pointer from immediately rebuilding a card while
+            // Search and Unit own the final verification frames. With no
+            // armed reading this flag suppresses hover instead of preserving
+            // one.
+            automatedSmokeTestHoldLayerHover = true;
+            OpenBottomPanelImmediately(AtlasPanelSection.Search);
+            if (!ExerciseAutomatedSearchLegend())
+            {
+                automatedSmokeTestMapLayerPhase = -1;
+                return;
+            }
+            automatedSmokeTestMapLayerPhase = 6;
+            if (QueueAutomatedMapLayerScreenshot("search-wide")) return;
+        }
+
+        if (automatedSmokeTestMapLayerPhase == 6)
+        {
+            if (pendingAutomatedMapLayerScreenshotSuffix != null) return;
+            if (!ExerciseAutomatedUnitPanel())
+            {
+                automatedSmokeTestMapLayerPhase = -1;
+                return;
+            }
+            automatedSmokeTestMapLayerPhase = 7;
+            if (QueueAutomatedMapLayerScreenshot("unit-wide")) return;
+        }
+
+        if (automatedSmokeTestMapLayerPhase == 7)
+        {
+            if (pendingAutomatedMapLayerScreenshotSuffix != null) return;
+            ResetBottomPanelState();
             automatedSmokeTestMapLayerPhase = 10;
         }
 
+        // The overlay strength is now user-controlled. Capture both ends of
+        // the slider. The atlas image is throttled, so each capture has to
+        // wait for an atlas frame rendered *after* the change; queueing it
+        // immediately stores the previous opacity with the new slider label.
         if (automatedSmokeTestMapLayerPhase == 10)
         {
             if (pendingAutomatedMapLayerScreenshotSuffix != null) return;
+            automatedSmokeTestRestoreMapLayerOpacityPercent =
+                config.MapLayerOpacityPercent;
+            BeginAutomatedMapLayerOpacityStep(0);
+            automatedSmokeTestMapLayerPhase = 11;
+            return;
+        }
+
+        if (automatedSmokeTestMapLayerPhase == 11)
+        {
+            if (!AutomatedMapLayerOpacityFrameRendered) return;
+            automatedSmokeTestMapLayerPhase = 12;
+            if (QueueAutomatedMapLayerScreenshot("layer-moisture-opacity-000")) return;
+        }
+
+        if (automatedSmokeTestMapLayerPhase == 12)
+        {
+            if (pendingAutomatedMapLayerScreenshotSuffix != null) return;
+            BeginAutomatedMapLayerOpacityStep(100);
+            automatedSmokeTestMapLayerPhase = 13;
+            return;
+        }
+
+        if (automatedSmokeTestMapLayerPhase == 13)
+        {
+            if (!AutomatedMapLayerOpacityFrameRendered) return;
+            automatedSmokeTestMapLayerPhase = 14;
+            if (QueueAutomatedMapLayerScreenshot("layer-moisture-opacity-100")) return;
+        }
+
+        if (automatedSmokeTestMapLayerPhase == 14)
+        {
+            if (pendingAutomatedMapLayerScreenshotSuffix != null) return;
+            BeginAutomatedMapLayerOpacityStep(
+                automatedSmokeTestRestoreMapLayerOpacityPercent
+            );
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated map-layer test swept the overlay opacity slider 0% and 100% and restored {0}%.",
+                config.MapLayerOpacityPercent
+            );
+            // The toolbar frames are captured with a data layer active, so the
+            // indicator dot carries that layer's color instead of neutral.
+            automatedSmokeTestMapLayerPhase = 15;
+            if (QueueAutomatedMapLayerScreenshot("toolbar-scroll")) return;
+        }
+
+        // Narrowest supported layout: raising the GUI scale shrinks the
+        // interface's working width exactly the way a small window does.
+        if (automatedSmokeTestMapLayerPhase == 15)
+        {
+            if (pendingAutomatedMapLayerScreenshotSuffix != null) return;
+            // These are Settings frames: drop any card the layer exercise
+            // armed so it cannot sit over the panel being verified.
+            ClearOreHover();
+            automatedSmokeTestHoldLayerHover = true;
+            automatedSmokeTestGuiScaleBefore = RuntimeEnv.GUIScale;
+            RuntimeEnv.GUIScale = Math.Clamp(
+                automatedSmokeTestGuiScaleBefore * 2.5f,
+                2f,
+                4f
+            );
+            RecomposeInterface();
+            // Settings is the panel the narrow layout has to prove, so open it
+            // at the top of its range for this frame.
+            settingsScrollOffset = 0;
+            OpenBottomPanelImmediately(AtlasPanelSection.Settings);
+            automatedSmokeTestMapLayerPhase = 16;
+            if (QueueAutomatedMapLayerScreenshot("toolbar-narrow")) return;
+        }
+
+        // The same narrow panel scrolled to the end of its range: the last
+        // control has to be reachable, not just present in the model.
+        if (automatedSmokeTestMapLayerPhase == 16)
+        {
+            if (pendingAutomatedMapLayerScreenshotSuffix != null) return;
+            settingsScrollOffset = SettingsScrollMaximum(
+                bottomPanelBounds?.fixedWidth ?? 0,
+                bottomPanelBounds?.fixedHeight ?? 0
+            );
+            OpenBottomPanelImmediately(AtlasPanelSection.Settings);
+            automatedSmokeTestMapLayerPhase = 17;
+            if (QueueAutomatedMapLayerScreenshot("settings-narrow-bottom")) return;
+        }
+
+        if (automatedSmokeTestMapLayerPhase == 17)
+        {
+            if (pendingAutomatedMapLayerScreenshotSuffix != null) return;
+            OpenBottomPanelImmediately(AtlasPanelSection.Search);
+            automatedSmokeTestMapLayerPhase = 18;
+            if (QueueAutomatedMapLayerScreenshot("search-narrow")) return;
+        }
+
+        if (automatedSmokeTestMapLayerPhase == 18)
+        {
+            if (pendingAutomatedMapLayerScreenshotSuffix != null) return;
+            if (!ExerciseAutomatedUnitPanel())
+            {
+                automatedSmokeTestMapLayerPhase = -1;
+                return;
+            }
+            automatedSmokeTestMapLayerPhase = 19;
+            if (QueueAutomatedMapLayerScreenshot("unit-narrow")) return;
+        }
+
+        if (automatedSmokeTestMapLayerPhase == 19)
+        {
+            if (pendingAutomatedMapLayerScreenshotSuffix != null) return;
+            automatedSmokeTestHoldLayerHover = false;
+            ClearOreHover();
+            settingsScrollOffset = 0;
+            settingsSectionScrollOffset = 0;
+            ResetBottomPanelState();
+            if (automatedSmokeTestGuiScaleBefore > 0)
+            {
+                RuntimeEnv.GUIScale = automatedSmokeTestGuiScaleBefore;
+                automatedSmokeTestGuiScaleBefore = 0;
+                RecomposeInterface();
+            }
             SetMapLayer(AtlasMapLayer.OreDensity);
             automatedSmokeTestMapLayerPhase = 2;
             capi.Logger.Notification(
-                "[ModernAtlas] Automated smoke test rendered the moisture layer and started the Creative/Cheat ore-density layer."
+                "[ModernAtlas] Automated smoke test captured the toolbar at the normal and the narrowest supported layout, then started the Creative/Cheat ore layer."
             );
             return;
         }
@@ -4061,12 +4362,39 @@ public sealed partial class ModernAtlasDialog
                 return;
             }
 
-            oreHoverInspection = automatedInspection;
-            oreHoverCellX = sampleX;
-            oreHoverCellZ = sampleZ;
+            automatedSmokeTestOreCellX = sampleX;
+            automatedSmokeTestOreCellZ = sampleZ;
+            if (!ExerciseAutomatedOreSources())
+            {
+                automatedSmokeTestMapLayerPhase = -1;
+                return;
+            }
+            // Prefer the cell the scan found most informative; fall back to
+            // the player's own column when nothing carried a reading.
+            if (!mapLayerTexture.TryInspectOre(
+                automatedSmokeTestOreCellX,
+                automatedSmokeTestOreCellZ,
+                out AtlasOreInspection? cardInspection
+            ) || cardInspection == null)
+            {
+                cardInspection = automatedInspection;
+                automatedSmokeTestOreCellX = sampleX;
+                automatedSmokeTestOreCellZ = sampleZ;
+            }
+
+            oreHoverInspection = cardInspection;
+            oreHoverCellX = automatedSmokeTestOreCellX;
+            oreHoverCellZ = automatedSmokeTestOreCellZ;
             oreHoverMouseX = AtlasViewport.X + AtlasViewport.Width / 2;
             oreHoverMouseY = AtlasViewport.Y + AtlasViewport.Height / 2;
-            BuildOreHoverTexture(automatedInspection);
+            BuildOreHoverTexture(cardInspection);
+            // Keep the armed card alive across the capture frames.
+            automatedSmokeTestHoldLayerHover = true;
+            if (!ValidateAutomatedOreInspection(cardInspection, "all ores"))
+            {
+                automatedSmokeTestMapLayerPhase = -1;
+                return;
+            }
             if (QueueAutomatedMapLayerScreenshot("layer-ore-overview"))
             {
                 automatedSmokeTestMapLayerPhase = 20;
@@ -4075,7 +4403,22 @@ public sealed partial class ModernAtlasDialog
             automatedSmokeTestMapLayerPhase = 20;
         }
 
+        // Capture the Map options panel while the ore layer is active, so the
+        // source-aware status line and ramp labels are verifiable in an image.
         if (automatedSmokeTestMapLayerPhase == 20)
+        {
+            if (pendingAutomatedMapLayerScreenshotSuffix != null) return;
+            // Release the armed card first: this frame is about the panel, and
+            // a held read-out would cover the status line being verified.
+            automatedSmokeTestHoldLayerHover = false;
+            ClearOreHover();
+            OpenBottomPanelImmediately(AtlasPanelSection.MapOptions);
+            UpdateMapLayerPanelText();
+            automatedSmokeTestMapLayerPhase = 21;
+            if (QueueAutomatedMapLayerScreenshot("layer-ore-panel")) return;
+        }
+
+        if (automatedSmokeTestMapLayerPhase == 21)
         {
             if (pendingAutomatedMapLayerScreenshotSuffix != null) return;
 
@@ -4099,14 +4442,77 @@ public sealed partial class ModernAtlasDialog
         if (automatedSmokeTestMapLayerPhase == 3)
         {
             if (!mapLayerTexture.Ready) return;
-            if (mapLayerTexture.TryInspectOre(
+            // The layer restarted for the new filter, so the cell picked
+            // before may no longer be inspectable. Fall back to the player's
+            // own column, which phase 2 already proved readable, instead of
+            // silently skipping the single-ore read-out check.
+            bool filteredResolved = mapLayerTexture.TryInspectOre(
                 oreHoverCellX,
                 oreHoverCellZ,
                 out AtlasOreInspection? filteredInspection
-            ) && filteredInspection != null)
+            ) && filteredInspection != null;
+            if (!filteredResolved)
+            {
+                int fallbackX = (int)Math.Floor(
+                    capi.World.Player.Entity.Pos.X / AtlasMapLayerTexture.HorizontalSampleSize
+                ) * AtlasMapLayerTexture.HorizontalSampleSize
+                    + AtlasMapLayerTexture.HorizontalSampleSize / 2;
+                int fallbackZ = (int)Math.Floor(
+                    capi.World.Player.Entity.Pos.Z / AtlasMapLayerTexture.HorizontalSampleSize
+                ) * AtlasMapLayerTexture.HorizontalSampleSize
+                    + AtlasMapLayerTexture.HorizontalSampleSize / 2;
+                filteredResolved = mapLayerTexture.TryInspectOre(
+                    fallbackX,
+                    fallbackZ,
+                    out filteredInspection
+                ) && filteredInspection != null;
+                if (filteredResolved)
+                {
+                    oreHoverCellX = fallbackX;
+                    oreHoverCellZ = fallbackZ;
+                }
+            }
+            if (!filteredResolved || filteredInspection == null)
+            {
+                automatedSmokeTestMapLayerPhase = -1;
+                capi.Logger.Error(
+                    "[ModernAtlas] Automated ore-filter read-out test could not inspect any loaded column for filter {0}.",
+                    selectedOreCode ?? "<all ores>"
+                );
+                return;
+            }
             {
                 oreHoverInspection = filteredInspection;
                 BuildOreHoverTexture(filteredInspection);
+                automatedSmokeTestHoldLayerHover = true;
+                if (!ValidateAutomatedOreInspection(
+                    filteredInspection,
+                    $"filter {selectedOreCode ?? "<all ores>"}"
+                ))
+                {
+                    automatedSmokeTestMapLayerPhase = -1;
+                    return;
+                }
+                bool filteredOrePresent = selectedOreCode == null
+                    || filteredInspection.Source
+                        != AtlasOreInspectionSource.RegionalOreMaps
+                    || Array.Exists(
+                        filteredInspection.Readings,
+                        reading => string.Equals(
+                            reading.Code,
+                            selectedOreCode,
+                            StringComparison.Ordinal
+                        )
+                    );
+                if (!filteredOrePresent)
+                {
+                    automatedSmokeTestMapLayerPhase = -1;
+                    capi.Logger.Error(
+                        "[ModernAtlas] Automated ore-filter read-out test: the selected ore {0} is missing from a regional-potential card that must always carry it.",
+                        selectedOreCode
+                    );
+                    return;
+                }
             }
             if (QueueAutomatedMapLayerScreenshot("layer-ore-filtered"))
             {
@@ -4149,7 +4555,7 @@ public sealed partial class ModernAtlasDialog
         {
             return;
         }
-        if (automatedSmokeTestMapLayerPhase is not (20 or 32)
+        if (automatedSmokeTestMapLayerPhase is not (21 or 32)
             || !mapLayerTexture.Ready)
         {
             return;
@@ -4163,6 +4569,14 @@ public sealed partial class ModernAtlasDialog
             return;
         }
 
+        automatedSmokeTestHoldLayerHover = false;
+        ClearOreHover();
+        if (!ExerciseAutomatedOreAccessRevocation())
+        {
+            automatedSmokeTestMapLayerPhase = -1;
+            return;
+        }
+
         automatedSmokeTestMapLayerPassed = true;
         targetZoom = automatedSmokeTestOreLayerZoom > 0
             ? automatedSmokeTestOreLayerZoom
@@ -4173,6 +4587,923 @@ public sealed partial class ModernAtlasDialog
         capi.Logger.Notification(
             "[ModernAtlas] Automated smoke test rendered climate and Creative/Cheat ore map layers from loaded data and retained the selected ore colors through zoom."
         );
+    }
+
+    /// <summary>
+    /// The hover card must stay inside the map viewport at every edge and
+    /// corner; a read-out that leaves the viewport is cut off by the clip.
+    /// </summary>
+    private bool ValidateAutomatedHoverCardEdges()
+    {
+        if (oreHoverTexture is not { Width: > 0, Height: > 0 }) return true;
+
+        AtlasViewportBounds viewport = AtlasViewport;
+        float width = oreHoverTexture.Width;
+        float height = oreHoverTexture.Height;
+        (int X, int Z)[] probes =
+        {
+            (viewport.X + 1, viewport.Y + 1),
+            (viewport.Right - 1, viewport.Y + 1),
+            (viewport.X + 1, viewport.Bottom - 1),
+            (viewport.Right - 1, viewport.Bottom - 1),
+            (viewport.X + viewport.Width / 2, viewport.Bottom - 1)
+        };
+        foreach ((int probeX, int probeY) in probes)
+        {
+            ResolveLayerHoverCardPlacement(
+                width,
+                height,
+                probeX,
+                probeY,
+                out float cardX,
+                out float cardY
+            );
+            if (cardX >= viewport.X
+                && cardY >= viewport.Y
+                && cardX + width <= viewport.Right + 0.5f
+                && cardY + height <= viewport.Bottom + 0.5f)
+            {
+                continue;
+            }
+            capi.Logger.Error(
+                "[ModernAtlas] Automated hover-card edge check failed at pointer {0},{1}: card {2}x{3} placed at {4},{5} outside viewport {6},{7} {8}x{9}.",
+                probeX,
+                probeY,
+                width,
+                height,
+                cardX,
+                cardY,
+                viewport.X,
+                viewport.Y,
+                viewport.Width,
+                viewport.Height
+            );
+            return false;
+        }
+        capi.Logger.Notification(
+            "[ModernAtlas] Automated hover-card edge check passed: the {0}x{1} read-out stayed inside the viewport at all four corners and the bottom edge.",
+            width,
+            height
+        );
+        return true;
+    }
+
+    /// <summary>
+    /// Applies one overlay-opacity step and forces the throttled atlas to draw
+    /// a fresh frame for it.
+    /// </summary>
+    private void BeginAutomatedMapLayerOpacityStep(int percent)
+    {
+        config.MapLayerOpacityPercent = Math.Clamp(percent, 0, 100);
+        SyncMapLayerControls();
+        automatedSmokeTestOpacityChangeMilliseconds = capi.ElapsedMilliseconds;
+        lastAtlasWorldRenderMilliseconds = 0;
+    }
+
+    /// <summary>
+    /// True once the atlas has drawn a frame that already contains the last
+    /// requested opacity.
+    /// </summary>
+    private bool AutomatedMapLayerOpacityFrameRendered =>
+        lastAtlasWorldRenderMilliseconds
+            > automatedSmokeTestOpacityChangeMilliseconds;
+
+    /// <summary>
+    /// Scans loaded cells around the player and reports which of the two ore
+    /// sources the atlas can actually speak for in this world. A world whose
+    /// loaded regions carry no OreMaps cannot exercise the regional branch;
+    /// that is stated instead of being claimed as covered.
+    /// </summary>
+    private bool ExerciseAutomatedOreSources()
+    {
+        const int step = AtlasMapLayerTexture.HorizontalSampleSize * 8;
+        int regionalCells = 0;
+        int columnCells = 0;
+        int inspected = 0;
+        int richestReadings = 0;
+        int centerX = (int)capi.World.Player.Entity.Pos.X;
+        int centerZ = (int)capi.World.Player.Entity.Pos.Z;
+        for (int offsetX = -4; offsetX <= 4; offsetX++)
+        {
+            for (int offsetZ = -4; offsetZ <= 4; offsetZ++)
+            {
+                int worldX = centerX + offsetX * step;
+                int worldZ = centerZ + offsetZ * step;
+                if (!mapLayerTexture.TryInspectOre(
+                    worldX,
+                    worldZ,
+                    out AtlasOreInspection? probe
+                ) || probe == null)
+                {
+                    continue;
+                }
+                inspected++;
+                if (probe.Source == AtlasOreInspectionSource.RegionalOreMaps)
+                {
+                    regionalCells++;
+                }
+                else
+                {
+                    columnCells++;
+                }
+                // Remember the most informative cell so the captured card
+                // shows a real read-out instead of an empty column.
+                if (probe.Readings.Length > richestReadings)
+                {
+                    richestReadings = probe.Readings.Length;
+                    automatedSmokeTestOreCellX = worldX;
+                    automatedSmokeTestOreCellZ = worldZ;
+                }
+            }
+        }
+
+        if (inspected == 0)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated ore-source scan could not inspect any loaded cell."
+            );
+            return false;
+        }
+
+        // The regional branch cannot be driven by a world whose loaded regions
+        // carry no OreMaps, so its logic is covered deterministically instead.
+        // This never substitutes for the in-game path; the scan below still
+        // states whether that path actually ran.
+        string? regionalFailure = AtlasRegionalOreReadings.Validate();
+        if (regionalFailure != null)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated regional ore-reading test failed: {0}.",
+                regionalFailure
+            );
+            return false;
+        }
+        capi.Logger.Notification(
+            "[ModernAtlas] Automated regional ore-reading test passed on prepared ore maps: map selection, byte and packed-color decoding, the trace threshold with its selected-ore exemption, ordering and the source-map count."
+        );
+
+        // The mixed radius is equally unreachable in a world without OreMaps,
+        // so the status wording is covered deterministically as well.
+        string? statusFailure = AtlasOreStatusText.Validate();
+        if (statusFailure != null)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated ore status-line test failed: {0}.",
+                statusFailure
+            );
+            return false;
+        }
+        capi.Logger.Notification(
+            "[ModernAtlas] Automated ore status-line test passed: preparing, ready, waiting, unavailable and the mixed radius that reports regional maps and loaded columns as separate groups. Live status now reads: {0}.",
+            MapLayerStatusText
+        );
+
+        if (regionalCells == 0)
+        {
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated ore-source scan: {0} of {1} inspected cells reported the loaded block column. No loaded region in this world carries OreMaps, so the in-game regional-potential branch was NOT exercised here; the layer source reports {2}.",
+                columnCells,
+                inspected,
+                mapLayerTexture.OreLayerSource
+            );
+            return true;
+        }
+        capi.Logger.Notification(
+            "[ModernAtlas] Automated ore-source scan: {0} regional-potential cells and {1} loaded-column cells of {2} inspected; the layer source reports {3}.",
+            regionalCells,
+            columnCells,
+            inspected,
+            mapLayerTexture.OreLayerSource
+        );
+        return true;
+    }
+
+    /// <summary>
+    /// Checks one ore read-out: it must name a source, keep its readings
+    /// consistent with that source, and fit inside the viewport at the edges.
+    /// </summary>
+    private bool ValidateAutomatedOreInspection(
+        AtlasOreInspection inspection,
+        string context
+    )
+    {
+        bool regional = inspection.Source == AtlasOreInspectionSource.RegionalOreMaps;
+        foreach (AtlasOreReading reading in inspection.Readings)
+        {
+            if (reading.IsPotential == regional
+                && !string.IsNullOrWhiteSpace(reading.Code))
+            {
+                continue;
+            }
+            capi.Logger.Error(
+                "[ModernAtlas] Automated ore read-out test ({0}) found a reading that does not match its source: code={1}, isPotential={2}, source={3}.",
+                context,
+                reading.Code,
+                reading.IsPotential,
+                inspection.Source
+            );
+            return false;
+        }
+        if (regional && inspection.SourceMapCount <= 0)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated ore read-out test ({0}) reported regional potential without a single source map.",
+                context
+            );
+            return false;
+        }
+        if (!ValidateAutomatedHoverCardEdges()) return false;
+
+        string headline = inspection.Readings.Length == 0
+            ? "no reading above the threshold"
+            : inspection.Readings[0].IsPotential
+                ? FormattableString.Invariant(
+                    $"{searchController.GetEnglishOreName(inspection.Readings[0].Code)} {AtlasOrePotential.Grade(inspection.Readings[0].Potential)} {inspection.Readings[0].Potential * 100:0.##}%"
+                )
+                : FormattableString.Invariant(
+                    $"{searchController.GetEnglishOreName(inspection.Readings[0].Code)} {inspection.Readings[0].BlockCount} observed blocks"
+                );
+        capi.Logger.Notification(
+            "[ModernAtlas] Automated ore read-out ({0}): source={1}, filter={2}, readings={3}, top={4}, host rock={5}.",
+            context,
+            regional ? "REGIONAL POTENTIAL" : "LOADED COLUMN",
+            selectedOreCode ?? "<all ores>",
+            inspection.Readings.Length,
+            headline,
+            inspection.HostRockCode ?? "<unavailable>"
+        );
+        return true;
+    }
+
+    /// <summary>
+    /// Takes the Creative/Cheat grant away for the length of this check: the
+    /// ore layer must leave the selector, the active layer must fall back to
+    /// textured terrain and the pointer read-out must stop answering.
+    /// </summary>
+    private bool ExerciseAutomatedOreAccessRevocation()
+    {
+        if (activeMapLayer != AtlasMapLayer.OreDensity)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated ore-access revocation test needs the ore layer active; found {0}.",
+                activeMapLayer
+            );
+            return false;
+        }
+
+        bool hoverWithdrawn;
+        bool layerReset;
+        bool optionWithdrawn;
+        automatedSmokeTestRevokeSpoilerAccess = true;
+        try
+        {
+            hoverWithdrawn = !LayerHoverAvailable;
+            EnforceMapLayerAccess();
+            layerReset = activeMapLayer == AtlasMapLayer.TexturedTerrain;
+            GetMapLayerChoiceOptions(false, out string[] values, out _, out _);
+            optionWithdrawn = Array.IndexOf(
+                values,
+                AtlasMapLayerInfo.Values[(int)AtlasMapLayer.OreDensity]
+            ) < 0;
+        }
+        finally
+        {
+            automatedSmokeTestRevokeSpoilerAccess = false;
+        }
+
+        if (hoverWithdrawn && layerReset && optionWithdrawn)
+        {
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated ore-access revocation passed: the ore layer left the selector, the active layer fell back to textured terrain and the pointer read-out stopped answering."
+            );
+            return true;
+        }
+        capi.Logger.Error(
+            "[ModernAtlas] Automated ore-access revocation failed: hoverWithdrawn={0}, layerReset={1}, optionWithdrawn={2}.",
+            hoverWithdrawn,
+            layerReset,
+            optionWithdrawn
+        );
+        return false;
+    }
+
+    /// <summary>
+    /// Toolbar coverage: the renamed labels, the always-present Exit, the
+    /// active/disabled states and the active-layer dot, including what the
+    /// toolbar must look like without the Creative/Cheat grant.
+    /// </summary>
+    private bool ExerciseAutomatedToolbar()
+    {
+        (string Key, string Label)[] expectedLabels =
+        {
+            ("settings-button", "Settings"),
+            ("quick-screenshot-button", "Shot"),
+            ("screenshot-options-button", "Setup"),
+            ("map-options-button", "Layers"),
+            ("search-button", "Search"),
+            ("instrument-button", "Hand"),
+            ("hide-ui-button", "Hide"),
+            ("exit-button", "Exit")
+        };
+        foreach ((string key, string label) in expectedLabels)
+        {
+            GuiElementAtlasButton? button = overlay?.GetAtlasButton(key);
+            if (button == null)
+            {
+                capi.Logger.Error(
+                    "[ModernAtlas] Automated toolbar test found no button for {0}.",
+                    key
+                );
+                return false;
+            }
+            if (!string.Equals(button.Label, label, StringComparison.Ordinal))
+            {
+                capi.Logger.Error(
+                    "[ModernAtlas] Automated toolbar test expected {0} to read \"{1}\", found \"{2}\".",
+                    key,
+                    label,
+                    button.Label
+                );
+                return false;
+            }
+        }
+
+        GuiElementAtlasButton? exitButton = overlay?.GetAtlasButton("exit-button");
+        if (exitButton is not { Enabled: true })
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated toolbar test found Exit missing or disabled."
+            );
+            return false;
+        }
+
+        // The palette check below cannot tell whether the dot reaches the
+        // screen, so verify that it exists and sits in its reserved strip.
+        GuiElementAtlasButton? layersButton = overlay?.GetAtlasButton("map-options-button");
+        bool indicatorDrawn = TryResolveToolbarLayerIndicatorPlacement(
+            out float indicatorX,
+            out float indicatorY,
+            out float indicatorSize
+        );
+        bool indicatorPlaced = indicatorDrawn
+            && layersButton != null
+            && indicatorX >= layersButton.Bounds.absX + layersButton.Bounds.OuterWidth - 1
+            && indicatorX + indicatorSize
+                <= layersButton.Bounds.absX + layersButton.Bounds.OuterWidth
+                    + LayerIndicatorReservedWidth * Math.Max(0.5, RuntimeEnv.GUIScale) + 1
+            && indicatorY >= layersButton.Bounds.absY - 1
+            && indicatorY + indicatorSize
+                <= layersButton.Bounds.absY + layersButton.Bounds.OuterHeight + 1;
+        if (!indicatorDrawn || !indicatorPlaced)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated toolbar test: the active-layer dot was not rendered in its reserved strip (drawn={0}, placed={1}).",
+                indicatorDrawn,
+                indicatorPlaced
+            );
+            return false;
+        }
+
+        string? indicatorFailure = AtlasToolbarLayerIndicator.Validate();
+        if (indicatorFailure != null)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated toolbar layer-indicator test failed: {0}.",
+                indicatorFailure
+            );
+            return false;
+        }
+        bool neutralForTerrain = AtlasToolbarLayerIndicator.IsNeutral(
+            AtlasMapLayer.TexturedTerrain
+        );
+        bool coloredForActive = activeMapLayer == AtlasMapLayer.TexturedTerrain
+            || !AtlasToolbarLayerIndicator.IsNeutral(activeMapLayer);
+        if (!neutralForTerrain || !coloredForActive)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated toolbar layer-indicator test: neutralForTerrain={0}, coloredForActive={1}, active={2}.",
+                neutralForTerrain,
+                coloredForActive,
+                activeMapLayer
+            );
+            return false;
+        }
+
+        // Active state: the shared bottom panel drives it.
+        OpenBottomPanelImmediately(AtlasPanelSection.MapOptions);
+        SyncToolbarControls();
+        bool layersActive = overlay?.GetAtlasButton("map-options-button")?.IsActive == true;
+        ResetBottomPanelState();
+        SyncToolbarControls();
+        bool layersInactive = overlay?.GetAtlasButton("map-options-button")?.IsActive == false;
+
+        // Without the Creative/Cheat grant, Search withdraws while the rest of
+        // the toolbar, Exit included, stays usable.
+        bool searchEnabledWithAccess = overlay?.GetAtlasButton("search-button")?.Enabled
+            == SearchModeActive;
+        bool searchDisabledWithoutAccess;
+        bool navigationSurvivesWithoutAccess;
+        automatedSmokeTestRevokeSpoilerAccess = true;
+        try
+        {
+            SyncToolbarControls();
+            searchDisabledWithoutAccess =
+                overlay?.GetAtlasButton("search-button")?.Enabled == false;
+            navigationSurvivesWithoutAccess =
+                overlay?.GetAtlasButton("map-options-button")?.Enabled == true
+                && overlay?.GetAtlasButton("hide-ui-button")?.Enabled == true
+                && overlay?.GetAtlasButton("exit-button")?.Enabled == true;
+        }
+        finally
+        {
+            automatedSmokeTestRevokeSpoilerAccess = false;
+            SyncToolbarControls();
+        }
+
+        if (layersActive
+            && layersInactive
+            && searchEnabledWithAccess
+            && searchDisabledWithoutAccess
+            && navigationSurvivesWithoutAccess)
+        {
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated toolbar test passed: Shot/Setup/Layers labels, always-available Exit, active and inactive Layers states, Search withdrawn without the Creative/Cheat grant, and a distinct indicator color per layer (active layer {0}).",
+                activeMapLayer
+            );
+            return true;
+        }
+        capi.Logger.Error(
+            "[ModernAtlas] Automated toolbar test failed: layersActive={0}, layersInactive={1}, searchEnabledWithAccess={2}, searchDisabledWithoutAccess={3}, navigationSurvives={4}.",
+            layersActive,
+            layersInactive,
+            searchEnabledWithAccess,
+            searchDisabledWithoutAccess,
+            navigationSurvivesWithoutAccess
+        );
+        return false;
+    }
+
+    /// <summary>
+    /// Settings layout coverage: the five sections keep their control keys,
+    /// the column count follows the panel width, and every control can be
+    /// scrolled fully into view at each supported width — the first and the
+    /// last one included.
+    /// </summary>
+    private bool ExerciseAutomatedSettingsLayout()
+    {
+        (double Width, double Height, int Columns, string Name)[] layouts =
+        {
+            (900, 236, 3, "wide"),
+            (560, 236, 2, "medium"),
+            (300, 150, 1, "narrow")
+        };
+        string[] requiredKeys =
+        {
+            "map-layers",
+            "search-mode",
+            "render-on-scroll",
+            "scroll-realtime-weather",
+            "animations",
+            "skip-opening-animation",
+            "clouds",
+            "live-lighting",
+            "fixed-sun-hour",
+            "entities",
+            "players",
+            "animals",
+            "mobs",
+            "npcs",
+            "close-on-damage",
+            "performance-open",
+            "visual-lab-open",
+            "creative-settings-button"
+        };
+
+        foreach ((double width, double height, int columns, string name) in layouts)
+        {
+            if (SettingsColumnCount(width) != columns)
+            {
+                capi.Logger.Error(
+                    "[ModernAtlas] Automated settings-layout test: the {0} panel ({1}) resolved {2} columns instead of {3}.",
+                    name,
+                    width,
+                    SettingsColumnCount(width),
+                    columns
+                );
+                return false;
+            }
+
+            List<(string Key, double Top, double Bottom)> extents =
+                SettingsControlExtents(width, height);
+            foreach (string key in requiredKeys)
+            {
+                if (extents.Exists(entry => string.Equals(entry.Key, key, StringComparison.Ordinal)))
+                {
+                    continue;
+                }
+                capi.Logger.Error(
+                    "[ModernAtlas] Automated settings-layout test: control {0} is missing from the {1} layout.",
+                    key,
+                    name
+                );
+                return false;
+            }
+
+            if (!SettingsControlsReachable(width, height, out string? reachFailure))
+            {
+                capi.Logger.Error(
+                    "[ModernAtlas] Automated settings-layout test: {0}.",
+                    reachFailure
+                );
+                return false;
+            }
+        }
+
+        // The live panel must agree with the model and survive a scroll from
+        // the first control to the last.
+        OpenBottomPanelImmediately(AtlasPanelSection.Settings);
+        double liveWidth = bottomPanelBounds?.fixedWidth ?? 0;
+        double liveHeight = bottomPanelBounds?.fixedHeight ?? 0;
+        bool controlsComposed = true;
+        foreach (string key in requiredKeys)
+        {
+            if (settingsModal?.GetElement(key) != null) continue;
+            controlsComposed = false;
+            capi.Logger.Error(
+                "[ModernAtlas] Automated settings-layout test: the composed panel has no {0}.",
+                key
+            );
+        }
+        double liveMaximum = SettingsScrollMaximum(liveWidth, liveHeight);
+        double restoreScroll = settingsScrollOffset;
+        settingsScrollOffset = liveMaximum;
+        OpenBottomPanelImmediately(AtlasPanelSection.Settings);
+        bool bottomComposed = settingsModal?.GetElement("creative-settings-button") != null
+            && settingsModal?.GetElement("map-layers") != null;
+        settingsScrollOffset = restoreScroll;
+        OpenBottomPanelImmediately(AtlasPanelSection.Settings);
+
+        // A sub-panel visit must not throw the reader back to the top.
+        settingsScrollOffset = liveMaximum;
+        OpenVisualLab();
+        OpenBottomPanelImmediately(AtlasPanelSection.VisualLab);
+        CloseVisualLab();
+        OpenBottomPanelImmediately(AtlasPanelSection.Settings);
+        bool scrollPreserved = Math.Abs(settingsScrollOffset - liveMaximum) < 0.51;
+        settingsScrollOffset = 0;
+        settingsSectionScrollOffset = 0;
+        ResetBottomPanelState();
+
+        if (controlsComposed && bottomComposed && scrollPreserved)
+        {
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated settings-layout test passed: 3/2/1 columns by width, all 18 control keys present in every layout, every control reachable by scrolling, and the scroll position survived a Visual Lab round trip (live panel {0:0}x{1:0}, scroll range {2:0}).",
+                liveWidth,
+                liveHeight,
+                liveMaximum
+            );
+            return true;
+        }
+        capi.Logger.Error(
+            "[ModernAtlas] Automated settings-layout test failed: controlsComposed={0}, bottomComposed={1}, scrollPreserved={2}.",
+            controlsComposed,
+            bottomComposed,
+            scrollPreserved
+        );
+        return false;
+    }
+
+    /// <summary>
+    /// Search panel coverage: the status states, the per-category counts taken
+    /// only from authorized results, and a marker legend that actually exists
+    /// on screen inside the panel with the same colors the markers use.
+    /// </summary>
+    private bool ExerciseAutomatedSearchLegend()
+    {
+        string? paletteFailure = AtlasSearchMarkerPalette.Validate();
+        if (paletteFailure != null)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated search-legend test failed: {0}.",
+                paletteFailure
+            );
+            return false;
+        }
+        string? statusFailure = AtlasSearchStatusText.Validate();
+        if (statusFailure != null)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated search-status test failed: {0}.",
+                statusFailure
+            );
+            return false;
+        }
+
+        List<(AtlasSearchResultKind Kind, int Count)> counts = SearchCategoryCounts();
+        int reported = 0;
+        foreach ((AtlasSearchResultKind kind, int count) in counts)
+        {
+            if (count <= 0)
+            {
+                capi.Logger.Error(
+                    "[ModernAtlas] Automated search-legend test: category {0} was reported with {1} results.",
+                    kind,
+                    count
+                );
+                return false;
+            }
+            int actual = 0;
+            foreach (AtlasSearchResult result in searchController.BlockResults)
+            {
+                if (result.Kind == kind) actual++;
+            }
+            foreach (AtlasSearchResult result in searchController.DynamicResults)
+            {
+                if (result.Kind == kind) actual++;
+            }
+            if (actual != count)
+            {
+                capi.Logger.Error(
+                    "[ModernAtlas] Automated search-legend test: category {0} reported {1} but the authorized results hold {2}.",
+                    kind,
+                    count,
+                    actual
+                );
+                return false;
+            }
+            reported += count;
+        }
+        if (reported != searchController.MarkerCount)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated search-legend test: the categories add up to {0} of {1} markers.",
+                reported,
+                searchController.MarkerCount
+            );
+            return false;
+        }
+
+        if (counts.Count == 0)
+        {
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated search-legend test passed with no results to show: the legend stays hidden and the status reads \"{0}\".",
+                SearchStatusText
+            );
+            return true;
+        }
+
+        bool placed = TryResolveSearchLegendPlacement(
+            out float legendX,
+            out float legendY,
+            out float legendWidth,
+            out float legendHeight
+        );
+        bool insidePanel = placed
+            && hasBottomPanelGeometry
+            && legendX >= bottomPanelGeometry.X - 1
+            && legendY >= bottomPanelGeometry.Y - 1
+            && legendX + legendWidth <= bottomPanelGeometry.X + bottomPanelGeometry.Width + 1
+            && legendY + legendHeight <= bottomPanelGeometry.Bottom + 1;
+        if (!placed || !insidePanel || searchLegendTexture is not { TextureId: > 0 })
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated search-legend test: the legend texture was not drawn inside the panel (placed={0}, inside={1}, textureId={2}).",
+                placed,
+                insidePanel,
+                searchLegendTexture?.TextureId ?? 0
+            );
+            return false;
+        }
+
+        capi.Logger.Notification(
+            "[ModernAtlas] Automated search-legend test passed: {0} categories totalling {1} authorized markers, legend texture {2}x{3} inside the panel, marker colors shared with the map, status \"{4}\".",
+            counts.Count,
+            reported,
+            (int)legendWidth,
+            (int)legendHeight,
+            SearchStatusText
+        );
+        return true;
+    }
+
+    /// <summary>
+    /// Unit panel coverage: the health reading's clamping rules, the fixed row
+    /// order, a health bar that exists on screen inside the panel, and the
+    /// rule that only a model the atlas actually drew can be inspected.
+    /// </summary>
+    private bool ExerciseAutomatedUnitPanel()
+    {
+        if (oreHoverInspection != null || climateHoverInspection != null)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated unit-panel test failed: a layer hover card was still armed over the Unit panel."
+            );
+            return false;
+        }
+
+        string? healthFailure = AtlasUnitHealth.Validate();
+        if (healthFailure != null)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated unit-panel test failed: {0}.",
+                healthFailure
+            );
+            return false;
+        }
+
+        string[] rows = UnitRowLabels.Split('\n');
+        if (rows.Length < 3
+            || rows[0] != "Category"
+            || rows[1] != "Health"
+            || rows[2] != "Position")
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated unit-panel test: unexpected row order \"{0}\".",
+                UnitRowLabels.Replace("\n", " | ")
+            );
+            return false;
+        }
+
+        if (exactChunkRenderer == null || exactChunkRenderer.LastRenderedEntities.Count == 0)
+        {
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated unit-panel test was not exercised: the atlas drew no living model in this frame."
+            );
+            return true;
+        }
+
+        AtlasRenderedEntity candidate = exactChunkRenderer.LastRenderedEntities[0];
+        foreach (AtlasRenderedEntity rendered in exactChunkRenderer.LastRenderedEntities)
+        {
+            if (rendered.Entity.EntityId == capi.World.Player.Entity.EntityId)
+            {
+                candidate = rendered;
+                break;
+            }
+        }
+        Entity entity = candidate.Entity;
+        float selectionMiddle = (entity.SelectionBox.Y1 + entity.SelectionBox.Y2) * 0.5f;
+        bool projected = TryProjectAtlasPosition(
+            entity.Pos.X,
+            entity.Pos.Y + selectionMiddle,
+            entity.Pos.Z,
+            out double screenX,
+            out double screenY,
+            out _
+        );
+        bool selected = projected
+            && TrySelectRenderedEntity((int)Math.Round(screenX), (int)Math.Round(screenY));
+        OpenBottomPanelImmediately(AtlasPanelSection.Unit);
+        UpdateUnitInspectionText();
+
+        bool inspectsRenderedModel = false;
+        if (selectedEntityId is long inspectedEntityId)
+        {
+            foreach (AtlasRenderedEntity rendered in exactChunkRenderer.LastRenderedEntities)
+            {
+                if (rendered.Entity.EntityId != inspectedEntityId) continue;
+                inspectsRenderedModel = true;
+                break;
+            }
+        }
+
+        bool placed = TryResolveUnitHealthBarPlacement(
+            out float barX,
+            out float barY,
+            out float barWidth,
+            out float barHeight
+        );
+        bool insidePanel = placed
+            && hasBottomPanelGeometry
+            && barX >= bottomPanelGeometry.X - 1
+            && barY >= bottomPanelGeometry.Y - 1
+            && barX + barWidth <= bottomPanelGeometry.X + bottomPanelGeometry.Width + 1
+            && barY + barHeight <= bottomPanelGeometry.Bottom + 1;
+
+        if (selected && inspectsRenderedModel && placed && insidePanel)
+        {
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated unit-panel test passed: rows {0}, health \"{1}\" at {2:0.##} fill, bar texture {3}x{4} inside the panel, inspecting a model the atlas drew this frame.",
+                UnitRowLabels.Replace("\n", " · "),
+                unitHealthReading.Text,
+                unitHealthReading.Fraction,
+                (int)barWidth,
+                (int)barHeight
+            );
+            return true;
+        }
+        capi.Logger.Error(
+            "[ModernAtlas] Automated unit-panel test failed: selected={0}, rendered={1}, barPlaced={2}, insidePanel={3}.",
+            selected,
+            inspectsRenderedModel,
+            placed,
+            insidePanel
+        );
+        return false;
+    }
+
+    /// <summary>
+    /// Screenshot estimator coverage: the world-span maths, and the promise
+    /// the panel makes before a capture — the predicted output size must be
+    /// the size of the PNG that actually lands on disk.
+    /// </summary>
+    private bool ExerciseAutomatedScreenshotEstimate(string? capturedPath)
+    {
+        string? spanFailure = AtlasScreenshotEstimate.Validate();
+        if (spanFailure != null)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated screenshot-estimate test failed: {0}.",
+                spanFailure
+            );
+            return false;
+        }
+
+        AtlasScreenshotPreview preview = tileScreenshot.ActivePreview;
+        if (!preview.IsValid
+            || string.IsNullOrWhiteSpace(capturedPath)
+            || !File.Exists(capturedPath))
+        {
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated screenshot-estimate test: the world-span maths passed; no committed PNG was available to compare against."
+            );
+            return true;
+        }
+
+        if (!TryReadPngDimensions(capturedPath, out int pngWidth, out int pngHeight))
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated screenshot-estimate test could not read the PNG header of {0}.",
+                capturedPath
+            );
+            return false;
+        }
+        if (pngWidth != preview.OutputWidth || pngHeight != preview.OutputHeight)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated screenshot-estimate test: the panel promised {0} × {1} but the PNG is {2} × {3}.",
+                preview.OutputWidth,
+                preview.OutputHeight,
+                pngWidth,
+                pngHeight
+            );
+            return false;
+        }
+
+        capi.Logger.Notification(
+            "[ModernAtlas] Automated screenshot-estimate test passed: predicted {0} × {1} ({2:0.0} MP, downsampled={3}) matches the committed PNG exactly; {4}.",
+            preview.OutputWidth,
+            preview.OutputHeight,
+            preview.OutputMegapixels,
+            preview.WasDownsampled,
+            AtlasScreenshotEstimate.FormatWorldSpan(
+                zoom,
+                AtlasViewport.Width / (float)Math.Max(1, AtlasViewport.Height),
+                preview.CaptureAreaPercent
+            )
+        );
+        return true;
+    }
+
+    /// <summary>
+    /// Reads width and height straight from a PNG's IHDR chunk, so the
+    /// comparison uses the file itself rather than the writer's own numbers.
+    /// </summary>
+    private static bool TryReadPngDimensions(string path, out int width, out int height)
+    {
+        width = 0;
+        height = 0;
+        try
+        {
+            using FileStream stream = File.OpenRead(path);
+            Span<byte> header = stackalloc byte[24];
+            if (stream.Read(header) != header.Length) return false;
+
+            ReadOnlySpan<byte> signature = stackalloc byte[]
+            {
+                0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A
+            };
+            if (!header[..8].SequenceEqual(signature)) return false;
+            if (header[12] != (byte)'I'
+                || header[13] != (byte)'H'
+                || header[14] != (byte)'D'
+                || header[15] != (byte)'R')
+            {
+                return false;
+            }
+
+            width = (header[16] << 24) | (header[17] << 16) | (header[18] << 8) | header[19];
+            height = (header[20] << 24) | (header[21] << 16) | (header[22] << 8) | header[23];
+            return width > 0 && height > 0;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     private bool QueueAutomatedMapLayerScreenshot(string suffix)

@@ -166,6 +166,137 @@ public sealed partial class ModernAtlasDialog
         synchronizedOreCodeRevision = mapLayerTexture.OreCodeRevision;
     }
 
+    /// <summary>
+    /// Draws the legend ramp with the exact colors the overlay paints, so the
+    /// bar and the map can never disagree.
+    /// </summary>
+    private static void DrawLayerLegendRamp(
+        Context context,
+        ElementBounds bounds,
+        AtlasMapLayer layer
+    )
+    {
+        double width = bounds.InnerWidth;
+        double height = bounds.InnerHeight;
+        if (width <= 0 || height <= 0) return;
+
+        int steps = Math.Max(2, (int)Math.Ceiling(width));
+        double stepWidth = width / steps;
+        for (int index = 0; index < steps; index++)
+        {
+            float value = steps == 1 ? 0f : index / (float)(steps - 1);
+            (float red, float green, float blue) = AtlasMapLayerPalette.Color(layer, value);
+            context.SetSourceRGBA(red, green, blue, 0.96);
+            context.Rectangle(
+                bounds.drawX + index * stepWidth,
+                bounds.drawY,
+                stepWidth + 1,
+                height
+            );
+            context.Fill();
+        }
+        context.SetSourceRGBA(1, 1, 1, 0.28);
+        context.LineWidth = Math.Max(1, RuntimeEnv.GUIScale * 0.7);
+        context.Rectangle(bounds.drawX, bounds.drawY, width, height);
+        context.Stroke();
+
+        // Mark the middle stop, the one value the labels name inside the bar.
+        double middleX = bounds.drawX + width * 0.5;
+        context.MoveTo(middleX, bounds.drawY + height * 0.5);
+        context.LineTo(middleX, bounds.drawY + height);
+        context.SetSourceRGBA(0.05, 0.06, 0.07, 0.55);
+        context.Stroke();
+    }
+
+    /// <summary>
+    /// The separate "no loaded data" state of the ore layer. It is not a step
+    /// on the potential ramp and must not be mistaken for one.
+    /// </summary>
+    private static void DrawUnavailableLegendSwatch(
+        Context context,
+        ImageSurface surface,
+        ElementBounds bounds
+    )
+    {
+        if (bounds.InnerWidth <= 0 || bounds.InnerHeight <= 0) return;
+        (float red, float green, float blue) = AtlasMapLayerPalette.Unavailable;
+        context.SetSourceRGBA(red, green, blue, 0.96);
+        context.Rectangle(bounds.drawX, bounds.drawY, bounds.InnerWidth, bounds.InnerHeight);
+        context.Fill();
+        context.SetSourceRGBA(1, 1, 1, 0.34);
+        context.LineWidth = Math.Max(1, RuntimeEnv.GUIScale * 0.7);
+        context.Rectangle(bounds.drawX, bounds.drawY, bounds.InnerWidth, bounds.InnerHeight);
+        context.Stroke();
+    }
+
+    private bool OnMapLayerOpacityChanged(int value)
+    {
+        config.MapLayerOpacityPercent = Math.Clamp(value, 0, 100);
+        saveConfig();
+        return true;
+    }
+
+    /// <summary>
+    /// Keeps the Map options controls in step with the active layer: the
+    /// arrow selector's index and the overlay opacity slider.
+    /// </summary>
+    private void SyncMapLayerControls()
+    {
+        SyncMapLayerChoice();
+        mapLayerPanel.GetAtlasSlider("layer-opacity")?.SetValues(
+            Math.Clamp(config.MapLayerOpacityPercent, 0, 100),
+            0,
+            100,
+            5,
+            "%"
+        );
+    }
+
+    /// <summary>
+    /// Refreshes the Map options read-outs that depend on streaming data: the
+    /// status line, the legend caption and the ore ramp's stop labels.
+    /// </summary>
+    private void UpdateMapLayerPanelText()
+    {
+        mapLayerPanel?.GetDynamicText("layer-status")?.SetNewText(MapLayerStatusText);
+        mapLayerPanel?.GetDynamicText("layer-legend")?.SetNewText(MapLayerLegendCaption);
+        (string low, string middle, string high) = MapLayerLegendStops();
+        mapLayerPanel?.GetDynamicText("legend-low")?.SetNewText(low);
+        mapLayerPanel?.GetDynamicText("legend-middle")?.SetNewText(middle);
+        mapLayerPanel?.GetDynamicText("legend-high")?.SetNewText(high);
+    }
+
+    /// <summary>
+    /// Status line for the active layer. The ore layer names its data sources
+    /// explicitly and reports both groups when a radius carries regional maps
+    /// and loaded columns at once: one found OreMap must not hide the columns
+    /// that filled the rest.
+    /// </summary>
+    private string MapLayerStatusText
+    {
+        get
+        {
+            if (activeMapLayer != AtlasMapLayer.OreDensity)
+            {
+                return mapLayerTexture.StatusText;
+            }
+            return AtlasOreStatusText.Compose(
+                mapLayerTexture.Failed,
+                mapLayerTexture.Ready,
+                mapLayerTexture.ProgressPercent,
+                mapLayerTexture.OreLayerSource,
+                mapLayerTexture.OreMapCount,
+                mapLayerTexture.OreRegionCount,
+                mapLayerTexture.OreColumnSampleCount,
+                mapLayerTexture.OreBlockHitCount,
+                selectedOreCode == null
+                    ? "All ores"
+                    : searchController.GetEnglishOreName(selectedOreCode),
+                AtlasMapLayerTexture.HorizontalSampleSize
+            );
+        }
+    }
+
     private bool ToggleMapLayerPanel()
     {
         ToggleMapOptions();
@@ -215,16 +346,21 @@ public sealed partial class ModernAtlasDialog
             StringComparison.OrdinalIgnoreCase
         ));
 
-        values = new string[options.Count + 1];
-        names = new string[options.Count + 1];
+        int total = options.Count + 1;
+        values = new string[total];
+        names = new string[total];
         values[0] = AllOresFilterValue;
-        names[0] = "All ores";
+        // The counter tells the reader how far into the list this option is,
+        // so a single visible label no longer hides the list's size.
+        names[0] = FilterLabel("All", 1, total, maximumLabelLength);
         selectedIndex = 0;
         for (int index = 0; index < options.Count; index++)
         {
             values[index + 1] = options[index].Code;
-            names[index + 1] = TruncateLabel(
+            names[index + 1] = FilterLabel(
                 options[index].Name,
+                index + 2,
+                total,
                 maximumLabelLength
             );
             if (string.Equals(options[index].Code, selectedOreCode, StringComparison.Ordinal))
@@ -232,6 +368,22 @@ public sealed partial class ModernAtlasDialog
                 selectedIndex = index + 1;
             }
         }
+    }
+
+    /// <summary>
+    /// "Cassiterite  4/17": the readable name plus its position in the filter
+    /// list. The counter is never truncated; the name yields space to it.
+    /// </summary>
+    private static string FilterLabel(
+        string name,
+        int position,
+        int total,
+        int maximumLabelLength
+    )
+    {
+        string counter = $"  {position}/{total}";
+        int nameBudget = Math.Max(4, maximumLabelLength - counter.Length);
+        return TruncateLabel(name, nameBudget) + counter;
     }
 
     private void SynchronizeOreFilterOptions()
@@ -283,7 +435,7 @@ public sealed partial class ModernAtlasDialog
     }
 
     /// <summary>
-    /// Builds the arrow selector's option list. Ore density is present only
+    /// Builds the arrow selector's option list. Ore analysis is present only
     /// with spoiler access, so a plain arrow click can never wrap onto a layer
     /// that <see cref="OnMapLayerChanged"/> would have to reject with an
     /// in-game error. Narrow controls use short labels because the centered
@@ -329,6 +481,7 @@ public sealed partial class ModernAtlasDialog
         {
             AtlasMapLayer.TexturedTerrain => "Terrain",
             AtlasMapLayer.SoilFertility => "Fertility",
+            AtlasMapLayer.OreDensity => "Ore",
             _ => layer.DisplayName()
         };
     }
@@ -336,7 +489,7 @@ public sealed partial class ModernAtlasDialog
     /// <summary>
     /// Corrects a layer that lost its spoiler access without an atlas event.
     /// Leaving Creative through a console command does not raise a cheat-mode
-    /// change, so the renderer could stay on Ore density while the selector no
+    /// change, so the renderer could stay on Ore analysis while the selector no
     /// longer offers it. Reset the layer first; SetMapLayer then rebuilds the
     /// panel with the reduced option list.
     /// </summary>
@@ -358,7 +511,7 @@ public sealed partial class ModernAtlasDialog
             capi.TriggerIngameError(
                 this,
                 "modernatlas-layer-access",
-                "Ore density is available only in Creative or server-authorized Cheat Mode."
+                "Ore analysis is available only in Creative or server-authorized Cheat Mode."
             );
             SyncMapLayerChoice();
             return;
@@ -387,6 +540,8 @@ public sealed partial class ModernAtlasDialog
             pendingMapLayerPanelRecompose = true;
         }
         SyncMapLayerChoice();
+        // The toolbar dot reports the active layer, so it repaints here too.
+        RefreshToolbarLayerIndicator();
         if (IsOpened()) PrepareMapLayer();
         else mapLayerTexture.Reset();
     }
@@ -496,16 +651,10 @@ public sealed partial class ModernAtlasDialog
         }
 
         float alpha = 0.78f + pulse * 0.18f;
-        Vec4f color = result.Kind switch
-        {
-            AtlasSearchResultKind.Block => new Vec4f(1f, 0.72f, 0.18f, alpha),
-            AtlasSearchResultKind.Player => new Vec4f(0.20f, 0.86f, 1f, alpha),
-            AtlasSearchResultKind.Animal => new Vec4f(0.34f, 1f, 0.48f, alpha),
-            AtlasSearchResultKind.Mob => new Vec4f(1f, 0.22f, 0.18f, alpha),
-            AtlasSearchResultKind.Npc => new Vec4f(0.78f, 0.48f, 1f, alpha),
-            AtlasSearchResultKind.DroppedItem => new Vec4f(1f, 0.46f, 0.12f, alpha),
-            _ => new Vec4f(1f, 1f, 1f, alpha)
-        };
+        // Same palette the panel legend reads, so a swatch always matches its
+        // marker.
+        (float red, float green, float blue) = AtlasSearchMarkerPalette.Color(result.Kind);
+        Vec4f color = new(red, green, blue, alpha);
         capi.Render.Render2DTexture(
             searchMarkerTexture!.TextureId,
             (float)screenX - markerSize * 0.5f,
@@ -557,14 +706,203 @@ public sealed partial class ModernAtlasDialog
         capi.Gui.LoadOrUpdateCairoTexture(surface, true, ref searchMarkerTexture);
     }
 
-    private void UpdateOreHover(int mouseX, int mouseY, bool blocked)
+    /// <summary>
+    /// Pointer read-out for every data layer. The card reports the sample the
+    /// active layer already holds; no chunk is requested and nothing is
+    /// cached beyond the hovered cell.
+    /// </summary>
+    /// <summary>
+    /// Result counts per category, taken only from the markers the search has
+    /// already produced. Those passed the entity-disclosure policy, so no
+    /// category can appear here that the atlas is not allowed to show. Empty
+    /// categories are left out.
+    /// </summary>
+    private List<(AtlasSearchResultKind Kind, int Count)> SearchCategoryCounts()
     {
+        var counts = new Dictionary<AtlasSearchResultKind, int>();
+        foreach (AtlasSearchResult result in searchController.BlockResults)
+        {
+            counts.TryGetValue(result.Kind, out int existing);
+            counts[result.Kind] = existing + 1;
+        }
+        foreach (AtlasSearchResult result in searchController.DynamicResults)
+        {
+            counts.TryGetValue(result.Kind, out int existing);
+            counts[result.Kind] = existing + 1;
+        }
+
+        var ordered = new List<(AtlasSearchResultKind Kind, int Count)>();
+        foreach (AtlasSearchResultKind kind in AtlasSearchMarkerPalette.Order)
+        {
+            if (counts.TryGetValue(kind, out int count) && count > 0)
+            {
+                ordered.Add((kind, count));
+            }
+        }
+        return ordered;
+    }
+
+    /// <summary>
+    /// Search status: scanning, results, or an explicit empty result. The
+    /// controller keeps the detailed stage text for the scanning case.
+    /// </summary>
+    private string SearchStatusText => AtlasSearchStatusText.Compose(
+        searchController.HasActiveQuery,
+        searchController.Scanning,
+        searchController.ScanPercent,
+        searchController.MarkerCount,
+        searchController.StatusText
+    );
+
+    /// <summary>
+    /// Builds the marker legend as one texture drawn over the search panel.
+    /// It reads <see cref="AtlasSearchMarkerPalette"/>, the same source the
+    /// markers use.
+    /// </summary>
+    private void EnsureSearchLegendTexture(double panelWidth)
+    {
+        List<(AtlasSearchResultKind Kind, int Count)> counts = SearchCategoryCounts();
+        var signature = new System.Text.StringBuilder();
+        signature.Append(panelWidth.ToString("0", System.Globalization.CultureInfo.InvariantCulture));
+        foreach ((AtlasSearchResultKind kind, int count) in counts)
+        {
+            signature.Append('|').Append(kind).Append(':').Append(count);
+        }
+        string key = signature.ToString();
+        if (searchLegendTexture is { TextureId: > 0 }
+            && string.Equals(searchLegendSignature, key, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        double scale = Math.Max(0.5, RuntimeEnv.GUIScale);
+        int width = Math.Max(1, (int)Math.Ceiling(panelWidth * scale));
+        double lineHeight = 15 * scale;
+        double swatch = 8 * scale;
+        double gap = 14 * scale;
+        double x = 0;
+        double y = 0;
+        var placements = new List<(double X, double Y, string Text, AtlasSearchResultKind Kind)>();
+        using (ImageSurface measureSurface = new(Format.Argb32, 4, 4))
+        using (Context measure = new(measureSurface))
+        {
+            measure.SelectFontFace("Sans", FontSlant.Normal, FontWeight.Normal);
+            measure.SetFontSize(9.5 * scale);
+            foreach ((AtlasSearchResultKind kind, int count) in counts)
+            {
+                string text = FormattableString.Invariant(
+                    $"{AtlasSearchMarkerPalette.DisplayName(kind)} {count}"
+                );
+                double itemWidth = swatch + 5 * scale + measure.TextExtents(text).Width;
+                if (x > 0 && x + itemWidth > width)
+                {
+                    x = 0;
+                    y += lineHeight;
+                }
+                placements.Add((x, y, text, kind));
+                x += itemWidth + gap;
+            }
+        }
+
+        int height = Math.Max(1, (int)Math.Ceiling(y + lineHeight));
+        searchLegendTexture ??= new LoadedTexture(capi);
+        using ImageSurface surface = new(Format.Argb32, width, height);
+        using Context context = new(surface);
+        AtlasUiStyle.Clear(context);
+        context.SelectFontFace("Sans", FontSlant.Normal, FontWeight.Normal);
+        context.SetFontSize(9.5 * scale);
+        foreach ((double itemX, double itemY, string text, AtlasSearchResultKind kind) in placements)
+        {
+            (float red, float green, float blue) = AtlasSearchMarkerPalette.Color(kind);
+            double centerY = itemY + lineHeight * 0.5;
+            context.Arc(itemX + swatch * 0.5, centerY, swatch * 0.5, 0, Math.PI * 2);
+            context.SetSourceRGBA(red, green, blue, 0.96);
+            context.FillPreserve();
+            context.SetSourceRGBA(1, 1, 1, 0.45);
+            context.LineWidth = Math.Max(1, scale * 0.6);
+            context.Stroke();
+
+            TextExtents extents = context.TextExtents(text);
+            context.SetSourceRGBA(0.85, 0.88, 0.91, 0.98);
+            context.MoveTo(
+                itemX + swatch + 5 * scale,
+                centerY + extents.Height * 0.5
+            );
+            context.ShowText(text);
+        }
+
+        capi.Gui.LoadOrUpdateCairoTexture(surface, true, ref searchLegendTexture);
+        searchLegendSignature = key;
+    }
+
+    /// <summary>
+    /// Places the legend under the status line inside the search panel.
+    /// Shared with the automated test, which asserts that the texture exists
+    /// and stays within the panel.
+    /// </summary>
+    private bool TryResolveSearchLegendPlacement(
+        out float x,
+        out float y,
+        out float width,
+        out float height
+    )
+    {
+        x = 0;
+        y = 0;
+        width = 0;
+        height = 0;
+        if (bottomPanelSection != AtlasPanelSection.Search
+            || !hasBottomPanelGeometry
+            || SearchCategoryCounts().Count == 0)
+        {
+            return false;
+        }
+
+        double scale = Math.Max(0.5, RuntimeEnv.GUIScale);
+        double contentWidth = Math.Max(60, bottomPanelGeometry.Width / scale - 32);
+        EnsureSearchLegendTexture(contentWidth);
+        if (searchLegendTexture is not { TextureId: > 0 }) return false;
+
+        x = (float)(bottomPanelGeometry.X + 16 * scale);
+        y = (float)(bottomPanelGeometry.Y + 98 * scale);
+        width = searchLegendTexture.Width;
+        height = searchLegendTexture.Height;
+        return true;
+    }
+
+    private void RenderSearchLegend()
+    {
+        if (interfaceHidden) return;
+        if (!TryResolveSearchLegendPlacement(
+            out float x,
+            out float y,
+            out float width,
+            out float height
+        ))
+        {
+            return;
+        }
+        capi.Render.Render2DTexture(
+            searchLegendTexture!.TextureId,
+            x,
+            y,
+            width,
+            height,
+            52,
+            ColorUtil.WhiteArgbVec
+        );
+    }
+
+    private void UpdateLayerHover(int mouseX, int mouseY, bool blocked)
+    {
+        // The automated card checks arm a read-out deliberately and then wait
+        // for a capture; the live pointer must not clear it in between.
+        if (automatedSmokeTestHoldLayerHover) return;
         oreHoverMouseX = mouseX;
         oreHoverMouseY = mouseY;
         if (blocked
             || interfaceHidden
-            || activeMapLayer != AtlasMapLayer.OreDensity
-            || !CreativeCheatSettingsAvailable
+            || !LayerHoverAvailable
             || settingsModalOpen
             || performanceModalOpen
             || creativeSettingsModalOpen
@@ -597,20 +935,134 @@ public sealed partial class ModernAtlasDialog
             * AtlasMapLayerTexture.HorizontalSampleSize
             + AtlasMapLayerTexture.HorizontalSampleSize / 2;
         if (cellX == oreHoverCellX && cellZ == oreHoverCellZ
-            && oreHoverInspection != null)
+            && (oreHoverInspection != null || climateHoverInspection != null))
         {
             return;
         }
 
         oreHoverCellX = cellX;
         oreHoverCellZ = cellZ;
-        if (!mapLayerTexture.TryInspectOre(cellX, cellZ, out oreHoverInspection)
-            || oreHoverInspection == null)
+        if (activeMapLayer == AtlasMapLayer.OreDensity)
+        {
+            climateHoverInspection = null;
+            if (!mapLayerTexture.TryInspectOre(cellX, cellZ, out oreHoverInspection)
+                || oreHoverInspection == null)
+            {
+                ClearOreHover();
+                return;
+            }
+            BuildOreHoverTexture(oreHoverInspection);
+            return;
+        }
+
+        oreHoverInspection = null;
+        if (!mapLayerTexture.TryInspectClimate(
+            cellX,
+            cellZ,
+            out AtlasClimateInspection? climate
+        ) || climate == null)
         {
             ClearOreHover();
             return;
         }
-        BuildOreHoverTexture(oreHoverInspection);
+        climateHoverInspection = climate;
+        BuildClimateHoverTexture(climate.Value);
+    }
+
+    /// <summary>
+    /// Ore stays behind the spoiler gate; the climate layers are readable
+    /// whenever they are the active layer.
+    /// </summary>
+    private bool LayerHoverAvailable => activeMapLayer switch
+    {
+        AtlasMapLayer.OreDensity => CreativeCheatSettingsAvailable,
+        AtlasMapLayer.TexturedTerrain => false,
+        _ => true
+    };
+
+    /// <summary>
+    /// The climate read-out. It names the world-generation source explicitly
+    /// so the value is never read as current weather.
+    /// </summary>
+    private void BuildClimateHoverTexture(AtlasClimateInspection inspection)
+    {
+        double scale = Math.Max(0.5, RuntimeEnv.GUIScale);
+        int width = Math.Max(1, (int)Math.Ceiling(320 * scale));
+        int height = Math.Max(1, (int)Math.Ceiling(150 * scale));
+        oreHoverTexture ??= new LoadedTexture(capi);
+        using ImageSurface surface = new(Format.Argb32, width, height);
+        using Context context = new(surface);
+        AtlasUiStyle.Clear(context);
+        AtlasUiStyle.DrawRaisedPanel(context, 0, 0, width, height, 13);
+
+        DrawOreHoverText(
+            context,
+            inspection.Layer.DisplayName().ToUpperInvariant(),
+            18,
+            27,
+            12,
+            true,
+            0.97,
+            0.98,
+            0.99,
+            scale
+        );
+        (float red, float green, float blue) = AtlasMapLayerPalette.Color(
+            inspection.Layer,
+            inspection.Normalized
+        );
+        context.SetSourceRGBA(red, green, blue, 0.96);
+        context.Rectangle(18 * scale, 38 * scale, 13 * scale, 13 * scale);
+        context.Fill();
+        DrawOreHoverText(
+            context,
+            $"{inspection.Grade}  ·  {inspection.ValueText}",
+            38,
+            50,
+            12,
+            true,
+            0.96,
+            0.97,
+            0.98,
+            scale
+        );
+        DrawOreHoverText(
+            context,
+            $"X {inspection.WorldX}  ·  Z {inspection.WorldZ}  ·  Surface Y {inspection.SurfaceY}",
+            18,
+            82,
+            10.5,
+            false,
+            0.78,
+            0.83,
+            0.88,
+            scale
+        );
+        DrawOreHoverText(
+            context,
+            inspection.Layer.Description(),
+            18,
+            104,
+            10,
+            false,
+            0.72,
+            0.78,
+            0.83,
+            scale
+        );
+        DrawOreHoverText(
+            context,
+            $"{AtlasMapLayerTexture.HorizontalSampleSize} × {AtlasMapLayerTexture.HorizontalSampleSize} block sample  ·  loaded data only",
+            18,
+            126,
+            9.5,
+            false,
+            0.65,
+            0.71,
+            0.75,
+            scale
+        );
+        capi.Gui.LoadOrUpdateCairoTexture(surface, true, ref oreHoverTexture);
     }
 
     private bool TryResolvePointerSurface(
@@ -692,27 +1144,61 @@ public sealed partial class ModernAtlasDialog
         return false;
     }
 
+    /// <summary>
+    /// The ore read-out. It always states which of the two sources it speaks
+    /// for, because a mapped regional potential and a count of blocks seen in
+    /// one loaded column are different claims.
+    /// </summary>
     private void BuildOreHoverTexture(AtlasOreInspection inspection)
     {
+        bool regional = inspection.Source == AtlasOreInspectionSource.RegionalOreMaps;
         AtlasOreReading[] visible = SelectVisibleOreReadings(inspection.Readings);
-        double scale = Math.Max(0.5, RuntimeEnv.GUIScale);
-        int width = Math.Max(1, (int)Math.Ceiling(390 * scale));
+        int hiddenCount = Math.Max(0, inspection.Readings.Length - visible.Length);
+        string? aggregateNote = selectedOreCode == null && inspection.Readings.Length > 1
+            ? regional
+                ? "All ores: ranked by potential; the map color is the highest, not a sum"
+                : "All ores: blocks counted per ore; the map color is the strongest, not a sum"
+            : null;
+
+        const double rowHeight = 30;
+        double headerHeight = aggregateNote == null ? 78 : 96;
         int rowCount = Math.Max(1, visible.Length);
-        int height = Math.Max(1, (int)Math.Ceiling((148 + rowCount * 25) * scale));
+        double contentHeight = headerHeight
+            + rowCount * rowHeight
+            + (hiddenCount > 0 ? 16 : 0)
+            + 56;
+        double scale = Math.Max(0.5, RuntimeEnv.GUIScale);
+        int width = Math.Max(1, (int)Math.Ceiling(430 * scale));
+        int height = Math.Max(1, (int)Math.Ceiling(contentHeight * scale));
         oreHoverTexture ??= new LoadedTexture(capi);
         using ImageSurface surface = new(Format.Argb32, width, height);
         using Context context = new(surface);
         AtlasUiStyle.Clear(context);
         AtlasUiStyle.DrawRaisedPanel(context, 0, 0, width, height, 13);
 
-        DrawOreHoverText(context, "ORE POTENTIAL", 18, 25, 12, true, 0.97, 0.98, 0.99, scale);
-        string position = $"X {inspection.WorldX}  •  Z {inspection.WorldZ}  •  Surface {inspection.SurfaceY}";
-        DrawOreHoverText(context, position, 18, 47, 10.5, false, 0.75, 0.81, 0.86, scale);
+        DrawOreHoverText(
+            context,
+            regional ? "REGIONAL POTENTIAL" : "LOADED COLUMN",
+            18,
+            26,
+            12,
+            true,
+            regional ? 0.72 : 0.95,
+            regional ? 0.86 : 0.80,
+            regional ? 1.00 : 0.42,
+            scale
+        );
+        string position = $"X {inspection.WorldX}  ·  Z {inspection.WorldZ}  ·  Surface Y {inspection.SurfaceY}";
+        DrawOreHoverText(context, position, 18, 48, 10.5, false, 0.78, 0.83, 0.88, scale);
+        if (aggregateNote != null)
+        {
+            DrawOreHoverText(context, aggregateNote, 18, 68, 9.5, false, 0.68, 0.74, 0.79, scale);
+        }
 
-        double rowY = 76;
+        double rowY = headerHeight;
         if (visible.Length == 0)
         {
-            string empty = inspection.Source == AtlasOreInspectionSource.RegionalOreMaps
+            string empty = regional
                 ? "No mapped potential above the trace threshold"
                 : "No ore blocks in this loaded column";
             DrawOreHoverText(context, empty, 18, rowY, 11, false, 0.85, 0.87, 0.89, scale);
@@ -721,34 +1207,68 @@ public sealed partial class ModernAtlasDialog
         {
             foreach (AtlasOreReading reading in visible)
             {
-                string name = TruncateLabel(searchController.GetEnglishOreName(reading.Code), 24);
                 bool selected = selectedOreCode != null
                     && string.Equals(reading.Code, selectedOreCode, StringComparison.Ordinal);
+                string name = TruncateLabel(
+                    searchController.GetEnglishOreName(reading.Code),
+                    26
+                );
                 if (selected) name = "› " + name;
                 string value = reading.IsPotential
                     ? $"{AtlasOrePotential.Grade(reading.Potential)}  {reading.Potential * 100:0.##}%"
-                    : reading.BlockCount == 1 ? "1 loaded block" : $"{reading.BlockCount} loaded blocks";
+                    : reading.BlockCount == 1
+                        ? "1 observed ore block"
+                        : $"{reading.BlockCount} observed ore blocks";
                 (double red, double green, double blue) = reading.IsPotential
                     ? GradeColor(reading.Potential)
                     : (0.92, 0.72, 0.30);
                 DrawOreHoverText(context, name, 18, rowY, 11, selected, 0.96, 0.97, 0.98, scale);
-                DrawOreHoverText(context, value, 210, rowY, 10.5, true, red, green, blue, scale);
-                rowY += 25;
+                DrawOreHoverText(context, value, 240, rowY, 10.5, true, red, green, blue, scale);
+                // The asset code stays available but subordinate to the name.
+                DrawOreHoverText(
+                    context,
+                    TruncateLabel(reading.Code, 44),
+                    18,
+                    rowY + 12,
+                    8,
+                    false,
+                    0.58,
+                    0.63,
+                    0.68,
+                    scale
+                );
+                rowY += rowHeight;
             }
         }
 
-        int hiddenCount = Math.Max(0, inspection.Readings.Length - visible.Length);
         if (hiddenCount > 0)
         {
-            DrawOreHoverText(context, $"+{hiddenCount} more mapped ores", 18, rowY, 9.5, false, 0.65, 0.70, 0.74, scale);
+            DrawOreHoverText(
+                context,
+                regional
+                    ? $"+{hiddenCount} more mapped ores"
+                    : $"+{hiddenCount} more ores in this column",
+                18,
+                rowY + 2,
+                9.5,
+                false,
+                0.65,
+                0.70,
+                0.74,
+                scale
+            );
+            rowY += 16;
         }
-        double infoY = (148 + rowCount * 25) - 45;
-        string rock = searchController.GetEnglishBlockName(inspection.HostRockCode);
-        DrawOreHoverText(context, $"Rock: {TruncateLabel(rock, 32)}", 18, infoY, 10, false, 0.76, 0.81, 0.85, scale);
-        string source = inspection.Source == AtlasOreInspectionSource.RegionalOreMaps
-            ? $"Source: {inspection.SourceMapCount} loaded regional OreMaps"
-            : "Source: exact loaded block column • grade unavailable";
-        DrawOreHoverText(context, source, 18, infoY + 20, 9.5, false, 0.65, 0.71, 0.75, scale);
+
+        double infoY = rowY + 18;
+        string rock = inspection.HostRockCode == null
+            ? "unavailable in loaded blocks"
+            : TruncateLabel(searchController.GetEnglishBlockName(inspection.HostRockCode), 32);
+        DrawOreHoverText(context, $"Host rock: {rock}", 18, infoY, 10, false, 0.76, 0.81, 0.85, scale);
+        string source = regional
+            ? $"Source: {inspection.SourceMapCount} loaded regional OreMaps · loaded data only"
+            : "Source: exact loaded block column · potential grade unavailable · loaded data only";
+        DrawOreHoverText(context, source, 18, infoY + 18, 9, false, 0.65, 0.71, 0.75, scale);
         capi.Gui.LoadOrUpdateCairoTexture(surface, true, ref oreHoverTexture);
     }
 
@@ -818,28 +1338,26 @@ public sealed partial class ModernAtlasDialog
         context.ShowText(text);
     }
 
-    private void RenderOreHoverCard()
+    private void RenderLayerHoverCard()
     {
-        if (oreHoverInspection == null
+        if ((oreHoverInspection == null && climateHoverInspection == null)
             || oreHoverTexture is not { TextureId: > 0 }
             || interfaceHidden
-            || activeMapLayer != AtlasMapLayer.OreDensity
-            || !CreativeCheatSettingsAvailable)
+            || !LayerHoverAvailable)
         {
             return;
         }
 
-        AtlasViewportBounds viewport = AtlasViewport;
         LoadedTexture hoverTexture = oreHoverTexture!;
         float width = hoverTexture.Width;
         float height = hoverTexture.Height;
-        float x = oreHoverMouseX + 18;
-        if (x + width > viewport.Right - 8) x = oreHoverMouseX - width - 18;
-        x = Math.Clamp(x, viewport.X + 8, Math.Max(viewport.X + 8, viewport.Right - width - 8));
-        float y = Math.Clamp(
-            oreHoverMouseY + 16,
-            viewport.Y + 8,
-            Math.Max(viewport.Y + 8, viewport.Bottom - height - 8)
+        ResolveLayerHoverCardPlacement(
+            width,
+            height,
+            oreHoverMouseX,
+            oreHoverMouseY,
+            out float x,
+            out float y
         );
         capi.Render.Render2DTexture(
             hoverTexture.TextureId,
@@ -852,9 +1370,34 @@ public sealed partial class ModernAtlasDialog
         );
     }
 
+    /// <summary>
+    /// Places the hover card next to the pointer and keeps it inside the map
+    /// viewport, so a card opened at an edge cannot be cut off.
+    /// </summary>
+    private void ResolveLayerHoverCardPlacement(
+        float width,
+        float height,
+        int mouseX,
+        int mouseY,
+        out float x,
+        out float y
+    )
+    {
+        AtlasViewportBounds viewport = AtlasViewport;
+        x = mouseX + 18;
+        if (x + width > viewport.Right - 8) x = mouseX - width - 18;
+        x = Math.Clamp(x, viewport.X + 8, Math.Max(viewport.X + 8, viewport.Right - width - 8));
+        y = Math.Clamp(
+            mouseY + 16,
+            viewport.Y + 8,
+            Math.Max(viewport.Y + 8, viewport.Bottom - height - 8)
+        );
+    }
+
     private void ClearOreHover()
     {
         oreHoverInspection = null;
+        climateHoverInspection = null;
         oreHoverCellX = int.MinValue;
         oreHoverCellZ = int.MinValue;
     }

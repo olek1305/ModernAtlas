@@ -379,6 +379,12 @@ internal sealed class GuiElementAtlasButton : GuiElementControl
 
     public bool IsActive => active;
 
+    /// <summary>
+    /// The rendered caption. Automated interface tests assert the toolbar's
+    /// wording through this instead of reading pixels.
+    /// </summary>
+    public string Label => label;
+
     public override void RenderInteractiveElements(float deltaTime)
     {
         LoadedTexture texture = !Enabled

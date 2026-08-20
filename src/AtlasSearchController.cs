@@ -75,6 +75,12 @@ internal sealed class AtlasSearchController
     public string DiagnosticSummary =>
         $"blockTypes={matchingBlockIds.Count}, columns={chunkColumns.Count}, probedCoordinates={probedChunkCoordinates}, inspectedChunks={inspectedChunks}, readyChunks={readyChunks}, paletteChunks={paletteMatchingChunks}, scannedPositions={scannedBlockPositions}, rawMatches={rawBlockMatches}, radiusRejected={radiusRejectedMatches}, surfaceRejected={surfaceRejectedMatches}, markers={blockResults.Count}";
 
+    /// <summary>True while the loaded-data scan is still running.</summary>
+    public bool Scanning => HasActiveQuery && stage != SearchStage.Complete;
+    public int ScanPercent => ScanProgressPercent;
+    public int MarkerCount => blockResults.Count + dynamicResults.Count;
+    public bool ResultsTruncated => blockResultsTruncated;
+
     public string StatusText
     {
         get

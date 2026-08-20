@@ -941,7 +941,7 @@ internal sealed partial class ExactChunkRendererAdapter
             0
         ).r;
         if (modernAtlasOpaqueDepth >= 0.999999
-            || gl_FragCoord.z > modernAtlasOpaqueDepth + 0.0005)
+            || gl_FragCoord.z >= modernAtlasOpaqueDepth)
         {
             discard;
         }
