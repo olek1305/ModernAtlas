@@ -11,7 +11,8 @@ internal enum AtlasButtonStyle
 {
     Surface,
     Dark,
-    Icon
+    Icon,
+    Compact
 }
 
 internal static class AtlasUiStyle
@@ -48,6 +49,104 @@ internal static class AtlasUiStyle
             bounds.InnerHeight,
             16
         );
+    }
+
+    public static void DrawOpaquePreviewCard(
+        Context context,
+        ImageSurface surface,
+        ElementBounds bounds
+    )
+    {
+        if (bounds.InnerWidth <= 0 || bounds.InnerHeight <= 0) return;
+
+        double scale = Math.Max(0.5, RuntimeEnv.GUIScale);
+        double edge = Math.Max(1, scale);
+        RoundedRectangle(
+            context,
+            bounds.drawX + 4 * scale,
+            bounds.drawY + 6 * scale,
+            Math.Max(1, bounds.InnerWidth - 6 * scale),
+            Math.Max(1, bounds.InnerHeight - 6 * scale),
+            16 * scale
+        );
+        context.SetSourceRGBA(0.005, 0.010, 0.014, 0.86);
+        context.Fill();
+        RoundedRectangle(
+            context,
+            bounds.drawX + edge,
+            bounds.drawY + edge,
+            Math.Max(1, bounds.InnerWidth - 2 * edge),
+            Math.Max(1, bounds.InnerHeight - 2 * edge),
+            Math.Max(2, 16 * scale - edge)
+        );
+        context.SetSourceRGBA(0.010, 0.018, 0.024, 0.96);
+        context.FillPreserve();
+        context.SetSourceRGBA(1, 1, 1, 0.20);
+        context.LineWidth = edge;
+        context.Stroke();
+    }
+
+    public static void DrawToolbarPanel(Context context, ImageSurface surface, ElementBounds bounds)
+    {
+        if (bounds.InnerWidth <= 0 || bounds.InnerHeight <= 0) return;
+
+        double scale = Math.Max(0.5, RuntimeEnv.GUIScale);
+        RoundedRectangle(
+            context,
+            bounds.drawX,
+            bounds.drawY,
+            bounds.InnerWidth,
+            bounds.InnerHeight,
+            10 * scale
+        );
+        // The toolbar is deliberately lighter than the content panel: it is
+        // a navigation aid, not a second window over the atlas.
+        context.SetSourceRGBA(0.015, 0.025, 0.032, 0.25);
+        context.FillPreserve();
+        context.SetSourceRGBA(1, 1, 1, 0.16);
+        context.LineWidth = Math.Max(1, scale * 0.65);
+        context.Stroke();
+    }
+
+    public static void DrawTooltip(
+        Context context,
+        ImageSurface surface,
+        ElementBounds bounds,
+        string text,
+        double localY
+    )
+    {
+        if (string.IsNullOrWhiteSpace(text)) return;
+
+        double scale = Math.Max(0.5, RuntimeEnv.GUIScale);
+        double paddingX = 9 * scale;
+        double paddingY = 5 * scale;
+        using CairoFont font = DetailFont(12);
+        font.SetupContext(context);
+        TextExtents extents = font.GetTextExtents(text);
+        double width = Math.Min(
+            bounds.InnerWidth,
+            Math.Max(70 * scale, extents.Width + paddingX * 2)
+        );
+        double height = Math.Max(24 * scale, extents.Height + paddingY * 2);
+        double x = bounds.drawX;
+        double y = Math.Clamp(
+            bounds.drawY + localY - height * 0.5,
+            bounds.drawY + 3 * scale,
+            bounds.drawY + Math.Max(3 * scale, bounds.InnerHeight - height - 3 * scale)
+        );
+        RoundedRectangle(context, x, y, width, height, 7 * scale);
+        context.SetSourceRGBA(0.015, 0.025, 0.032, 0.82);
+        context.FillPreserve();
+        context.SetSourceRGBA(1, 1, 1, 0.22);
+        context.LineWidth = Math.Max(1, scale * 0.65);
+        context.Stroke();
+        context.SetSourceRGBA(Ink[0], Ink[1], Ink[2], 1);
+        context.MoveTo(
+            x + paddingX - extents.XBearing,
+            y + (height - extents.Height) * 0.5 - extents.YBearing
+        );
+        context.ShowText(text);
     }
 
     public static void DrawInsetCard(Context context, ImageSurface surface, ElementBounds bounds)
@@ -244,9 +343,11 @@ internal sealed class GuiElementAtlasButton : GuiElementControl
     private readonly LoadedTexture normalTexture;
     private readonly LoadedTexture hoverTexture;
     private readonly LoadedTexture pressedTexture;
+    private readonly LoadedTexture activeTexture;
     private readonly LoadedTexture disabledTexture;
     private bool hovered;
     private bool pressed;
+    private bool active;
 
     public GuiElementAtlasButton(
         ICoreClientAPI capi,
@@ -262,6 +363,7 @@ internal sealed class GuiElementAtlasButton : GuiElementControl
         normalTexture = new LoadedTexture(capi);
         hoverTexture = new LoadedTexture(capi);
         pressedTexture = new LoadedTexture(capi);
+        activeTexture = new LoadedTexture(capi);
         disabledTexture = new LoadedTexture(capi);
         MouseOverCursor = "hand";
     }
@@ -271,8 +373,17 @@ internal sealed class GuiElementAtlasButton : GuiElementControl
         ComposeTexture(normalTexture, false, false, true);
         ComposeTexture(hoverTexture, false, true, true);
         ComposeTexture(pressedTexture, true, true, true);
+        ComposeTexture(activeTexture, false, true, true, true);
         ComposeTexture(disabledTexture, false, false, false);
     }
+
+    public bool IsActive => active;
+
+    /// <summary>
+    /// The rendered caption. Automated interface tests assert the toolbar's
+    /// wording through this instead of reading pixels.
+    /// </summary>
+    public string Label => label;
 
     public override void RenderInteractiveElements(float deltaTime)
     {
@@ -280,6 +391,8 @@ internal sealed class GuiElementAtlasButton : GuiElementControl
             ? disabledTexture
             : pressed
                 ? pressedTexture
+                : active
+                    ? activeTexture
                 : hovered
                     ? hoverTexture
                     : normalTexture;
@@ -318,11 +431,36 @@ internal sealed class GuiElementAtlasButton : GuiElementControl
         if (args.Button == EnumMouseButton.Left) pressed = false;
     }
 
+    /// <summary>
+    /// Invokes the button from a parent dialog that owns a modal input layer.
+    /// The preview is rendered after the atlas viewport and must retain mouse
+    /// ownership even when the engine's GUI dispatcher has already marked the
+    /// physical release as handled by another HUD dialog.
+    /// </summary>
+    internal bool InvokeFromOwner()
+    {
+        if (!Enabled) return false;
+        pressed = false;
+        onClick();
+        return true;
+    }
+
+    public void SetActive(bool enabled)
+    {
+        if (active == enabled) return;
+        active = enabled;
+        if (activeTexture.TextureId > 0)
+        {
+            ComposeTexture(activeTexture, false, true, true, true);
+        }
+    }
+
     public override void Dispose()
     {
         normalTexture.Dispose();
         hoverTexture.Dispose();
         pressedTexture.Dispose();
+        activeTexture.Dispose();
         disabledTexture.Dispose();
         base.Dispose();
     }
@@ -331,7 +469,8 @@ internal sealed class GuiElementAtlasButton : GuiElementControl
         LoadedTexture texture,
         bool isPressed,
         bool isHovered,
-        bool isEnabled
+        bool isEnabled,
+        bool isActive = false
     )
     {
         int width = Math.Max(1, Bounds.OuterWidthInt);
@@ -345,16 +484,20 @@ internal sealed class GuiElementAtlasButton : GuiElementControl
             width,
             height,
             isPressed,
-            isHovered && isEnabled,
-            dark,
-            style == AtlasButtonStyle.Icon ? 40 : 12
+            (isHovered || isActive) && isEnabled,
+            dark || isActive,
+            style == AtlasButtonStyle.Icon ? 40 : style == AtlasButtonStyle.Compact ? 8 : 12
         );
 
         double[] color = !isEnabled
             ? new[] { 0.72, 0.75, 0.78, 0.58 }
             : AtlasUiStyle.LightInk;
         using CairoFont font = CairoFont.WhiteDetailText()
-            .WithFontSize(style == AtlasButtonStyle.Icon ? 20 : 12)
+            .WithFontSize(
+                style == AtlasButtonStyle.Icon
+                    ? 20
+                    : style == AtlasButtonStyle.Compact ? 13 : 12
+            )
             .WithWeight(FontWeight.Bold)
             .WithColor(color);
         AtlasUiStyle.DrawCenteredText(
@@ -377,6 +520,7 @@ internal sealed class GuiElementAtlasSwitch : GuiElementControl
     private readonly LoadedTexture onTexture;
     private readonly LoadedTexture disabledTexture;
     private bool value;
+    private bool pressed;
 
     public GuiElementAtlasSwitch(
         ICoreClientAPI capi,
@@ -410,21 +554,35 @@ internal sealed class GuiElementAtlasSwitch : GuiElementControl
     public override void OnMouseDownOnElement(ICoreClientAPI capi, MouseEvent args)
     {
         if (!Enabled || args.Button != EnumMouseButton.Left) return;
+        pressed = true;
         args.Handled = true;
     }
 
     public override void OnMouseUpOnElement(ICoreClientAPI capi, MouseEvent args)
     {
-        if (!Enabled || args.Button != EnumMouseButton.Left) return;
+        if (args.Button != EnumMouseButton.Left) return;
+        bool ownedPress = pressed;
+        pressed = false;
+        if (!ownedPress || !Enabled) return;
         value = !value;
         onChanged(value);
         args.Handled = true;
+    }
+
+    public override void OnMouseUp(ICoreClientAPI capi, MouseEvent args)
+    {
+        // A presentation change can rebuild viewport composers between the
+        // two mouse events. Always clear the local press latch, but only a
+        // press owned by this switch may toggle its value.
+        base.OnMouseUp(capi, args);
+        if (args.Button == EnumMouseButton.Left) pressed = false;
     }
 
     public void SetValue(bool enabled) => value = enabled;
 
     public override void Dispose()
     {
+        pressed = false;
         offTexture.Dispose();
         onTexture.Dispose();
         disabledTexture.Dispose();

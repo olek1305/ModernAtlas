@@ -6,6 +6,8 @@ uniform float lightSweep;
 uniform sampler2D entityTex;
 uniform vec4 entityColor;
 uniform sampler2D atlasTex;
+uniform vec2 atlasUvOffset;
+uniform vec2 atlasUvScale;
 uniform sampler2D backgroundTex;
 uniform sampler2D compassTex;
 uniform int backgroundAvailable;
@@ -303,6 +305,14 @@ void main(void)
         float weave = sin((uv.x + uv.y) * 110.0) * 0.025;
         baseColor = vec3(0.16, 0.20, 0.18) + weave;
     }
+    else if (materialKind == 18)
+    {
+        // The capture-area guide must remain legible over bright terrain and
+        // filtered imagery. It is deliberately neutral and bypasses the
+        // parchment/mesh lighting used by the other material kinds.
+        baseColor = vec3(0.86, 0.94, 0.68);
+        materialAlpha = alpha;
+    }
     else if (materialKind == 6)
     {
         baseColor = texture(entityTex, uv).rgb * entityColor.rgb;
@@ -312,6 +322,29 @@ void main(void)
         baseColor = backgroundAvailable > 0
             ? frozenBackground(uv) * vec3(0.62, 0.66, 0.64)
             : vec3(0.012, 0.020, 0.027);
+    }
+    else if (materialKind == 16)
+    {
+        // A failed or not-yet-published atlas frame still gets a fully opaque
+        // neutral map surface. It is deliberately distinct from the paper so
+        // the missing frame cannot expose the normal world framebuffer.
+        float fiber = paperFiber(uv * 1.25);
+        float mottle = hash21(floor(uv * vec2(13.0, 17.0)));
+        baseColor = mix(
+            vec3(0.20, 0.24, 0.25),
+            vec3(0.29, 0.33, 0.34),
+            fiber * 0.72 + mottle * 0.18
+        );
+        materialAlpha = 1.0;
+    }
+    else if (materialKind == 17)
+    {
+        // Screenshot Preview displays the frozen atlas framebuffer without
+        // the parchment's diffuse tint. BEFORE and AFTER therefore compare
+        // the same source pixels on screen, while the existing material 7
+        // remains unchanged for the live scroll presentation.
+        baseColor = texture(atlasTex, atlasUvOffset + uv * atlasUvScale).rgb;
+        materialAlpha = 1.0;
     }
     else if (materialKind == 9)
     {
@@ -382,6 +415,8 @@ void main(void)
         ? exp(-pow((uv.x - sweepCenter) * 6.0, 2.0)) * smoothstep(0.0, 0.28, lightSweep)
         : 0.0;
     vec3 finalColor = materialKind == 8
+        ? baseColor
+        : materialKind == 17 || materialKind == 18
         ? baseColor
         : materialKind == 7
         ? baseColor * (0.90 + diffuse * 0.10)

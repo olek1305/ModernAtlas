@@ -15,6 +15,8 @@ uniform float cloudBaseY;
 uniform float cloudThickness;
 uniform float cloudMapWidth;
 uniform vec2 depthScale;
+uniform vec3 atlasCloudLightColor;
+uniform float atlasCloudExposure;
 
 vec3 unproject(mat4 inverseMvp, vec4 position)
 {
@@ -100,9 +102,8 @@ void main()
     float weatherDensity = clamp(max(mapValue.r, 0.0) * 0.48, 0.0, 1.0);
     if (weatherDensity < 0.01) discard;
 
-    // A short ray march gives the clouds visible sides and rounded tops. The
-    // noise has no time input: the live cloud offset moves it with the game's
-    // wind, but its height cannot pulse or grow.
+    // Vary the upper boundary with stable 3D noise so the atlas sees rounded
+    // cloud towers and their sides instead of a thin weather-map sheet.
     const int sampleCount = 12;
     float segmentLength = (cloudFar - cloudNear) / float(sampleCount);
     float jitter = hash21(gl_FragCoord.xy) * segmentLength;
@@ -141,7 +142,29 @@ void main()
             smoothstep(0.08, max(0.16, puffTop), height)
         );
         float softEdge = 1.0 - smoothstep(0.52, 0.92, density);
-        vec3 sampleColor = cloudColor.rgb * topLight;
+        // TextureCol follows the normal world's cloud lighting and can be
+        // nearly black even when the independent atlas uses bright fixed-hour
+        // lighting. Used directly, a dense weather front becomes a broad
+        // black stripe that resembles missing chunk geometry. Preserve the
+        // native tint, but give the atlas cloud volume its own bounded
+        // celestial illumination so it remains recognisable as cloud cover.
+        float sourceLuminance = dot(
+            max(cloudColor.rgb, vec3(0.0)),
+            vec3(0.2126, 0.7152, 0.0722)
+        );
+        vec3 sourceTint = sourceLuminance > 0.001
+            ? cloudColor.rgb / sourceLuminance
+            : vec3(1.0);
+        sourceTint = clamp(sourceTint, vec3(0.72), vec3(1.18));
+        float atlasBrightness = mix(
+            0.30,
+            0.82,
+            clamp(atlasCloudExposure / 1.5, 0.0, 1.0)
+        );
+        vec3 boundedCloudColor = sourceTint
+            * mix(vec3(1.0), atlasCloudLightColor, 0.32)
+            * atlasBrightness;
+        vec3 sampleColor = boundedCloudColor * topLight;
         sampleColor = mix(sampleColor, vec3(1.0), softEdge * 0.08);
 
         accumulated.rgb += (1.0 - accumulated.a) * sampleColor * sampleAlpha;
@@ -153,48 +176,9 @@ void main()
         min(mapPosition.x, mapPosition.y),
         min(cloudMapWidth - mapPosition.x, cloudMapWidth - mapPosition.y)
     );
-    float cloudAlpha = min(accumulated.a, 0.76)
+    float cloudAlpha = min(accumulated.a, 0.48)
         * smoothstep(1.0, cloudMapWidth * 0.12, edgeDistance);
-
-    // A restrained, displaced cloud-only shadow makes the layer read as
-    // floating above terrain. It is independent of the engine shadow map, so
-    // it cannot recreate the dark square-per-chunk artifact.
-    vec2 shadowLocalPosition = terrain.xz - cloudOffset.xz + vec2(-24.0, -28.0);
-    vec2 shadowMapPosition = shadowLocalPosition / cloudTileSize
-        + cloudMapWidth * 0.5;
-    float shadowAlpha = 0.0;
-    if (all(greaterThanEqual(shadowMapPosition, vec2(1.0)))
-        && all(lessThan(shadowMapPosition, vec2(cloudMapWidth - 2.0))))
-    {
-        float shadowWeather = clamp(
-            max(sampleSmooth(cloudMap, shadowMapPosition).r, 0.0) * 0.48,
-            0.0,
-            1.0
-        );
-        vec3 shadowNoisePosition = vec3(
-            shadowLocalPosition.x,
-            cloudBaseY + cloudThickness * 0.48,
-            shadowLocalPosition.y
-        ) / 34.0;
-        float shadowCoarse = valueNoise3d(shadowNoisePosition);
-        float shadowFine = valueNoise3d(
-            shadowNoisePosition * 2.07 + vec3(11.7, 3.1, -8.4)
-        );
-        float shadowShape = smoothstep(
-            0.38,
-            0.72,
-            shadowCoarse * 0.68 + shadowFine * 0.32 + shadowWeather * 0.24
-        );
-        shadowAlpha = shadowShape * shadowWeather * 0.10;
-    }
-
-    float alpha = cloudAlpha + (1.0 - cloudAlpha) * shadowAlpha;
-    if (alpha < 0.005) discard;
-    vec3 finalColor = accumulated.rgb / max(accumulated.a, 0.0001);
-    vec3 shadowColor = vec3(0.055, 0.075, 0.095);
-    vec3 combinedColor = (
-        finalColor * cloudAlpha
-        + shadowColor * shadowAlpha * (1.0 - cloudAlpha)
-    ) / max(alpha, 0.0001);
-    outColor = vec4(combinedColor, alpha);
+    if (cloudAlpha < 0.005) discard;
+    vec3 volumeColor = accumulated.rgb / max(accumulated.a, 0.0001);
+    outColor = vec4(volumeColor, cloudAlpha);
 }

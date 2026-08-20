@@ -33,14 +33,18 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
         AtlasViewportBounds viewport
     )
     {
-        if (atlasTextureId <= 0 || !EnsureMeshes()) return;
-        IShaderProgram? shader = shaderProvider();
-        if (shader == null || shader.Disposed || sheetMesh == null || cylinderMesh == null)
-        {
-            return;
-        }
-
         IRenderAPI render = capi.Render;
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
+        try
+        {
+            SetCanonicalGuiState(render);
+            if (!EnsureMeshes()) return;
+            IShaderProgram? shader = shaderProvider();
+            if (shader == null || shader.Disposed || sheetMesh == null || cylinderMesh == null)
+            {
+                return;
+            }
+
         float frameHeight = Math.Max(1, render.FrameHeight);
         float aspect = render.FrameWidth / frameHeight;
         float centerX = ((viewport.X + viewport.Width * 0.5f) / render.FrameWidth * 2f - 1f)
@@ -56,15 +60,13 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
         Mat4f.Ortho(projection, -aspect, aspect, -1f, 1f, -4f, 4f);
 
         render.CurrentActiveShader?.Stop();
-        render.CurrentFrameBuffer = null;
-        render.GLDisableDepthTest();
-        render.GLDepthMask(false);
-        render.GlDisableCullFace();
-        render.GlToggleBlend(true, EnumBlendMode.Standard);
         shader.Use();
         shader.UniformMatrix("projectionMatrix", projection);
         shader.Uniform("entityColor", new Vec4f(1f, 1f, 1f, 1f));
-        shader.BindTexture2D("atlasTex", atlasTextureId, 0);
+        if (atlasTextureId > 0)
+        {
+            shader.BindTexture2D("atlasTex", atlasTextureId, 0);
+        }
         shader.Uniform("backgroundAvailable", backgroundTextureId > 0 ? 1 : 0);
         if (backgroundTextureId > 0)
         {
@@ -116,7 +118,7 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
                     shader,
                     sheetMesh,
                     CreateModel(centerX, centerY, -0.012f, mapWidth, mapHeight, 0.82f),
-                    7
+                    atlasTextureId > 0 ? 7 : 16
                 );
             }
             finally
@@ -133,12 +135,11 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
         finally
         {
             shader.Stop();
-            // GUI composers render immediately after the scroll and use
-            // screen-facing quads. Leave face culling disabled so their
-            // cards, labels and controls are not discarded.
-            render.GLDepthMask(true);
-            render.GLEnableDepthTest();
-            render.GlToggleBlend(false, EnumBlendMode.Standard);
+        }
+        }
+        finally
+        {
+            renderState.RestoreGuiHandoff(false);
         }
     }
 
@@ -164,6 +165,9 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
 
         float[] projection = Mat4f.Create();
         Mat4f.Ortho(projection, -aspect, aspect, -1f, 1f, -4f, 4f);
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
+        try
+        {
         render.CurrentActiveShader?.Stop();
         render.CurrentFrameBuffer = null;
         render.GLDisableDepthTest();
@@ -183,6 +187,11 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
             shader.Stop();
             render.GLDepthMask(true);
             render.GlToggleBlend(false, EnumBlendMode.Standard);
+        }
+        }
+        finally
+        {
+            renderState.RestoreGuiHandoff(false);
         }
     }
 
@@ -214,6 +223,9 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
         Mat4f.Ortho(projection, -aspect, aspect, -1f, 1f, -4f, 4f);
         AtlasViewportBounds clip = viewport.Inset(AtlasContentClipInsetPixels);
 
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
+        try
+        {
         render.CurrentActiveShader?.Stop();
         render.CurrentFrameBuffer = null;
         render.GLDisableDepthTest();
@@ -269,33 +281,38 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
             render.GLEnableDepthTest();
             render.GlToggleBlend(false, EnumBlendMode.Standard);
         }
+        }
+        finally
+        {
+            renderState.RestoreGuiHandoff(false);
+        }
     }
 
     public void RenderAtlasFullscreen(int atlasTextureId)
     {
-        if (atlasTextureId <= 0 || !EnsureMeshes() || sheetMesh == null) return;
+        IRenderAPI render = capi.Render;
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
+        try
+        {
+        SetCanonicalGuiState(render);
+        if (!EnsureMeshes() || sheetMesh == null) return;
         IShaderProgram? shader = shaderProvider();
         if (shader == null || shader.Disposed) return;
 
-        IRenderAPI render = capi.Render;
         float frameHeight = Math.Max(1, render.FrameHeight);
         float aspect = render.FrameWidth / frameHeight;
         float[] projection = Mat4f.Create();
         Mat4f.Ortho(projection, -aspect, aspect, -1f, 1f, -4f, 4f);
 
         render.CurrentActiveShader?.Stop();
-        render.CurrentFrameBuffer = null;
         render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
-        render.GLDisableDepthTest();
-        render.GLDepthMask(false);
-        render.GlDisableCullFace();
-        render.GlScissorFlag(false);
-        render.GlToggleBlend(false, EnumBlendMode.Standard);
         shader.Use();
         shader.UniformMatrix("projectionMatrix", projection);
         shader.Uniform("entityColor", new Vec4f(1f, 1f, 1f, 1f));
-        shader.Uniform("backgroundAvailable", 0);
-        shader.BindTexture2D("atlasTex", atlasTextureId, 0);
+        if (atlasTextureId > 0)
+        {
+            shader.BindTexture2D("atlasTex", atlasTextureId, 0);
+        }
         try
         {
             // Framebuffer textures use the orientation expected by the atlas
@@ -306,15 +323,339 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
                 shader,
                 sheetMesh,
                 CreateModel(0f, 0f, 0f, aspect * 2f, 2f, 1f),
-                7
+                atlasTextureId > 0 ? 7 : 16
             );
         }
         finally
         {
             shader.Stop();
-            render.GLDepthMask(true);
-            render.GlToggleBlend(false, EnumBlendMode.Standard);
         }
+        }
+        finally
+        {
+            renderState.RestoreGuiHandoff(false);
+        }
+    }
+
+    /// <summary>
+    /// Presents two copies of one frozen atlas source for Screenshot Preview.
+    /// The source and filtered texture are only presentation inputs; this
+    /// method never renders the world and never performs a CPU filter.  The
+    /// central dimming rectangle is derived from the same immutable capture
+    /// layout that the tiled readback uses.
+    /// </summary>
+    public void RenderScreenshotPreview(
+        int beforeTextureId,
+        int afterTextureId,
+        int beforeX,
+        int beforeY,
+        int beforeWidth,
+        int beforeHeight,
+        int afterX,
+        int afterY,
+        int afterWidth,
+        int afterHeight,
+        AtlasScreenshotCaptureLayout layout
+    )
+    {
+        if (beforeWidth <= 0
+            || beforeHeight <= 0
+            || afterWidth <= 0
+            || afterHeight <= 0)
+        {
+            return;
+        }
+
+        IRenderAPI render = capi.Render;
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
+        try
+        {
+            SetCanonicalGuiState(render);
+            if (!EnsureMeshes() || sheetMesh == null) return;
+            IShaderProgram? shader = shaderProvider();
+            if (shader == null || shader.Disposed) return;
+
+            float frameHeight = Math.Max(1, render.FrameHeight);
+            float aspect = render.FrameWidth / frameHeight;
+            float[] projection = Mat4f.Create();
+            Mat4f.Ortho(projection, -aspect, aspect, -1f, 1f, -4f, 4f);
+
+            render.CurrentActiveShader?.Stop();
+            shader.Use();
+            shader.UniformMatrix("projectionMatrix", projection);
+            shader.Uniform("entityColor", new Vec4f(1f, 1f, 1f, 1f));
+            shader.Uniform("backgroundAvailable", 0);
+            shader.Uniform("lightSweep", 0f);
+            shader.Uniform(
+                "atlasUvOffset",
+                layout.ReadX / (float)Math.Max(1, layout.FrameWidth),
+                layout.ReadY / (float)Math.Max(1, layout.FrameHeight)
+            );
+            shader.Uniform(
+                "atlasUvScale",
+                layout.StoredWidth / (float)Math.Max(1, layout.FrameWidth),
+                layout.StoredHeight / (float)Math.Max(1, layout.FrameHeight)
+            );
+
+            RenderPreviewImage(
+                render,
+                shader,
+                beforeTextureId,
+                beforeX,
+                beforeY,
+                beforeWidth,
+                beforeHeight,
+                layout,
+                frameHeight,
+                aspect
+            );
+            RenderPreviewImage(
+                render,
+                shader,
+                afterTextureId,
+                afterX,
+                afterY,
+                afterWidth,
+                afterHeight,
+                layout,
+                frameHeight,
+                aspect
+            );
+            shader.Stop();
+        }
+        finally
+        {
+            try
+            {
+                render.CurrentActiveShader?.Stop();
+            }
+            catch
+            {
+                // The client can invalidate the shader during world leave.
+            }
+            renderState.RestoreGuiHandoff();
+        }
+    }
+
+    private void RenderPreviewImage(
+        IRenderAPI render,
+        IShaderProgram shader,
+        int textureId,
+        int x,
+        int y,
+        int width,
+        int height,
+        AtlasScreenshotCaptureLayout layout,
+        float frameHeight,
+        float aspect
+    )
+    {
+        if (textureId > 0)
+        {
+            shader.BindTexture2D("atlasTex", textureId, 0);
+        }
+        RenderComponent(
+            shader,
+            sheetMesh!,
+            CreateScreenModel(render, x, y, width, height, -0.010f, frameHeight, aspect),
+            textureId > 0 ? 17 : 16
+        );
+
+        int sourceWidth = Math.Max(1, layout.StoredWidth);
+        int sourceHeight = Math.Max(1, layout.StoredHeight);
+        int cropWidth = Math.Clamp(
+            (int)Math.Round(width * layout.CaptureFrameWidth / (double)sourceWidth),
+            1,
+            width
+        );
+        int cropHeight = Math.Clamp(
+            (int)Math.Round(height * layout.CaptureFrameHeight / (double)sourceHeight),
+            1,
+            height
+        );
+        int cropX = x + Math.Clamp(
+            (int)Math.Round(
+                width * (layout.CaptureFrameX - layout.ReadX)
+                    / (double)sourceWidth
+            ),
+            0,
+            Math.Max(0, width - cropWidth)
+        );
+        int cropY = y + Math.Clamp(
+            (int)Math.Round(
+                height * (layout.CaptureFrameY - layout.ReadY)
+                    / (double)sourceHeight
+            ),
+            0,
+            Math.Max(0, height - cropHeight)
+        );
+        const float outsideAlpha = 0.48f;
+        int border = Math.Clamp(
+            (int)Math.Round(Math.Min(width, height) * 0.008),
+            2,
+            5
+        );
+
+        render.GlToggleBlend(true, EnumBlendMode.Standard);
+        DrawPreviewOverlay(
+            render,
+            shader,
+            x,
+            y,
+            width,
+            Math.Max(0, cropY - y),
+            outsideAlpha,
+            frameHeight,
+            aspect
+        );
+        DrawPreviewOverlay(
+            render,
+            shader,
+            x,
+            cropY + cropHeight,
+            width,
+            Math.Max(0, y + height - cropY - cropHeight),
+            outsideAlpha,
+            frameHeight,
+            aspect
+        );
+        DrawPreviewOverlay(
+            render,
+            shader,
+            x,
+            cropY,
+            Math.Max(0, cropX - x),
+            cropHeight,
+            outsideAlpha,
+            frameHeight,
+            aspect
+        );
+        DrawPreviewOverlay(
+            render,
+            shader,
+            cropX + cropWidth,
+            cropY,
+            Math.Max(0, x + width - cropX - cropWidth),
+            cropHeight,
+            outsideAlpha,
+            frameHeight,
+            aspect
+        );
+
+        float borderAlpha = 0.90f;
+        DrawPreviewOverlay(
+            render,
+            shader,
+            cropX,
+            cropY,
+            cropWidth,
+            border,
+            borderAlpha,
+            frameHeight,
+            aspect,
+            18
+        );
+        DrawPreviewOverlay(
+            render,
+            shader,
+            cropX,
+            cropY + cropHeight - border,
+            cropWidth,
+            border,
+            borderAlpha,
+            frameHeight,
+            aspect,
+            18
+        );
+        DrawPreviewOverlay(
+            render,
+            shader,
+            cropX,
+            cropY,
+            border,
+            cropHeight,
+            borderAlpha,
+            frameHeight,
+            aspect,
+            18
+        );
+        DrawPreviewOverlay(
+            render,
+            shader,
+            cropX + cropWidth - border,
+            cropY,
+            border,
+            cropHeight,
+            borderAlpha,
+            frameHeight,
+            aspect,
+            18
+        );
+        render.GlToggleBlend(false, EnumBlendMode.Standard);
+    }
+
+    private void DrawPreviewOverlay(
+        IRenderAPI render,
+        IShaderProgram shader,
+        int x,
+        int y,
+        int width,
+        int height,
+        float alpha,
+        float frameHeight,
+        float aspect,
+        int materialKind = 5
+    )
+    {
+        if (width <= 0 || height <= 0) return;
+        RenderComponent(
+            shader,
+            sheetMesh!,
+            CreateScreenModel(render, x, y, width, height, -0.002f, frameHeight, aspect),
+            materialKind,
+            alpha
+        );
+    }
+
+    private static float[] CreateScreenModel(
+        IRenderAPI render,
+        int x,
+        int y,
+        int width,
+        int height,
+        float z,
+        float frameHeight,
+        float aspect
+    )
+    {
+        float centerX = ((x + width * 0.5f) / render.FrameWidth * 2f - 1f)
+            * aspect;
+        float centerY = 1f
+            - (y + height * 0.5f) / frameHeight * 2f;
+        float modelWidth = width / frameHeight * 2f;
+        float modelHeight = height / frameHeight * 2f;
+        return CreateModel(
+            centerX,
+            centerY,
+            z,
+            modelWidth,
+            modelHeight,
+            1f
+        );
+    }
+
+    private static void SetCanonicalGuiState(IRenderAPI render)
+    {
+        // This renderer is a GUI presentation pass. Never inherit a failed
+        // atlas draw's framebuffer, scissor, color mask or world depth state.
+        render.CurrentFrameBuffer = null;
+        render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
+        render.GlColorMask(true, true, true, true);
+        render.GlScissorFlag(false);
+        render.GLDisableDepthTest();
+        render.GLDepthMask(false);
+        render.GlDisableCullFace();
+        render.GlToggleBlend(false, EnumBlendMode.Standard);
     }
 
     private void RenderRoller(
@@ -350,12 +691,13 @@ internal sealed class AtlasScrollViewportRenderer : IDisposable
         IShaderProgram shader,
         MeshRef mesh,
         float[] model,
-        int materialKind
+        int materialKind,
+        float alpha = 1f
     )
     {
         shader.UniformMatrix("modelViewMatrix", model);
         shader.Uniform("materialKind", materialKind);
-        shader.Uniform("alpha", 1f);
+        shader.Uniform("alpha", alpha);
         shader.Uniform("lightSweep", 0f);
         capi.Render.RenderMesh(mesh);
     }

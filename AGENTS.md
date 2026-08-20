@@ -31,13 +31,35 @@ the product scope when the atlas itself is correct.
 
 ## Rendering scope
 
+- ModernAtlas must never manipulate ordinary world rendering, chunk loading,
+  chunk visibility, render distance, world textures, world materials, lighting,
+  fog, color, opacity or appearance. Treat all Vintage Story world and client
+  data as read-only input obtained through the public API or narrowly isolated
+  compatibility adapters. Rendering filters, shader uniforms, texture
+  substitutions, camera changes and visual effects may affect only the atlas
+  framebuffer while the atlas is being drawn, and every temporarily changed
+  engine value must be restored in `finally` before ordinary world rendering
+  resumes. Increasing or decreasing the atlas view must never request chunks,
+  alter the game's `viewDistance`, delay normal chunk presentation or leave an
+  atlas shader path enabled in the world renderer.
 - Render world blocks and their actual block shapes and textures.
 - Support blocks registered by other mods through the public Vintage Story
   block and texture-atlas APIs. Do not hard-code only vanilla block IDs.
 - Render terrain, buildings, ruins, vegetation and fluids when they are made
   from blocks.
+- Vintage Story renders loaded windmill sails, axles, gears and other
+  mechanical-power devices outside the chunk meshes. Render those instances
+  through the narrowly isolated native mechanical renderer only inside the
+  atlas framebuffer. Filter its transient device lists to the player-anchored
+  disclosure radius and the exterior surface allowance, restore the native
+  lists and render state in `finally`, and never invoke the global world stage
+  or advance a mechanical network from the atlas pass.
 - Preserve the game's live material appearance: texture-atlas coordinates,
   biome tint, directional daylight and connected or multipart block geometry.
+  Vegetation silhouettes against the atlas background must use native 3D depth
+  testing plus completed surface-column and disclosure guards. Do not require
+  an opaque screen pixel behind every leaf: that strips crowns on the skyline,
+  leaves isolated trunks and changes the apparent tree shape with camera yaw.
   Do not sample the normal camera's shadow map from the atlas camera; it causes
   severe frame loss and square shadow boundaries.
 - Give the atlas its own safe directional celestial lighting. Live mode must
@@ -105,6 +127,53 @@ the product scope when the atlas itself is correct.
   request, cache or infer hidden entity positions for the atlas. Render them
   into the same depth buffer as terrain before fluids so blocks and the
   disclosure boundary conceal them correctly.
+
+## Boundary and final-compositor guardrails
+
+These rules come from a failed boundary rewrite that left the atlas completely
+empty while the automated exact-terrain check still reported success.
+
+- Never let the final compositor fail closed on a newly introduced GPU mask
+  before that mask has been visualized in game and its coordinate system,
+  channel layout, dimensions and non-zero coverage have been confirmed.
+- `supportedTerrainColumns`, `visibleTerrainColumns` and
+  `consideredTerrainColumns` are not proof that a surface was rendered.
+  `consideredTerrainColumns` also holds the partial vertical mesh columns the
+  boundary is meant to reject, and a non-empty CPU set never proves that the
+  GPU texture contains readable markers at the reconstructed world coordinates.
+- Never feed an already filtered visible-column set into the next frame's mask.
+  That feedback repeatedly shrinks the atlas.
+- Introduce a completed-column mask and a below-surface compositor discard as
+  separate, independently tested changes, so an empty result has exactly one
+  diagnosable cause.
+- `BoundaryResolvedLastFrame`, a successful draw call and any exact-terrain
+  counter are not proof that the resulting color framebuffer contains map
+  pixels.
+- A failed optional refinement must never disable exact rendering for the whole
+  session. Preserve the last known visible atlas output or bypass only the
+  refinement that failed.
+- Before another boundary rewrite: render the proposed mask as a temporary
+  debug overlay in a distinct color and confirm it follows the intended
+  loaded-mesh footprint; log mask origin, dimensions, marked-cell count and the
+  player/camera chunk coordinates; analyze the resolved framebuffer and require
+  a reasonable number of non-background pixels; test one boundary rule at a
+  time, completed-column coverage before any vertical surface-envelope rule;
+  capture tilted views from both opposite yaw directions, because the original
+  defect changes appearance after a 180-degree rotation; keep water, lava,
+  leaves and plants on their existing material-specific paths, so the boundary
+  may reject pixels but never replaces those materials with opaque blocks; and
+  install the result only after a real captured image from that exact package
+  shows terrain with no isolated trunks, leaves or vertical chunk walls outside
+  the accepted footprint.
+- The automated checks validate renderer activity and lifecycle, not the
+  semantic content of the final image. A green log is necessary but not
+  sufficient: inspect a captured atlas image produced by that exact package. A
+  future test should read framebuffer pixels and fail when the atlas is
+  entirely or almost entirely background.
+- `KNOWN_VISUAL_ISSUES.md` records the open baseline image defects that a green
+  log does not cover: vertical stubs at the terrain boundary and the tiled
+  screenshot's central dark band plus per-tile brightness steps. Keep it current
+  when one of them is fixed or a new image defect is confirmed.
 
 ## Camera and controls
 
@@ -180,9 +249,66 @@ the product scope when the atlas itself is correct.
   columns from already loaded chunks and recognizes registered blocks through
   `EnumBlockMaterial.Ore`; it must not request, unpack or generate a chunk.
 - `Atlas visual lab` is the supported replacement for relying on the engine's
-  `~` ambient editor while `G` owns input. Its exposure, layer opacity and
-  cave-mask brightness controls affect only the atlas framebuffer. Keep their
-  defaults neutral and their ranges bounded.
+  `~` ambient editor while `G` owns input. Its exposure and cave-mask
+  brightness controls affect only the atlas framebuffer. Keep their defaults
+  neutral and their ranges bounded. Overlay opacity belongs to the layer it
+  applies to and is exposed in `Map options` next to the layer selector.
+- GuiComposer paints static elements first and interactive ones (buttons,
+  switches, sliders, dynamic custom draws) afterwards in insertion order. Any
+  overlay that must cover controls — a panel header a scrolling body slides
+  under, an indicator next to a button — has to be an interactive element
+  added after them. A static strip is painted under every control and will
+  not cover anything.
+- Settings is one scrolling panel of five named sections — `Map & Data`,
+  `Presentation & Lighting`, `Entities`, `Safety`, `Advanced` — flowed into
+  three columns on a wide panel, two on a medium one and a single column when
+  the viewport is narrow. Content height and the scroll range are measured
+  from that layout, never from a constant, and every control must be
+  reachable by scrolling. Control keys are stable API for the smoke test; do
+  not rename them when moving a control between sections. A control that is
+  disabled says why: `Creative/Cheat only`, `Disabled by server policy` or
+  `Requires volumetric clouds`. `Performance`, `Visual lab` and
+  `Creative / Cheat` live in `Advanced`, and returning from one of them keeps
+  the Settings scroll position.
+- The toolbar reads `Settings`, `Shot`, `Setup`, `Layers`, `Search`, `Hand`,
+  `Hide`, `Exit`. `Exit` is always present and enabled. A small code-drawn dot
+  on the `Layers` button reports the active layer: neutral grey for textured
+  terrain, the layer's own mid-ramp color otherwise. It is drawn inside the
+  toolbar's existing width — the button yields the space — so the interface
+  never covers more of the map than before. Active, hover and disabled states
+  stay visually distinct, and every button keeps its tooltip.
+- Layer status lines follow one shape: `Preparing · 63% · loaded data only`
+  while sampling, `Ready · 1,842 loaded samples · 8 × 8 grid` when done,
+  `Waiting for streamed data` when nothing is loaded in range and
+  `Unavailable · textured terrain remains active` after a failure. The ore
+  layer replaces the sample count with its sources: regional maps report maps
+  and regions, loaded columns report columns and observed blocks, and a mixed
+  radius reports both groups separately — finding one OreMap must never hide
+  the columns that filled the rest. The active filter appears by readable
+  name, with the asset code as secondary detail in the caption.
+- Branches that a given test world cannot reach — regional ore potential in a
+  world whose loaded regions carry no OreMaps, and the mixed status that needs
+  both sources at once — are covered by pure functions with deterministic
+  self-checks (`AtlasRegionalOreReadings.Validate`,
+  `AtlasOreStatusText.Validate`) invoked from the smoke test. Those never
+  replace the in-game path: the smoke log must keep stating when the real
+  branch was not exercised.
+- The Creative/Cheat ore layer is presented as `Ore analysis`; its stored
+  config value and enum stay `ore`/`OreDensity`. Both its panel status and its
+  pointer card must name the source they speak for — `Regional potential` from
+  loaded regional OreMaps, or `Loaded column` from blocks actually seen in the
+  exact loaded column — and must never present one as the other. With no ore
+  filter the color is the strongest single reading in that cell, never a sum,
+  and the UI has to say so. Ore names are shown in readable form with the
+  asset code kept as secondary detail, and the filter carries an `All` entry
+  plus an `n/total` position counter.
+- `Map options` must state what the active layer means without relying on
+  color alone: a legend ramp painted from the same palette the overlay uses,
+  named low/middle/high stops, the separate "unavailable" swatch of the ore
+  layer, and a caption naming the world-generation source, the eight-block
+  grid and the loaded-data-only limit. The pointer read-out works for every
+  data layer, reads only samples the layer already holds and must name
+  world-generation climate as such so it is never read as current weather.
 
 ## View distance and multiplayer rules
 
@@ -206,6 +332,9 @@ the product scope when the atlas itself is correct.
 
 - Apply strict per-frame and per-tick budgets. Opening the atlas must not cause
   a large synchronous scan or visible gameplay freeze.
+- Keep the focused Vintage Story atlas on its smooth refresh cadence even when
+  no camera button is held. The reduced 12 FPS cadence is reserved for an
+  unfocused/background game window, not for an idle foreground atlas.
 - Do not register terrain-cache tick listeners or scan chunks for atlas-owned
   fallback data. Rendering should consume the game's already completed meshes.
 - Prefer public Vintage Story APIs. Isolate any unavoidable game-content API
@@ -262,9 +391,10 @@ the product scope when the atlas itself is correct.
 
 ## Current verified baseline
 
-- The working public version is `0.6.6`. Do not change the version number
-  unless the project owner explicitly requests it. Package-content changes may
-  continue under this version during the current test cycle.
+- The working public version is `0.6.7`, matching `modinfo.json` and
+  `Releases/modernatlas_0.6.7.zip`. Do not change the version number unless the
+  project owner explicitly requests it. Package-content changes may continue
+  under this version during the current test cycle.
 - The verified liquid implementation uses completed liquid chunk meshes and a
   dedicated stable shader. Water and lava must remain anchored to their block
   coordinates when the atlas camera pans, rotates or tilts.
@@ -362,11 +492,120 @@ the product scope when the atlas itself is correct.
   array to `glUniform4fv` and crash Mesa. Restore managed shader source and
   Harmony state only. Atlas filter switches are cleared in each render
   `finally` block while the renderer is still valid.
+- The screenshot feature is a tiled camera-grid capture, not a styled
+  re-render. `AtlasTiledScreenshot` divides the current view into an
+  `ScreenshotScale` grid (1x-8x, every integer step), re-renders the exact
+  world for every tile with a zoomed and offset camera, reads the Primary
+  sub-region per tile and stitches one seamless top-down PNG on a background
+  thread. The stitched output is bounded by a pixel budget (about 100
+  megapixels) so extreme grids cannot exhaust memory, every tile is
+  downsampled to that budget before it is stored, and the PNG is written
+  band by band through `AtlasPngStreamWriter` so the whole RGB image is
+  never buffered at once. A
+  `CANCEL / CLOSE` progress modal owns input while the capture, stitch and
+  save run; Escape cancels the capture and restores the camera. The camera
+  baseline (zoom, X/Y/Z centers) is snapshotted, snapped per tile and
+  restored after the last tile. Tile offsets are computed in screen space:
+  the tilted LookAt camera needs a ground-forward part (sin pitch) plus a
+  world-Y lift (cos pitch) per vertical grid step, and exactly one integer
+  tile of Primary pixels per step. Every shared edge has a small overlap
+  margin that the stitcher linearly crossfades, hiding the sub-pixel drift
+  between camera positions. Wind, water and cloud offsets are frozen for all
+  tiles (`screenshotFrozen*`, `GetLiveCloudOffset`) so animated surfaces
+  cannot tear at seams. Native mechanical devices are snapshotted before
+  tile 0 as well: every tile must read the same captured `AngleRad` through
+  an atlas-render-call-only override that is cleared in `finally`, without
+  pausing or mutating the mechanical network. Devices loaded after tile 0 are
+  excluded from that capture instead of appearing halfway across the PNG.
+  The 0-degree Creative pitch capture is covered.
+  The smoke test queues a 2x capture only after every other exercise
+  (including the presentation debounce test) has passed, returns the
+  presentation to scroll first without re-requesting the debounce every
+  frame, and verifies the saved PNG plus the restored camera. Tile row 0 is
+  the TOP of the stitched image (the `[1][2] / [3][4]` grid order): the
+  vertical eye offsets must follow the working drag sign convention
+  (`imageDown = (-forwardPart*sinPitch + upPart*cosPitch) / worldPerPixel`),
+  so the top tiles capture the content above the view center. The stitcher
+  keeps the outer overlap margins in the image, so the composite covers the
+  full live-view world area and text or structures at the viewport edges are
+  not cropped. During every capture frame the local player's own 3D model
+  (including its hands) is hidden through
+  `ExactChunkRendererAdapter.HideLocalPlayerModel`, so the map photo shows
+  no photographer character; the flag is cleared in a `finally` after every
+  atlas draw. The closing transition's pocket sound fires at
+  `ClosingDurationSeconds - 0.2f`, not 1.78f, because the closing transition
+  lasts only 1.5 seconds.
+
+## Source layout and code rules
+
+- `ModernAtlasDialog` and `ExactChunkRendererAdapter` are split into `partial`
+  files by concern. `ModernAtlasDialog.cs` keeps the fields, constructor,
+  lifecycle, input handling and `OnRenderGUI`, with `.SmokeTest`, `.Interface`,
+  `.Screenshot`, `.ScreenshotCapture`, `.Layers`, `.Camera`, `.Settings`,
+  `.Inspection` and `.DamageWarning` beside it. `ExactChunkRendererAdapter.cs` keeps creation,
+  `Render` and the reflection helpers, with `.Shaders`, `.Visibility`,
+  `.Liquids` and `.Lighting` beside it. The split is a pure move: reassembling
+  the partial files reproduces the previous single-file sources exactly, and
+  the analyzer diagnostics are identical before and after.
+- Keep every field initializer in the class' main file. The relative order of
+  field initializers declared in different partial files is not guaranteed by
+  the language, so moving one into a partial can silently change initialization
+  order.
+- `ExactChunkRendererAdapter.Shaders.cs` carries the injected GLSL in raw string
+  literals whose content depends on the indentation of the closing `"""`. Never
+  let an editor reformat that file; a reindent silently changes the shader and
+  can produce an empty atlas while the log stays clean.
+- Guard optional GPU resources with `is not { TextureId: > 0 }`. The lifted
+  comparison `texture?.TextureId <= 0` evaluates to `false` for `null`, so a
+  missing texture passes a guard that was meant to reject it.
+
+## Atlas damage warning
+
+- Losing health while the atlas is open draws a dark red edge vignette plus a
+  short caption over the atlas framebuffer: `TAKING DAMAGE — CLOSE THE ATLAS`
+  while the pulse runs, `LOW HEALTH` below 25 percent health. The pulse lasts
+  about 1.2 seconds, is driven by real render time so it animates while
+  singleplayer is paused, and a further hit restarts and slightly strengthens it.
+- It is a GUI overlay only. No shader, no world rendering and no engine state is
+  involved, it adds no composer element, and it never captures mouse or keyboard
+  input: `G`, `Escape` and `Exit` keep closing the atlas immediately. Do not turn
+  it into a full-screen red layer; that would hide the map and resemble the old
+  red-border defect.
+- Every source of health loss counts, including fire, falling and hunger. Never
+  show a direction or any hint of the attacker: that could disclose an entity the
+  atlas was not allowed to draw and would break the multiplayer disclosure
+  policy.
+- The warning and the optional emergency close are decided by the local player's
+  actual game mode only. Survival, Survival with accepted Cheat Mode, and
+  multiplayer all keep the warning; real Creative suppresses both. Never gate
+  this on `CreativeCheatSettingsAvailable` or `UnitInspectionEnabled`: Cheat Mode
+  is a protected feature switch and must not disable a safety warning.
+- `CloseAtlasOnDamage` is one persisted preference defaulting to true. Its
+  effective value is `actual game mode != Creative && config.CloseAtlasOnDamage`,
+  and the switch stays visible in every mode so the stored value still applies
+  after leaving Creative.
+- The emergency close skips the scroll stowing transition and the compass stow so
+  the player regains control in the same frame. A running tiled capture or an
+  open screenshot preview is cancelled and the camera restored first; a capture
+  must never block the safety close.
+- The warning is never drawn while a tiled capture or the screenshot preview owns
+  the frame, so it cannot be baked into a saved PNG or the BEFORE/AFTER preview.
+- The automated test drives the warning through its direct signal, never by
+  hurting the player or writing to the save, changes `CloseAtlasOnDamage` in
+  memory only, and verifies the emergency close between frames so the atlas
+  dialog is never closed from inside its own render pass.
+- The standard smoke world runs in actual Creative, where the warning is
+  correctly suppressed. The test therefore resolves the policy mode through an
+  in-memory override so both branches are exercised by behavior: resolved
+  Creative must leave the overlay and the auto-close inert, and resolved
+  Survival with accepted Cheat Mode must still warn. The override never changes
+  the player, the game mode or anything on disk, and production code always
+  resolves the real mode.
 
 ## Build and in-game test workflow
 
 - For every rendering change, build `ModernAtlas.csproj` in Release mode,
-  create `Releases/modernatlas_0.6.6.zip`, validate the ZIP, and copy that exact
+  create `Releases/modernatlas_0.6.7.zip`, validate the ZIP, and copy that exact
   archive to the active Vintage Story `Mods` directory. Compare SHA-256 hashes
   so the release and active archives are demonstrably identical.
 - Close the running game cleanly before replacing or retesting the active mod.
@@ -383,8 +622,29 @@ the product scope when the atlas itself is correct.
 
   ```sh
   env MODERNATLAS_SMOKE_TEST=1 /opt/vintagestory/Vintagestory \
-    --dataPath /home/arcylisz/.config/VintagestoryData -o 'test creative'
+    --dataPath /home/arcylisz/.config/VintagestoryData -o 'arcyliszs cave world'
   ```
+
+  The default smoke target must be an existing standard generated world, not
+  the superflat `TESTCREATIVE` fixture. `bash scripts/run-smoke-test.sh` is the
+  canonical runner: it defaults to `arcyliszs cave world`, records the
+  pre-launch log and crash-log timestamps, requires exit code zero, checks
+  every required log marker, verifies the captured screenshots and runs the
+  ordinary-world red-border check. That check tests for the defect's shape —
+  a continuous red run along the outer 8 px of at least three sides, measured
+  against a control band 16-24 px into the image — because a red pixel count
+  cannot separate the defect from ordinary scene content such as wood or dry
+  grass touching an edge. `scripts/check-red-border.sh` holds the detector and
+  still prints the historical pixel totals as diagnostics;
+  `scripts/test-red-border-detector.sh` validates it against the committed
+  frames in `tests/fixtures/red-border/` (lossless PNG, expectation "no
+  border"), synthetic 1/2/8 px frames generated at run time, and red objects
+  touching one or two sides. Every PNG in `tests/fixtures/red-border-defect/`
+  is a required failing case, so a captured real defect frame belongs there.
+  Test data never enters the mod ZIP: `scripts/package.sh` packs only
+  `modinfo.json`, `LICENSE`, `NOTICE.md`, the built DLL and `assets/`. It accepts `MODERNATLAS_SMOKE_WORLD`,
+  `MODERNATLAS_SMOKE_DATA_PATH` and `VINTAGE_STORY_PATH` overrides, and needs
+  `rg` plus ImageMagick (`magick`) when screenshots are requested.
 
   Add `MODERNATLAS_SMOKE_SCREENSHOT=/tmp/modernatlas-smoke` to capture the
   Survival-safe surface before Cave Mode is enabled, followed by the base
@@ -392,6 +652,14 @@ the product scope when the atlas itself is correct.
   Add `MODERNATLAS_SMOKE_FIXED_SUN_HOUR=6`, `12`, `18` or `0` together with
   the screenshot variable to inspect fixed dawn, noon, sunset and moonlit
   night without persisting the temporary lighting selection.
+
+  The client also honors `MODERNATLAS_SMOKE_SCREENSHOT_MASK`,
+  `MODERNATLAS_SMOKE_SCREENSHOT_SCALE`, `MODERNATLAS_SMOKE_CAPTURE_AREA`,
+  `MODERNATLAS_SMOKE_SCREENSHOT_SEQUENCE`,
+  `MODERNATLAS_SMOKE_SCREENSHOT_INTENSITY_ZERO`,
+  `MODERNATLAS_SMOKE_SCREENSHOT_CANCEL`, `MODERNATLAS_SMOKE_DISABLE_CLOUDS`,
+  `MODERNATLAS_SMOKE_EXPECT_VIEW_DISTANCE`, `MODERNATLAS_SMOKE_YAW` and
+  `MODERNATLAS_SMOKE_PITCH`. Every one of them stays out of normal play.
 
   The `-o` argument performs the world join. `OnLevelFinalize` waits for that
   world to be ready, then `BeginAutomatedSmokeTest` and `TryOpen` open the same
@@ -415,9 +683,15 @@ the product scope when the atlas itself is correct.
   `exitToMainMenu` can invalidate or bypass game-session teardown.
 - Record the pre-launch modification time of `client-crash.log`, wait for the
   game process to exit and require exit code zero. The fresh `client-main.log`
-  must contain `AUTOMATED ATLAS CHECKS PASSED`, `World leave received`,
+  must contain `AUTOMATED SMOKE GOD MODE ENABLED`,
+  `AUTOMATED SMOKE GOD MODE RESTORED`, `AUTOMATED ATLAS CHECKS PASSED` once per
+  atlas cycle, `AUTOMATED ATLAS TWO-CYCLE CHECK PASSED`,
+  `Automated resolved-atlas alpha validation passed`,
+  `Atlas close state check passed`, `World leave received`,
   `Released world-specific atlas rendering resources` and
-  `AUTOMATED WORLD-EXIT CHECK PASSED`. It must not contain a new critical
+  `AUTOMATED WORLD-EXIT CHECK PASSED`; a screenshot run additionally requires
+  `Automated screenshot filter preview passed`.
+  `scripts/run-smoke-test.sh` enforces exactly this list. It must not contain a new critical
   error, ModernAtlas exception, shader failure, disposed-shader report or
   ModernAtlas-attributable OpenGL error, and the test must not create a newer
   crash log or core dump. Record failures from unrelated mods separately.

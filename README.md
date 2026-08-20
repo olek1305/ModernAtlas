@@ -25,6 +25,34 @@ ModernAtlas can also be used on the client when a server does not install it.
 
 ![ModernAtlas interface](ModernAtlas3.png)
 
+The atlas screenshot panel offers independent `Resolution` (1x-8x) and
+`Capture area` (100%, 75%, 50% or 25%) choices. The area is a centered crop of
+the live view, while the PNG dimensions stay tied to the selected resolution;
+the preview shows the final dimensions, megapixels and effective detail. A
+100 MP safety budget prevents extreme captures from exhausting memory and the
+preview warns when a requested result will be downsampled.
+
+Large captures use an isolated ModernAtlas job directory under the game's
+`ModData` path. A small JSON manifest records the selected settings, dimensions,
+paths and capture stage, while each captured pixel tile is staged in its own
+binary file rather than in JSON. The stitched image is written to a private
+`*.png.part`, structurally validated, and moved atomically into
+`Screenshots/ModernAtlas` only after the PNG stream closes successfully. The
+public screenshot folder therefore contains completed PNG files only; manifests,
+tiles and partial files are removed from the exact job directory after success
+or cancellation.
+
+The opt-in automated smoke path can run the consecutive regression sequence
+with `MODERNATLAS_SMOKE_SCREENSHOT_SEQUENCE=1`; it captures 1x/25% followed by
+8x/25% in one session. `MODERNATLAS_SMOKE_SCREENSHOT_CANCEL=1` instead closes
+the progress modal during stitching and verifies that the cancelled job leaves
+neither a PNG nor a public sidecar.
+
+The automated smoke test targets the existing standard generated world
+`arcyliszs cave world` by default. Run it with `bash scripts/run-smoke-test.sh`;
+set `MODERNATLAS_SMOKE_WORLD` to select another standard test world. The
+superflat `TESTCREATIVE` world is not a valid rendering regression target.
+
 ## Installation
 
 Place the ModernAtlas release ZIP in the Vintage Story `Mods` directory. Keep

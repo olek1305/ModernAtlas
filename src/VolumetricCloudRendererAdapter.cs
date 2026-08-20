@@ -16,6 +16,9 @@ namespace ModernAtlas;
 internal sealed class VolumetricCloudRendererAdapter : IDisposable
 {
     private const string RendererTypeName = "FluffyClouds.CloudRendererVolumetric";
+    private const string MapRendererTypeName = "FluffyClouds.CloudRendererMap";
+    private const int SimpleCloudRenderMode = 2;
+    private const int VolumetricCloudRenderMode = 1;
 
     private readonly ICoreClientAPI capi;
     private readonly object map;
@@ -26,6 +29,8 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
     private readonly FieldInfo textureColorField;
     private readonly FieldInfo offsetField;
     private readonly FieldInfo cloudTileLengthField;
+    private readonly FieldInfo renderCloudMapField;
+    private readonly bool originalRenderCloudMap;
     private bool disabled;
     private bool loggedSuccess;
     private bool loggedUnsupportedMode;
@@ -39,7 +44,9 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
         FieldInfo textureMapField,
         FieldInfo textureColorField,
         FieldInfo offsetField,
-        FieldInfo cloudTileLengthField
+        FieldInfo cloudTileLengthField,
+        FieldInfo renderCloudMapField,
+        bool originalRenderCloudMap
     )
     {
         this.capi = capi;
@@ -51,6 +58,8 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
         this.textureColorField = textureColorField;
         this.offsetField = offsetField;
         this.cloudTileLengthField = cloudTileLengthField;
+        this.renderCloudMapField = renderCloudMapField;
+        this.originalRenderCloudMap = originalRenderCloudMap;
     }
 
     public static VolumetricCloudRendererAdapter? TryCreate(
@@ -59,11 +68,47 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
         Func<IShaderProgram?> shaderProvider
     )
     {
+        if (!IsEnabledByGraphicsSettings(capi))
+        {
+            capi.Logger.Notification(
+                "[ModernAtlas] Live atlas clouds are unavailable because Vintage Story clouds are Off."
+            );
+            return null;
+        }
+        object? activatedMap = null;
+        FieldInfo? activatedMapField = null;
+        bool originalRenderCloudMap = false;
         try
         {
-            object renderer = FindRegisteredRenderer(game, RendererTypeName);
-            object map = RequireField(renderer.GetType(), "map").GetValue(renderer)
-                ?? throw new InvalidOperationException("The live cloud map is unavailable.");
+            object map;
+            try
+            {
+                // In 1.22.6 the texture-producing cloud map is its own render
+                // handler. It remains the authoritative live weather source;
+                // the volumetric handler merely consumes it for the normal
+                // camera and is not guaranteed to be registered yet.
+                map = FindRegisteredRenderer(game, MapRendererTypeName);
+            }
+            catch (InvalidOperationException)
+            {
+                object renderer = FindRegisteredRenderer(game, RendererTypeName);
+                map = RequireField(renderer.GetType(), "map").GetValue(renderer)
+                    ?? throw new InvalidOperationException("The live cloud map is unavailable.");
+            }
+            FieldInfo renderCloudMapField = RequireField(map.GetType(), "renderCloudMap");
+            originalRenderCloudMap = (bool)(renderCloudMapField.GetValue(map) ?? false);
+            MethodInfo tickCloudMap = RequireMethod(map.GetType(), "CloudTick", typeof(float));
+            FieldInfo textureMapField = RequireField(map.GetType(), "TextureMap");
+            FieldInfo textureColorField = RequireField(map.GetType(), "TextureCol");
+            FieldInfo offsetField = RequireField(map.GetType(), "offset");
+            FieldInfo cloudTileLengthField = RequireField(map.GetType(), "CloudTileLength");
+            // Simple clouds use the same live tile state but normally skip the
+            // two GPU map textures consumed by the volumetric renderer. Keep
+            // those textures active for the atlas bridge and restore the
+            // engine field when the world renderer is released.
+            renderCloudMapField.SetValue(map, true);
+            activatedMap = map;
+            activatedMapField = renderCloudMapField;
             MeshRef quad = capi.Render.UploadMesh(QuadMeshUtil.GetQuad());
 
             VolumetricCloudRendererAdapter adapter = new(
@@ -71,19 +116,22 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
                 map,
                 shaderProvider,
                 quad,
-                RequireMethod(map.GetType(), "CloudTick", typeof(float)),
-                RequireField(map.GetType(), "TextureMap"),
-                RequireField(map.GetType(), "TextureCol"),
-                RequireField(map.GetType(), "offset"),
-                RequireField(map.GetType(), "CloudTileLength")
+                tickCloudMap,
+                textureMapField,
+                textureColorField,
+                offsetField,
+                cloudTileLengthField,
+                renderCloudMapField,
+                originalRenderCloudMap
             );
             capi.Logger.Notification(
-                "[ModernAtlas] Vintage Story live volumetric cloud map is available for the bounded atlas cloud layer."
+                "[ModernAtlas] Vintage Story live cloud map is available for the bounded atlas 3D cloud layer."
             );
             return adapter;
         }
         catch (Exception exception)
         {
+            activatedMapField?.SetValue(activatedMap, originalRenderCloudMap);
             capi.Logger.Warning(
                 "[ModernAtlas] Live cloud-map overlay is unavailable: {0}",
                 exception.Message
@@ -92,21 +140,41 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
         }
     }
 
+    internal static bool IsEnabledByGraphicsSettings(ICoreClientAPI capi) =>
+        IsSupportedCloudMode(capi.Settings.Int["cloudRenderMode"]);
+
+    /// <summary>The current live wind-drift offset of the native cloud map.</summary>
+    public Vec3f? GetLiveOffset()
+    {
+        if (disabled) return null;
+        try
+        {
+            return (Vec3f?)offsetField.GetValue(map);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     public bool Render(
         float[] projection,
         double[] view,
         float pausedAnimationDeltaTime,
-        bool renderIntoPrimary = false
+        bool renderIntoPrimary = false,
+        Vec3f? frozenOffset = null,
+        Vec3f? atlasLightColor = null,
+        float atlasExposure = 1f
     )
     {
         if (disabled) return false;
-        if (capi.Settings.Int["cloudRenderMode"] != 1)
+        if (!IsSupportedCloudMode(capi.Settings.Int["cloudRenderMode"]))
         {
             if (!loggedUnsupportedMode)
             {
                 loggedUnsupportedMode = true;
                 capi.Logger.Notification(
-                    "[ModernAtlas] Atlas clouds are enabled, but the game cloud quality is not Volumetric; the atlas respects that graphics setting."
+                    "[ModernAtlas] Atlas clouds are enabled, but game clouds are Off; the atlas respects that graphics setting."
                 );
             }
             return false;
@@ -115,6 +183,8 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
         IShaderProgram? shader = shaderProvider();
         if (shader == null || shader.Disposed) return false;
 
+        IRenderAPI render = capi.Render;
+        AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
         try
         {
             // During a singleplayer pause only the already generated cloud
@@ -131,10 +201,12 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
             int textureColor = (int)(textureColorField.GetValue(map) ?? 0);
             int cloudMapWidth = (int)(cloudTileLengthField.GetValue(map) ?? 0);
             if (textureMap <= 0 || textureColor <= 0 || cloudMapWidth <= 0) return false;
-            Vec3f offset = (Vec3f)(offsetField.GetValue(map)
+            // A frozen offset (tiled screenshot capture) pins the drifting
+            // cloud layer to one captured frame so the stitched tiles share
+            // identical cloud shapes at every seam.
+            Vec3f offset = frozenOffset ?? (Vec3f)(offsetField.GetValue(map)
                 ?? throw new InvalidOperationException("The live cloud offset is unavailable."));
 
-            IRenderAPI render = capi.Render;
             FrameBufferRef primary = render.FrameBuffers[(int)EnumFrameBuffer.Primary];
             Vec3d playerCamera = capi.World.Player.Entity.CameraPos;
             float cloudBaseWorldY = Math.Max(
@@ -154,6 +226,17 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
             shader.Uniform("cloudBaseY", cloudBaseWorldY - (float)playerCamera.Y);
             shader.Uniform("cloudThickness", 64f);
             shader.Uniform("cloudMapWidth", (float)cloudMapWidth);
+            Vec3f safeLightColor = atlasLightColor ?? new Vec3f(1f, 1f, 1f);
+            shader.Uniform(
+                "atlasCloudLightColor",
+                safeLightColor.X,
+                safeLightColor.Y,
+                safeLightColor.Z
+            );
+            shader.Uniform(
+                "atlasCloudExposure",
+                Math.Clamp(atlasExposure, 0.04f, 1.5f)
+            );
             shader.Uniform(
                 "depthScale",
                 renderIntoPrimary
@@ -192,12 +275,23 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
             );
             return false;
         }
+        finally
+        {
+            // Cloud blending is atlas-owned. Restore the target and program
+            // even when a weather texture or mesh draw fails.
+            // The caller owns the subsequent Primary/boundary handoff.
+            renderState.RestoreCapturedState();
+        }
     }
 
     public void Dispose()
     {
+        renderCloudMapField.SetValue(map, originalRenderCloudMap);
         capi.Render.DeleteMesh(quad);
     }
+
+    private static bool IsSupportedCloudMode(int mode) =>
+        mode == VolumetricCloudRenderMode || mode == SimpleCloudRenderMode;
 
     private static object FindRegisteredRenderer(object game, string fullTypeName)
     {

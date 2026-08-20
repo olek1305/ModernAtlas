@@ -42,6 +42,22 @@ internal sealed class AtlasSurfaceHeightTexture : IDisposable
     public int OriginZ => minimumChunkZ * GlobalConstants.ChunkSize;
     public int Width => texture?.Width ?? 0;
     public int Height => texture?.Height ?? 0;
+
+    public bool CoversArea(double centerX, double centerZ, int radius)
+    {
+        if (!Ready || texture == null || texture.TextureId <= 0) return false;
+
+        double extent = Math.Max(0, radius);
+        double minimumX = centerX - extent;
+        double maximumX = centerX + extent;
+        double minimumZ = centerZ - extent;
+        double maximumZ = centerZ + extent;
+        return minimumX >= OriginX
+            && maximumX < OriginX + Width
+            && minimumZ >= OriginZ
+            && maximumZ < OriginZ + Height;
+    }
+
     public int ProgressPercent
     {
         get

@@ -15,7 +15,7 @@ out vec3 objectPosition;
 void main(void)
 {
     vec3 objectNormal;
-    if (materialKind == 0 || materialKind == 7)
+    if (materialKind == 0 || materialKind == 7 || materialKind == 16 || materialKind == 17 || materialKind == 18)
     {
         // The sheet is gently bowed toward the viewer at both rollers.
         objectNormal = normalize(vec3(-vertexPositionIn.x * 0.32, 0.0, 1.0));
