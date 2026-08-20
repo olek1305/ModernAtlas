@@ -56,6 +56,10 @@ the product scope when the atlas itself is correct.
   or advance a mechanical network from the atlas pass.
 - Preserve the game's live material appearance: texture-atlas coordinates,
   biome tint, directional daylight and connected or multipart block geometry.
+  Vegetation silhouettes against the atlas background must use native 3D depth
+  testing plus completed surface-column and disclosure guards. Do not require
+  an opaque screen pixel behind every leaf: that strips crowns on the skyline,
+  leaves isolated trunks and changes the apparent tree shape with camera yaw.
   Do not sample the normal camera's shadow map from the atlas camera; it causes
   severe frame loss and square shadow boundaries.
 - Give the atlas its own safe directional celestial lighting. Live mode must

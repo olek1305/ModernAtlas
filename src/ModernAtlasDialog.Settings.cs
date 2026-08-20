@@ -151,6 +151,7 @@ public sealed partial class ModernAtlasDialog
         }
         saveConfig();
         SyncSettingsControls();
+        SyncToolbarControls();
     }
 
     private void OnCaveModeToggled(bool enabled)

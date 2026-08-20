@@ -931,9 +931,15 @@ public sealed partial class ModernAtlasDialog
         bool mapLayersToggled = settingsOpenedByClick
             && ClickAtlasControlForAutomatedTest(settingsComposer, "map-layers")
             && config.MapLayersEnabled != mapLayersBefore;
+        bool mapLayersToolbarToggled = mapLayersToggled
+            && overlay?.GetAtlasButton("map-options-button")?.Enabled
+                == config.MapLayersEnabled;
         bool mapLayersRestored = mapLayersToggled
             && ClickAtlasControlForAutomatedTest(settingsComposer, "map-layers")
             && config.MapLayersEnabled == mapLayersBefore;
+        bool mapLayersToolbarRestored = mapLayersRestored
+            && overlay?.GetAtlasButton("map-options-button")?.Enabled
+                == config.MapLayersEnabled;
         bool skipBefore = config.SkipOpeningAnimation;
         bool skipToggled = ClickAtlasControlForAutomatedTest(
                 settingsComposer,
@@ -1352,7 +1358,9 @@ public sealed partial class ModernAtlasDialog
             && settingsOpenedByClick
             && settingsControlsPresent
             && mapLayersToggled
+            && mapLayersToolbarToggled
             && mapLayersRestored
+            && mapLayersToolbarRestored
             && skipToggled
             && skipRestored
             && performanceBack
@@ -1439,11 +1447,13 @@ public sealed partial class ModernAtlasDialog
             // The line above omits every flag that is not a UI control click.
             // Without them a failure cannot be attributed, so report the rest.
             capi.Logger.Error(
-                "[ModernAtlas] Automated compact UI test failed (remaining flags): access={0}, initialFocus={1}, mapLayers={2}/{3}, skipOpening={4}/{5}, presentationControl={6}, fixedLighting={7}, sunSlider={8}/{9}, liveLightingRestored={10}, timeInstrument={11}, settingsClosed={12}, mapClosed={13}, caveMode={14}, cameraLock={15}, cameraYaw={16}.",
+                "[ModernAtlas] Automated compact UI test failed (remaining flags): access={0}, initialFocus={1}, mapLayers={2}/{3}, mapToolbar={4}/{5}, skipOpening={6}/{7}, presentationControl={8}, fixedLighting={9}, sunSlider={10}/{11}, liveLightingRestored={12}, timeInstrument={13}, settingsClosed={14}, mapClosed={15}, caveMode={16}, cameraLock={17}, cameraYaw={18}.",
                 accessAvailable,
                 initialFocusReleased,
                 mapLayersToggled,
                 mapLayersRestored,
+                mapLayersToolbarToggled,
+                mapLayersToolbarRestored,
                 skipToggled,
                 skipRestored,
                 presentationControlPresent,

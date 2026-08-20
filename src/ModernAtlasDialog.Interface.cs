@@ -403,6 +403,8 @@ public sealed partial class ModernAtlasDialog
         overlay.GetAtlasButton("map-options-button")?.SetActive(MapPanelOpen);
         overlay.GetAtlasButton("search-button")?.SetActive(SearchPanelOpen);
         overlay.GetAtlasButton("instrument-button")?.SetActive(InstrumentPanelOpen);
+        overlay.GetAtlasButton("map-options-button")!.Enabled =
+            MapLayerControlsVisible;
         overlay.GetAtlasButton("search-button")!.Enabled = SearchModeActive;
         overlay.GetAtlasButton("quick-screenshot-button")!.Enabled =
             !tileScreenshot.Busy;
@@ -707,6 +709,11 @@ public sealed partial class ModernAtlasDialog
             return;
         }
         if (section == AtlasPanelSection.Search && !SearchModeActive) return;
+        if (section == AtlasPanelSection.MapOptions
+            && !MapLayerControlsVisible)
+        {
+            return;
+        }
         if (section == AtlasPanelSection.Creative
             && !CreativeCheatSettingsAvailable)
         {
@@ -2260,6 +2267,11 @@ public sealed partial class ModernAtlasDialog
 
     private bool ToggleMapOptions()
     {
+        if (!MapLayerControlsVisible)
+        {
+            OpenSettingsModal();
+            return true;
+        }
         RequestBottomPanel(AtlasPanelSection.MapOptions);
         return true;
     }

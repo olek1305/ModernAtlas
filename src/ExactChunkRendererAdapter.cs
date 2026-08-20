@@ -1183,7 +1183,14 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
                     false,
                     2,
                     viewDistanceBlocks,
-                    true
+                    // The native depth test already places leaves against
+                    // terrain and trunks. Requiring an existing opaque pixel
+                    // behind every leaf instead erases every tree silhouette
+                    // against the atlas sky, and which leaves disappear then
+                    // changes with camera yaw. Completed surface columns,
+                    // world-space disclosure filters and the final boundary
+                    // resolve remain authoritative for this pass.
+                    false
                 ))
                 {
                     throw new InvalidOperationException(
