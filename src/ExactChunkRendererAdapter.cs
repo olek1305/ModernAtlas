@@ -1710,18 +1710,6 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
     }
 
     /// <summary>
-    /// Transient per-frame flag set by the tiled screenshot capture: hides
-    /// the local player's own model (including its hands) from the atlas
-    /// entity stage so the stitched photo is free of the photographer's
-    /// character. Reset after every atlas draw.
-    /// </summary>
-    public bool HideLocalPlayerModel
-    {
-        get => entityModelRenderer.HideLocalPlayerModel;
-        set => entityModelRenderer.HideLocalPlayerModel = value;
-    }
-
-    /// <summary>
     /// Live native cloud drift offset. The tiled screenshot pipeline freezes
     /// this value so every captured tile renders identical cloud shapes.
     /// </summary>

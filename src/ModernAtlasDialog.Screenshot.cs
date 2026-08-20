@@ -410,8 +410,8 @@ public sealed partial class ModernAtlasDialog
         screenshotPreviewOpen = false;
         lastScreenshotPreviewCloseMilliseconds = -10000;
         // The next ordinary atlas render becomes the frozen source. Keep all
-        // living models visible in this interactive preview; only an actual
-        // tiled PNG capture hides the local photographer.
+        // disclosed living models visible so preview and tiled PNG capture
+        // preserve the same entity set, including the local player.
         lastAtlasWorldRenderMilliseconds = 0;
         capi.Logger.Notification(
             "[ModernAtlas] Screenshot Preview requested; forcing one fresh atlas frame with living models preserved before opening the modal."

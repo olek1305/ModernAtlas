@@ -102,56 +102,40 @@ public sealed partial class ModernAtlasDialog
                 ? atlasRealDeltaTime
                 : 0;
 
-        // Only the tiled PNG capture hides the local player's own model so the
-        // saved photo contains no photographer. Interactive Screenshot Preview
-        // preserves exactly the living models visible on the atlas.
-        if (exactChunkRenderer != null)
-        {
-            exactChunkRenderer.HideLocalPlayerModel = captureProjection;
-        }
-        bool rendered;
-        try
-        {
-            rendered = exactChunkRenderer?.Render(
-                deltaTime,
-                projection,
-                centerX,
-                centerY,
-                centerZ,
-                yaw,
-                pitch,
-                GameViewDistance,
-                SurfaceSafetyEnabled,
-                SurvivalOreConcealmentEnabled,
-                surfaceHeightTexture,
-                mapLayerTexture,
-                EffectiveMapLayerOpacity,
-                0,
-                config.PerformanceLightingEnabled,
-                config.HideVegetation,
-                config.AnimationsEnabled,
-                Math.Clamp(config.AtlasExposurePercent, 50, 150) / 100f,
-                Math.Clamp(config.CaveMaskBrightnessPercent, 50, 150) / 100f,
-                windWaveCounter,
-                windWaveCounterHighFrequency,
-                waterStillCounter,
-                waterFlowCounter,
-                config.CloudsEnabled,
-                config.LiveLightingEnabled,
-                config.FixedSunHour,
-                renderAnimationOffset,
-                captureProjection ? screenshotFrozenCloudOffset : null,
-                visibleEntityPolicy,
-                false
-            ) == true;
-        }
-        finally
-        {
-            if (exactChunkRenderer != null)
-            {
-                exactChunkRenderer.HideLocalPlayerModel = false;
-            }
-        }
+        // Tiled screenshots preserve the same disclosed living models as the
+        // interactive atlas, including the local player's own 3D model.
+        bool rendered = exactChunkRenderer?.Render(
+            deltaTime,
+            projection,
+            centerX,
+            centerY,
+            centerZ,
+            yaw,
+            pitch,
+            GameViewDistance,
+            SurfaceSafetyEnabled,
+            SurvivalOreConcealmentEnabled,
+            surfaceHeightTexture,
+            mapLayerTexture,
+            EffectiveMapLayerOpacity,
+            0,
+            config.PerformanceLightingEnabled,
+            config.HideVegetation,
+            config.AnimationsEnabled,
+            Math.Clamp(config.AtlasExposurePercent, 50, 150) / 100f,
+            Math.Clamp(config.CaveMaskBrightnessPercent, 50, 150) / 100f,
+            windWaveCounter,
+            windWaveCounterHighFrequency,
+            waterStillCounter,
+            waterFlowCounter,
+            config.CloudsEnabled,
+            config.LiveLightingEnabled,
+            config.FixedSunHour,
+            renderAnimationOffset,
+            captureProjection ? screenshotFrozenCloudOffset : null,
+            visibleEntityPolicy,
+            false
+        ) == true;
         render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
         return rendered;
         }

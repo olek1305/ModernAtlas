@@ -10,10 +10,7 @@ rm -f "$package_path"
 
 cd "$project_dir"
 
-if [[ ! -f "$project_dir/bin/Release/net10.0/ModernAtlas.dll" ]]; then
-  printf 'Missing compiled DLL. Run: dotnet build -c Release\n' >&2
-  exit 1
-fi
+dotnet build -c Release
 
 zip -q -j "$package_path" \
   modinfo.json LICENSE NOTICE.md bin/Release/net10.0/ModernAtlas.dll
