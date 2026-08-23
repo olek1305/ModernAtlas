@@ -160,14 +160,6 @@ internal sealed class AtlasEntityModelRendererAdapter
         }
     }
 
-    /// <summary>
-    /// Transient per-frame flag set by the tiled screenshot capture. While
-    /// set, the local player's own 3D model (including its hands) is skipped
-    /// so the stitched map photo shows the world without the photographer's
-    /// character. Other living models are unaffected.
-    /// </summary>
-    public bool HideLocalPlayerModel { get; set; }
-
     private List<RenderEntry> CollectEntries(
         int viewDistanceBlocks,
         ModernAtlasServerPolicy policy,
@@ -186,12 +178,6 @@ internal sealed class AtlasEntityModelRendererAdapter
             {
                 continue;
             }
-            if (HideLocalPlayerModel
-                && ReferenceEquals(entity, playerEntity))
-            {
-                continue;
-            }
-
             double dx = entity.Pos.X - playerEntity.Pos.X;
             double dz = entity.Pos.Z - playerEntity.Pos.Z;
             if (dx * dx + dz * dz > maximumDistanceSquared) continue;

@@ -528,11 +528,9 @@ empty while the automated exact-terrain check still reported success.
   so the top tiles capture the content above the view center. The stitcher
   keeps the outer overlap margins in the image, so the composite covers the
   full live-view world area and text or structures at the viewport edges are
-  not cropped. During every capture frame the local player's own 3D model
-  (including its hands) is hidden through
-  `ExactChunkRendererAdapter.HideLocalPlayerModel`, so the map photo shows
-  no photographer character; the flag is cleared in a `finally` after every
-  atlas draw. The closing transition's pocket sound fires at
+  not cropped. Tiled screenshots preserve the same disclosed living models
+  as the interactive atlas, including the local player's own 3D model. The
+  closing transition's pocket sound fires at
   `ClosingDurationSeconds - 0.2f`, not 1.78f, because the closing transition
   lasts only 1.5 seconds.
 
