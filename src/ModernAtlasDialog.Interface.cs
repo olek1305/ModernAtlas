@@ -187,7 +187,7 @@ public sealed partial class ModernAtlasDialog
                 ElementBounds.Fixed(toolbarX + 10, toolbarY + 10, toolbarWidth - 20, 18)
             )
             .AddStaticText(
-                "v0.6.7",
+                "v0.6.8",
                 AtlasUiStyle.DetailFont(14),
                 ElementBounds.Fixed(toolbarX + 10, toolbarY + 27, toolbarWidth - 20, 18)
             )
@@ -395,6 +395,7 @@ public sealed partial class ModernAtlasDialog
         if (overlay == null) return;
         RefreshToolbarLayerIndicator();
 
+        bool atlasFrameReady = HasCompleteAtlasFrame;
         bool settingsActive = SettingsHierarchyOpen;
         overlay.GetAtlasButton("settings-button")?.SetActive(settingsActive);
         overlay.GetAtlasButton("screenshot-options-button")?.SetActive(
@@ -403,11 +404,18 @@ public sealed partial class ModernAtlasDialog
         overlay.GetAtlasButton("map-options-button")?.SetActive(MapPanelOpen);
         overlay.GetAtlasButton("search-button")?.SetActive(SearchPanelOpen);
         overlay.GetAtlasButton("instrument-button")?.SetActive(InstrumentPanelOpen);
+        overlay.GetAtlasButton("settings-button")!.Enabled = atlasFrameReady;
+        overlay.GetAtlasButton("screenshot-options-button")!.Enabled =
+            atlasFrameReady;
         overlay.GetAtlasButton("map-options-button")!.Enabled =
-            MapLayerControlsVisible;
-        overlay.GetAtlasButton("search-button")!.Enabled = SearchModeActive;
+            atlasFrameReady && MapLayerControlsVisible;
+        overlay.GetAtlasButton("search-button")!.Enabled =
+            atlasFrameReady && SearchModeActive;
+        overlay.GetAtlasButton("instrument-button")!.Enabled = atlasFrameReady;
         overlay.GetAtlasButton("quick-screenshot-button")!.Enabled =
-            !tileScreenshot.Busy;
+            atlasFrameReady && !tileScreenshot.Busy;
+        overlay.GetAtlasButton("hide-ui-button")!.Enabled = atlasFrameReady;
+        overlay.GetAtlasButton("exit-button")!.Enabled = true;
     }
 
     private void UpdateToolbarTooltip(int mouseX, int mouseY)
@@ -1618,7 +1626,7 @@ public sealed partial class ModernAtlasDialog
                 )
             )
             .AddStaticText(
-                "v0.6.7",
+                "v0.6.8",
                 AtlasUiStyle.DetailFont(9),
                 ElementBounds.Fixed(contentX + versionX, contentY + versionY, 52, 18)
             )

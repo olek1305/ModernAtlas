@@ -25,17 +25,36 @@ public sealed partial class ModernAtlasDialog
         {
         render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
 
+        if (exactChunkRenderer == null)
+        {
+            MarkAtlasRenderingFailure("The exact atlas renderer is unavailable.");
+            return false;
+        }
+        if (exactChunkRenderer.RenderingFailed)
+        {
+            MarkAtlasRenderingFailure(
+                "The exact atlas renderer was disabled after a rendering exception."
+            );
+            return false;
+        }
+
         preparingSurfaceFilter = !surfaceHeightTexture.Advance();
         preparingOreConcealment = SurvivalOreConcealmentEnabled
-            && exactChunkRenderer != null
             && !exactChunkRenderer.AdvanceSurvivalOreConcealment();
         preparingVegetationMask = config.HideVegetation
-            && exactChunkRenderer != null
             && !exactChunkRenderer.AdvanceVegetationMask();
         if (preparingSurfaceFilter
             || preparingOreConcealment
             || preparingVegetationMask)
         {
+            List<string> reasons = new();
+            if (preparingSurfaceFilter) reasons.Add("surface filter");
+            if (preparingOreConcealment)
+            {
+                reasons.Add("survival ore concealment");
+            }
+            if (preparingVegetationMask) reasons.Add("vegetation mask");
+            LogAtlasPreparationReason(string.Join(", ", reasons));
             ClearSurfacePreparationFrame();
             return false;
         }
@@ -104,7 +123,7 @@ public sealed partial class ModernAtlasDialog
 
         // Tiled screenshots preserve the same disclosed living models as the
         // interactive atlas, including the local player's own 3D model.
-        bool rendered = exactChunkRenderer?.Render(
+        bool rendered = exactChunkRenderer.Render(
             deltaTime,
             projection,
             centerX,
@@ -135,9 +154,31 @@ public sealed partial class ModernAtlasDialog
             captureProjection ? screenshotFrozenCloudOffset : null,
             visibleEntityPolicy,
             false
-        ) == true;
+        );
         render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
+        if (!rendered)
+        {
+            if (exactChunkRenderer.RenderingFailed)
+            {
+                MarkAtlasRenderingFailure(
+                    "The exact atlas renderer was disabled after a rendering exception."
+                );
+            }
+            else
+            {
+                LogAtlasPreparationReason(
+                    "the terrain renderer has not published a complete frame yet"
+                );
+            }
+        }
         return rendered;
+        }
+        catch (Exception exception)
+        {
+            MarkAtlasRenderingFailure(
+                $"An atlas rendering exception occurred: {exception.Message}"
+            );
+            return false;
         }
         finally
         {

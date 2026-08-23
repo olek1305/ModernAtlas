@@ -257,6 +257,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
     public float LastRenderedVegetationPixelsPerBlock { get; private set; }
     public bool LastRenderedVegetationHidden { get; private set; }
     public bool LastRenderedPerformanceLightingEnabled { get; private set; } = true;
+    public bool RenderingFailed => disabled;
 
     public bool AtlasStateIsClear =>
         !atlasUniformsActive

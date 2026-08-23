@@ -850,6 +850,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         lastAtlasFrameMilliseconds = capi.ElapsedMilliseconds;
         lastAtlasWorldRenderMilliseconds = 0;
         ReleaseAtlasFrameCache();
+        BeginAtlasPreparationSession();
         EnsureExactChunkRenderer();
         centerX = capi.World.Player.Entity.Pos.X;
         centerZ = capi.World.Player.Entity.Pos.Z;
@@ -1043,7 +1044,8 @@ public sealed partial class ModernAtlasDialog : GuiDialog
             lastAtlasWorldRenderMilliseconds = capi.ElapsedMilliseconds;
             if (automatedSmokeTestActive
                 && !automatedSmokeTestResolvedAtlasAlphaChecked
-                && exactChunkRenderer?.BoundaryResolvedLastFrame == true)
+                && exactChunkRenderer?.BoundaryResolvedLastFrame == true
+                && HasCompleteAtlasFrame)
             {
                 automatedSmokeTestResolvedAtlasAlphaChecked = true;
                 automatedSmokeTestResolvedAtlasAlphaPassed =
@@ -1074,7 +1076,10 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         {
             AdvanceSearch();
         }
-        if (freshAtlasFrame && rendered && automatedSmokeTestActive)
+        if (freshAtlasFrame
+            && rendered
+            && HasCompleteAtlasFrame
+            && automatedSmokeTestActive)
         {
             bool safeSurfaceFrameWasAlreadyRendered =
                 automatedSmokeTestSafeSurfaceFrameRendered;
@@ -1155,7 +1160,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         {
             if (freshAtlasFrame && rendered)
             {
-                CaptureAtlasFrameCache();
+                _ = CaptureAtlasFrameCache();
             }
             capi.Render.CurrentFrameBuffer = null;
             scrollViewportRenderer.Render(
@@ -1203,7 +1208,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         {
             if (freshAtlasFrame && rendered)
             {
-                CaptureAtlasFrameCache();
+                _ = CaptureAtlasFrameCache();
             }
             // Even before the first complete cache frame exists, cover the
             // window with the atlas renderer's opaque neutral placeholder.
@@ -1227,6 +1232,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         capi.Render.GLDisableDepthTest();
         capi.Render.GlDisableCullFace();
         capi.Render.GlToggleBlend(true, EnumBlendMode.Standard);
+        RenderAtlasPreparationStatus();
         if (!interfaceHidden && !screenshotPreviewOpen && SearchModeActive)
         {
             RenderSearchMarkers();
@@ -1736,6 +1742,8 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         searchController.Clear();
         mapLayerTexture.Reset();
         preparingSurfaceFilter = false;
+        preparingOreConcealment = false;
+        preparingVegetationMask = false;
         // Keep the small transient surface-safety samples for this world.
         // Changing graphics view distance happens while G is closed; retaining
         // the overlap prevents already known exact mesh columns from becoming
@@ -1743,6 +1751,8 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         // leave still releases all of this non-persistent data.
         ResetPointerDrag();
         compassRenderer.Dispose();
+        // The published frame belongs only to this open-atlas session. Do not
+        // let the next G reuse an image from the previous session.
         ReleaseAtlasFrameCache();
         if (!worldTeardownStarted)
         {
@@ -1854,14 +1864,26 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         return capi.ElapsedMilliseconds - lastAtlasWorldRenderMilliseconds >= interval;
     }
 
-    private void CaptureAtlasFrameCache()
+    private bool CaptureAtlasFrameCache()
     {
         int textureId = exactChunkRenderer?.ResolvedColorTextureId ?? 0;
-        if (textureId <= 0) return;
+        if (textureId <= 0)
+        {
+            LogAtlasPreparationReason(
+                "the resolved atlas color texture is not available yet"
+            );
+            return false;
+        }
 
         IRenderAPI render = capi.Render;
         FrameBufferRef? resolved = exactChunkRenderer?.ResolvedFramebuffer;
-        if (resolved == null) return;
+        if (resolved == null)
+        {
+            LogAtlasPreparationReason(
+                "the resolved atlas framebuffer is not available yet"
+            );
+            return false;
+        }
         int width = Math.Max(1, resolved.Width);
         int height = Math.Max(1, resolved.Height);
         try
@@ -1928,6 +1950,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
             LoadedTexture? previousCompleteFrame = atlasFrameCacheTexture;
             atlasFrameCacheTexture = stagingTexture;
             atlasFrameStagingTexture = previousCompleteFrame;
+            MarkAtlasFramePublished();
             if (!loggedAtlasRefreshThrottle)
             {
                 loggedAtlasRefreshThrottle = true;
@@ -1935,13 +1958,14 @@ public sealed partial class ModernAtlasDialog : GuiDialog
                     "[ModernAtlas] Atlas refresh runs at up to 60 FPS while the Vintage Story window is focused and 12 FPS while it is in the background; world ticks and client chunk streaming remain active."
                 );
             }
+            return true;
         }
         catch (Exception exception)
         {
-            capi.Logger.Warning(
-                "[ModernAtlas] Could not publish a complete throttled atlas frame; the previous complete frame remains active: {0}",
-                exception.Message
+            MarkAtlasRenderingFailure(
+                $"The complete atlas frame could not be copied to cache: {exception.Message}"
             );
+            return false;
         }
     }
 
@@ -1964,6 +1988,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         primaryAtlasSourceTexture = null;
         primaryAtlasSourceTextureId = 0;
         lastAtlasWorldRenderMilliseconds = 0;
+        ResetAtlasPreparationState();
     }
 
     public void ScheduleNormalWorldShaderRestore()
@@ -2062,7 +2087,18 @@ public sealed partial class ModernAtlasDialog : GuiDialog
             exactChunkRenderer = null;
         }
 
-        if (exactChunkRenderer != null) return false;
+        if (exactChunkRenderer != null)
+        {
+            if (exactChunkRenderer.RenderingFailed)
+            {
+                MarkAtlasRenderingFailure(
+                    "The exact atlas renderer was disabled after a rendering exception."
+                );
+            }
+            return false;
+        }
+
+        if (atlasRenderingFailure) return false;
 
         exactChunkRenderer = ExactChunkRendererAdapter.TryCreate(
             capi,
@@ -2070,6 +2106,12 @@ public sealed partial class ModernAtlasDialog : GuiDialog
             atlasCloudShaderProvider,
             atlasBoundaryShaderProvider
         );
+        if (exactChunkRenderer == null)
+        {
+            MarkAtlasRenderingFailure(
+                "The exact atlas renderer is unavailable."
+            );
+        }
         return exactChunkRenderer != null;
     }
 
@@ -2257,6 +2299,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         DisposeDamageWarningTextures();
         compassRenderer.Dispose();
         ReleaseAtlasFrameCache();
+        DisposeAtlasPreparationStatusTexture();
         opacityQuad?.Dispose();
         opacityQuad = null;
         scrollViewportRenderer.Dispose();
