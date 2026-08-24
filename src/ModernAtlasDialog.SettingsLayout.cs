@@ -17,6 +17,12 @@ public sealed partial class ModernAtlasDialog
     private const double SettingsBodyTop = 34;
     private const double SettingsFooterHeight = 17;
     private const double SettingsSidePadding = 14;
+    // Keep the scrollbar in its own gutter so the last settings column and
+    // the close button never sit underneath the interactive track.
+    private const double SettingsScrollbarGutter = 26;
+    private const double SettingsScrollbarWidth = 14;
+    private const double SettingsScrollbarGap = 8;
+    private const string SettingsScrollbarKey = "settings-scrollbar";
     private const double SettingsColumnGap = 10;
     private const double SettingsSectionHeaderHeight = 16;
     private const double SettingsSectionGap = 8;
@@ -270,7 +276,10 @@ public sealed partial class ModernAtlasDialog
     )
     {
         int columnCount = SettingsColumnCount(width);
-        double usable = Math.Max(120, width - SettingsSidePadding * 2);
+        double usable = Math.Max(
+            120,
+            width - SettingsSidePadding * 2 - SettingsScrollbarGutter
+        );
         // A column wider than this only pushes a switch far away from its own
         // label; the leftover space becomes spacing between columns instead.
         columnWidth = Math.Clamp(
@@ -391,6 +400,18 @@ public sealed partial class ModernAtlasDialog
         return true;
     }
 
+    private bool IsSettingsScrollbarPoint(int x, int y)
+    {
+        if (bottomPanelSection != AtlasPanelSection.Settings
+            || bottomPanelProgress <= 0.01f)
+        {
+            return false;
+        }
+        if (!PanelCoversPoint(x, y)) return false;
+        return bottomPanel?.GetScrollbar(SettingsScrollbarKey)?.Bounds.PointInside(x, y)
+            == true;
+    }
+
     private void ComposeSettingsBottomPanel(
         GuiComposer composer,
         double width,
@@ -453,6 +474,57 @@ public sealed partial class ModernAtlasDialog
                 "settings-close",
                 AtlasButtonStyle.Icon
             );
+
+        if (maximum <= 0) return;
+
+        // GuiElementScrollbar is the native proportional track/thumb. Use the
+        // full track variant here rather than the compact presentation so the
+        // affordance is obvious in this otherwise dense panel. Configure this
+        // interactive element before the composer is composed; its SetHeights
+        // call emits an initial callback, which must not reset the scroll
+        // position we are restoring here.
+        bool configuringScrollbar = true;
+        composer.AddVerticalScrollbar(
+            value =>
+            {
+                if (configuringScrollbar) return;
+                double nextOffset = Math.Clamp(value, 0, maximum);
+                if (Math.Abs(settingsScrollOffset - nextOffset) < 0.01) return;
+                settingsScrollOffset = nextOffset;
+                // Keep the native scrollbar's mouse capture until MouseUp.
+                // Rebuilding the composer during a drag would dispose the
+                // element that owns that capture; wheel recomposes immediately,
+                // while track clicks and drags recompose after release.
+                if (!settingsScrollbarPointerDown)
+                {
+                    pendingInterfaceRecompose = true;
+                }
+            },
+            ElementBounds.Fixed(
+                width - SettingsSidePadding - SettingsScrollbarWidth,
+                SettingsBodyTop,
+                SettingsScrollbarWidth,
+                visibleHeight
+            ),
+            SettingsScrollbarKey
+        );
+
+        GuiElementScrollbar? scrollbar = composer.GetScrollbar(SettingsScrollbarKey);
+        if (scrollbar == null)
+        {
+            configuringScrollbar = false;
+            return;
+        }
+
+        try
+        {
+            scrollbar.SetHeights((float)visibleHeight, (float)contentHeight);
+            scrollbar.CurrentYPosition = (float)offset;
+        }
+        finally
+        {
+            configuringScrollbar = false;
+        }
     }
 
     /// <summary>

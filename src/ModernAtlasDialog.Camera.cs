@@ -253,6 +253,7 @@ public sealed partial class ModernAtlasDialog
     {
         leftDragging = false;
         rightDragging = false;
+        settingsScrollbarPointerDown = false;
         leftDragDistance = 0;
     }
 

@@ -5273,6 +5273,8 @@ public sealed partial class ModernAtlasDialog
             "creative-settings-button"
         };
 
+        bool deterministicScrollbarGeometry = true;
+
         foreach ((double width, double height, int columns, string name) in layouts)
         {
             if (SettingsColumnCount(width) != columns)
@@ -5283,6 +5285,42 @@ public sealed partial class ModernAtlasDialog
                     width,
                     SettingsColumnCount(width),
                     columns
+                );
+                return false;
+            }
+
+            MeasureSettingsLayout(
+                width,
+                height,
+                out List<AtlasSettingsSection>[] measuredColumns,
+                out double measuredColumnWidth,
+                out double measuredColumnStride,
+                out double measuredContentHeight,
+                out double measuredVisibleHeight
+            );
+            double measuredMaximum = Math.Max(
+                0,
+                measuredContentHeight - measuredVisibleHeight
+            );
+            double contentRight = SettingsSidePadding
+                + Math.Max(0, measuredColumns.Length - 1) * measuredColumnStride
+                + measuredColumnWidth;
+            double scrollbarX = width
+                - SettingsSidePadding
+                - SettingsScrollbarWidth;
+            bool geometryFits = measuredMaximum > 0.01
+                && contentRight <= scrollbarX - SettingsScrollbarGap + 0.5
+                && scrollbarX + SettingsScrollbarWidth <= width - SettingsSidePadding + 0.5;
+            if (!geometryFits)
+            {
+                deterministicScrollbarGeometry = false;
+                capi.Logger.Error(
+                    "[ModernAtlas] Automated settings-layout test: {0} scrollbar geometry is invalid (overflow={1}, contentRight={2:0.0}, track={3:0.0}-{4:0.0}).",
+                    name,
+                    measuredMaximum > 0.01,
+                    contentRight,
+                    scrollbarX,
+                    scrollbarX + SettingsScrollbarWidth
                 );
                 return false;
             }
@@ -5329,11 +5367,52 @@ public sealed partial class ModernAtlasDialog
             );
         }
         double liveMaximum = SettingsScrollMaximum(liveWidth, liveHeight);
+        GuiElementScrollbar? liveScrollbar = settingsModal?.GetScrollbar(
+            SettingsScrollbarKey
+        );
+        bool scrollbarComposed = liveMaximum > 0.01 && liveScrollbar != null;
+        if (liveScrollbar != null)
+        {
+            MeasureSettingsLayout(
+                liveWidth,
+                liveHeight,
+                out List<AtlasSettingsSection>[] liveColumns,
+                out double liveColumnWidth,
+                out double liveColumnStride,
+                out _,
+                out _
+            );
+            double liveContentRight = SettingsSidePadding
+                + Math.Max(0, liveColumns.Length - 1) * liveColumnStride
+                + liveColumnWidth;
+            double liveScrollbarX = liveWidth
+                - SettingsSidePadding
+                - SettingsScrollbarWidth;
+            scrollbarComposed = scrollbarComposed
+                && Math.Abs(liveScrollbar.Bounds.fixedX - liveScrollbarX) < 0.51
+                && Math.Abs(liveScrollbar.Bounds.fixedY - SettingsBodyTop) < 0.51
+                && Math.Abs(liveScrollbar.Bounds.fixedHeight - Math.Max(24, liveHeight - SettingsBodyTop - SettingsFooterHeight)) < 0.51
+                && liveContentRight <= liveScrollbarX - SettingsScrollbarGap + 0.5
+                && liveScrollbar.Bounds.fixedX + liveScrollbar.Bounds.fixedWidth
+                    <= liveWidth - SettingsSidePadding + 0.5;
+        }
+        if (!scrollbarComposed)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated settings-layout test: live overflow panel has no valid {0} track/thumb.",
+                SettingsScrollbarKey
+            );
+        }
         double restoreScroll = settingsScrollOffset;
         settingsScrollOffset = liveMaximum;
         OpenBottomPanelImmediately(AtlasPanelSection.Settings);
         bool bottomComposed = settingsModal?.GetElement("creative-settings-button") != null
             && settingsModal?.GetElement("map-layers") != null;
+        GuiElementScrollbar? bottomScrollbar = settingsModal?.GetScrollbar(
+            SettingsScrollbarKey
+        );
+        bool scrollbarAtBottom = bottomScrollbar != null
+            && Math.Abs(bottomScrollbar.CurrentYPosition - liveMaximum) < 0.51;
         settingsScrollOffset = restoreScroll;
         OpenBottomPanelImmediately(AtlasPanelSection.Settings);
 
@@ -5348,21 +5427,30 @@ public sealed partial class ModernAtlasDialog
         settingsSectionScrollOffset = 0;
         ResetBottomPanelState();
 
-        if (controlsComposed && bottomComposed && scrollPreserved)
+        if (controlsComposed
+            && bottomComposed
+            && scrollPreserved
+            && deterministicScrollbarGeometry
+            && scrollbarComposed
+            && scrollbarAtBottom)
         {
             capi.Logger.Notification(
-                "[ModernAtlas] Automated settings-layout test passed: 3/2/1 columns by width, all 18 control keys present in every layout, every control reachable by scrolling, and the scroll position survived a Visual Lab round trip (live panel {0:0}x{1:0}, scroll range {2:0}).",
+                "[ModernAtlas] Automated settings-layout test passed: 3/2/1 columns by width, all 18 control keys present in every layout, every control reachable by scrolling, proportional {3} track/thumb geometry verified, bottom position represented, and the scroll position survived a Visual Lab round trip (live panel {0:0}x{1:0}, scroll range {2:0}).",
                 liveWidth,
                 liveHeight,
-                liveMaximum
+                liveMaximum,
+                SettingsScrollbarKey
             );
             return true;
         }
         capi.Logger.Error(
-            "[ModernAtlas] Automated settings-layout test failed: controlsComposed={0}, bottomComposed={1}, scrollPreserved={2}.",
+            "[ModernAtlas] Automated settings-layout test failed: controlsComposed={0}, bottomComposed={1}, scrollPreserved={2}, deterministicScrollbarGeometry={3}, scrollbarComposed={4}, scrollbarAtBottom={5}.",
             controlsComposed,
             bottomComposed,
-            scrollPreserved
+            scrollPreserved,
+            deterministicScrollbarGeometry,
+            scrollbarComposed,
+            scrollbarAtBottom
         );
         return false;
     }

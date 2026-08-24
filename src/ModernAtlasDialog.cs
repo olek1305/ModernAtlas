@@ -124,6 +124,9 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private MeshRef? opacityQuad;
     private bool leftDragging;
     private bool rightDragging;
+    // Native Settings scrollbar gestures keep the composer alive until the
+    // release event so GuiElementScrollbar retains mouse capture.
+    private bool settingsScrollbarPointerDown;
     private double leftDragDistance;
     private long? selectedEntityId;
     private double centerX;
@@ -1371,6 +1374,8 @@ public sealed partial class ModernAtlasDialog : GuiDialog
             UnfocusSearchOutsideInput(args);
             overlay?.OnMouseDown(args);
             if (args.Handled) return;
+            settingsScrollbarPointerDown = args.Button == EnumMouseButton.Left
+                && IsSettingsScrollbarPoint(args.X, args.Y);
             if (PanelCoversPoint(args.X, args.Y))
             {
                 bottomPanel?.OnMouseDown(args);
@@ -1429,6 +1434,17 @@ public sealed partial class ModernAtlasDialog : GuiDialog
             args.Handled = true;
             return;
         }
+        if (args.Button == EnumMouseButton.Left && settingsScrollbarPointerDown)
+        {
+            // Let the native element finish its press/release bookkeeping,
+            // then rebuild once so the content catches up with the thumb's
+            // final position. Rebuilding during MouseMove would lose capture.
+            bottomPanel?.OnMouseUp(args);
+            settingsScrollbarPointerDown = false;
+            pendingInterfaceRecompose = true;
+            args.Handled = true;
+            return;
+        }
         // Once a map drag begins, keep ownership of the gesture even if the
         // pointer crosses the settings panel. Letting the overlay consume the
         // release leaves the drag latched and the next move jumps the camera.
@@ -1476,6 +1492,14 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         {
             ClearOreHover();
             screenshotProgressModal.OnMouseMove(args);
+            args.Handled = true;
+            return;
+        }
+        if (settingsScrollbarPointerDown)
+        {
+            // Preserve native scrollbar capture even when the pointer leaves
+            // the panel bounds. The content is rebuilt on MouseUp only.
+            bottomPanel?.OnMouseMove(args);
             args.Handled = true;
             return;
         }
@@ -1569,11 +1593,29 @@ public sealed partial class ModernAtlasDialog : GuiDialog
             if (args.IsHandled) return;
             if (PanelCoversPoint(capi.Input.MouseX, capi.Input.MouseY))
             {
+                if (bottomPanelSection == AtlasPanelSection.Settings)
+                {
+                    // GuiElementScrollbar only consumes deltaPrecise. Handle
+                    // the whole Settings panel here so coarse wheel events
+                    // still move the content and never reach a slider.
+                    float wheel = args.deltaPrecise != 0
+                        ? args.deltaPrecise
+                        : args.delta;
+                    double width = bottomPanelBounds?.fixedWidth ?? 0;
+                    double height = bottomPanelBounds?.fixedHeight ?? 0;
+                    double maximum = SettingsScrollMaximum(width, height);
+                    settingsScrollOffset = Math.Clamp(
+                        settingsScrollOffset - wheel * 18,
+                        0,
+                        maximum
+                    );
+                    pendingInterfaceRecompose = true;
+                    args.SetHandled();
+                    return;
+                }
                 bottomPanel?.OnMouseWheel(args);
                 if (!args.IsHandled
-                    && (bottomPanelSection == AtlasPanelSection.Settings
-                        || bottomPanelSection
-                            == AtlasPanelSection.ScreenshotOptions
+                    && (bottomPanelSection == AtlasPanelSection.ScreenshotOptions
                         || bottomPanelSection
                             == AtlasPanelSection.ScreenshotFilterTuning))
                 {
