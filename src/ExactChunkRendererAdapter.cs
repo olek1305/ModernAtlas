@@ -165,6 +165,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
     private readonly VolumetricCloudRendererAdapter? cloudRenderer;
     private readonly AtlasEntityModelRendererAdapter entityModelRenderer;
     private readonly AtlasMechanicalRendererAdapter mechanicalRenderer;
+    private readonly AtlasAnimatedDoorRendererAdapter animatedDoorRenderer;
     private readonly AtlasOreTextureReplacement oreTextureReplacement;
     private readonly AtlasVegetationTextureMask vegetationTextureMask;
     private readonly AtlasBoundaryResolver boundaryResolver;
@@ -237,6 +238,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
 
     public int LastRenderedEntityCount { get; private set; }
     public int LastRenderedMechanicalDeviceCount { get; private set; }
+    public int LastRenderedAnimatedDoorCount { get; private set; }
     public int LastLoadedMechanicalDeviceCount =>
         mechanicalRenderer.LastLoadedDeviceCount;
     public bool ScreenshotAnimationFreezeActive =>
@@ -264,6 +266,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
     public bool AtlasStateIsClear =>
         !atlasUniformsActive
         && mechanicalRenderer.NativeCollectionsRestored
+        && animatedDoorRenderer.RenderStateRestored
         && !atlasVisibilityOverride
         && !atlasTerrainCollectionOverride
         && !atlasTransparentVisibilityOverride
@@ -490,6 +493,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
             capi,
             visibilityHarmony
         );
+        animatedDoorRenderer = new AtlasAnimatedDoorRendererAdapter(capi);
         oreTextureReplacement = new AtlasOreTextureReplacement(capi);
         vegetationTextureMask = new AtlasVegetationTextureMask(capi);
         boundaryResolver = new AtlasBoundaryResolver(
@@ -1249,6 +1253,14 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
                 hideUndergroundCaves ? surfaceHeightTexture : null,
                 animationsEnabled
             );
+            LastRenderedAnimatedDoorCount = animatedDoorRenderer.Render(
+                view,
+                visibleTerrainColumns,
+                capi.World.Player.Entity.Pos.X,
+                capi.World.Player.Entity.Pos.Z,
+                viewDistanceBlocks,
+                hideUndergroundCaves ? surfaceHeightTexture : null
+            );
             LastRenderedEntityCount = entityModelRenderer.Render(
                 deltaTime,
                 view,
@@ -1420,6 +1432,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
         disposed = true;
         lastAtlasCameraReady = false;
         mechanicalRenderer.ClearAnimationFreezes();
+        animatedDoorRenderer.Clear();
 
         // LeaveWorld is raised after the engine has started clearing its
         // DefaultShaderUniforms arrays. Activating an engine chunk shader at
