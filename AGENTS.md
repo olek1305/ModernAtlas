@@ -330,6 +330,24 @@ empty while the automated exact-terrain check still reported success.
 
 ## Performance and compatibility
 
+- ModernAtlas must never write, override, clamp, normalize, cache and restore,
+  or otherwise manipulate Vintage Story's global frame-rate and frame-pacing
+  controls. This includes the foreground or background FPS limit, VSync,
+  engine render-loop cadence, frame timers, sleep/yield behavior, driver caps
+  and equivalent settings. Atlas performance profiles may control only
+  atlas-owned work and atlas-framebuffer redraws after atlas opening begins;
+  they must never throttle or accelerate ordinary world rendering or govern
+  work owned by Vintage Story or another mod.
+- With the atlas and its opening or closing transition inactive, every
+  performance profile, including High, must remain dormant. Do not perform
+  periodic atlas screenshots, framebuffer readbacks, blur or texture uploads,
+  renderer prewarming, background scans or scheduled atlas rendering. A
+  one-time transition capture may begin only after the player requests the
+  atlas to open. Changing a ModernAtlas profile while the atlas is closed may
+  persist its own configuration, but must not change the game's frame behavior.
+  Treat this as a compatibility requirement for clients with any number of
+  other mods, and keep an automated check that High queues no atlas capture or
+  rendering work before the opening input.
 - Apply strict per-frame and per-tick budgets. Opening the atlas must not cause
   a large synchronous scan or visible gameplay freeze.
 - Keep the focused Vintage Story atlas on its smooth refresh cadence even when

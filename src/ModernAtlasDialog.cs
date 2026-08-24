@@ -68,6 +68,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private readonly ModernAtlasServerPolicy serverPolicy;
     private readonly ModernAtlasServerPolicy visibleEntityPolicy = new();
     private readonly Action saveConfig;
+    private readonly Action<string>? performanceTelemetryLogger;
     private readonly Func<bool> requestClose;
     private readonly Func<bool> requestEmergencyClose;
     private readonly Func<IShaderProgram?> stableLiquidShaderProvider;
@@ -230,6 +231,9 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private string? pendingAutomatedMapLayerScreenshotSuffix;
     private bool automatedSmokeTestPerformanceModeSelected;
     private bool automatedSmokeTestPerformanceModeRendered;
+    private bool automatedSmokeTestAtlasDetailSelected;
+    private bool automatedSmokeTestAtlasDetailRendered;
+    private int automatedSmokeTestAtlasDetailRenderPhase;
     private bool automatedSmokeTestPresentationPassed;
     private bool automatedSmokeTestResolvedAtlasAlphaChecked;
     private bool automatedSmokeTestResolvedAtlasAlphaPassed;
@@ -256,6 +260,8 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private string automatedOriginalHandheldInstrumentMode = "compass";
     private bool automatedOriginalPerformanceLightingEnabled;
     private bool automatedOriginalHideVegetation;
+    private string automatedOriginalPerformanceMode = AtlasPerformanceModeInfo.OnDemandValue;
+    private string automatedOriginalAtlasDetail = AtlasDetailModeInfo.FullValue;
     private bool automatedOriginalCheatModeEnabled;
     private int automatedOriginalScreenshotScale = 2;
     private int automatedOriginalScreenshotCaptureAreaPercent = 100;
@@ -560,6 +566,16 @@ public sealed partial class ModernAtlasDialog : GuiDialog
             ? 2
             : 1;
 
+    private AtlasPerformanceMode PerformanceMode => config.GetPerformanceMode();
+
+    private int PerformanceModeChoiceIndex =>
+        PerformanceMode == AtlasPerformanceMode.HighThroughput ? 1 : 0;
+
+    private AtlasDetailMode CurrentAtlasDetailMode => config.GetAtlasDetail();
+
+    private int AtlasDetailChoiceIndex =>
+        CurrentAtlasDetailMode == AtlasDetailMode.Reduced ? 0 : 1;
+
     private float HandheldInstrumentHour
     {
         get
@@ -774,12 +790,14 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         Func<IShaderProgram?> atlasScreenshotFilterShaderProvider,
         Func<IShaderProgram?> atlasOpacityShaderProvider,
         Func<IShaderProgram?> atlasScrollShaderProvider,
-        AtlasSoundController soundController
+        AtlasSoundController soundController,
+        Action<string>? performanceTelemetryLogger = null
     ) : base(capi)
     {
         this.config = config;
         this.serverPolicy = serverPolicy;
         this.saveConfig = saveConfig;
+        this.performanceTelemetryLogger = performanceTelemetryLogger;
         this.requestClose = requestClose;
         this.requestEmergencyClose = requestEmergencyClose;
         this.stableLiquidShaderProvider = stableLiquidShaderProvider;
@@ -1855,6 +1873,9 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     {
         if (atlasFrameCacheTexture is not { TextureId: > 0 }) return true;
 
+        // This throttles only redraws of ModernAtlas's own off-screen atlas
+        // framebuffer while this dialog is open. It never reads or writes
+        // Vintage Story's Max FPS, VSync or background-window frame limit.
         // Releasing a camera button must not reduce visible atlas motion to
         // the idle cadence. Keep every foreground atlas frame smooth and save
         // the lower cadence exclusively for an unfocused/background game.
@@ -2190,6 +2211,9 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         automatedSmokeTestMapLayerPhase = 0;
         automatedSmokeTestMapLayerPassed = false;
         pendingAutomatedMapLayerScreenshotSuffix = null;
+        automatedSmokeTestAtlasDetailSelected = false;
+        automatedSmokeTestAtlasDetailRendered = false;
+        automatedSmokeTestAtlasDetailRenderPhase = 0;
         automatedSmokeTestPresentationPassed = false;
         automatedSmokeTestResolvedAtlasAlphaChecked = false;
         automatedSmokeTestResolvedAtlasAlphaPassed = false;

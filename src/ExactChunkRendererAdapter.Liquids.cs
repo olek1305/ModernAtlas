@@ -90,7 +90,7 @@ internal sealed partial class ExactChunkRendererAdapter
             }
             BeginAtlasTextureBindings(
                 concealSurvivalOres,
-                vegetationTextureMask.Ready
+                hideVegetation && vegetationTextureMask.Ready
             );
             atlasTransparentVisibilityOverride = true;
             try
@@ -118,7 +118,7 @@ internal sealed partial class ExactChunkRendererAdapter
             mergeTransparentRenderPass.Invoke(platform, Array.Empty<object>());
             BeginAtlasTextureBindings(
                 concealSurvivalOres,
-                vegetationTextureMask.Ready
+                hideVegetation && vegetationTextureMask.Ready
             );
             atlasTransparentVisibilityOverride = true;
             try

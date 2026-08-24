@@ -38,14 +38,23 @@ public sealed partial class ModernAtlasDialog
             return false;
         }
 
-        preparingSurfaceFilter = !surfaceHeightTexture.Advance();
+        AtlasPerformanceBudget performanceBudget = AtlasPerformanceModeInfo.Budget(
+            PerformanceMode
+        );
+        AtlasDetailMode atlasDetailMode = CurrentAtlasDetailMode;
+        preparingSurfaceFilter = !surfaceHeightTexture.Advance(
+            performanceBudget.FirstFrameWorkBudgetMilliseconds,
+            performanceBudget.SurfaceMaximumChunks
+        );
         preparingOreConcealment = SurvivalOreConcealmentEnabled
-            && !exactChunkRenderer.AdvanceSurvivalOreConcealment();
+            && !exactChunkRenderer.AdvanceSurvivalOreConcealment(
+                performanceBudget.OreWorkBudgetMilliseconds
+            );
         preparingVegetationMask = config.HideVegetation
-            && !exactChunkRenderer.AdvanceVegetationMask();
-        if (preparingSurfaceFilter
-            || preparingOreConcealment
-            || preparingVegetationMask)
+            && !exactChunkRenderer.AdvanceVegetationMask(
+                performanceBudget.VegetationWorkBudgetMilliseconds
+            );
+        if (preparingSurfaceFilter || preparingOreConcealment)
         {
             List<string> reasons = new();
             if (preparingSurfaceFilter) reasons.Add("surface filter");
@@ -57,6 +66,12 @@ public sealed partial class ModernAtlasDialog
             LogAtlasPreparationReason(string.Join(", ", reasons));
             ClearSurfacePreparationFrame();
             return false;
+        }
+        if (preparingVegetationMask)
+        {
+            LogAtlasPreparationReason(
+                "optional vegetation mask is not ready; normal vegetation remains visible"
+            );
         }
 
         AtlasViewportBounds viewport = AtlasViewport;
@@ -137,9 +152,9 @@ public sealed partial class ModernAtlasDialog
             surfaceHeightTexture,
             mapLayerTexture,
             EffectiveMapLayerOpacity,
-            0,
+            AtlasDetailModeInfo.EffectiveTextureDetailReduction(atlasDetailMode),
             config.PerformanceLightingEnabled,
-            config.HideVegetation,
+            config.HideVegetation && !preparingVegetationMask,
             config.AnimationsEnabled,
             Math.Clamp(config.AtlasExposurePercent, 50, 150) / 100f,
             Math.Clamp(config.CaveMaskBrightnessPercent, 50, 150) / 100f,
@@ -147,15 +162,24 @@ public sealed partial class ModernAtlasDialog
             windWaveCounterHighFrequency,
             waterStillCounter,
             waterFlowCounter,
-            config.CloudsEnabled,
+            AtlasDetailModeInfo.EffectiveCloudsEnabled(
+                atlasDetailMode,
+                config.CloudsEnabled
+            ),
             config.LiveLightingEnabled,
             config.FixedSunHour,
             renderAnimationOffset,
             captureProjection ? screenshotFrozenCloudOffset : null,
             visibleEntityPolicy,
-            false
+            false,
+            performanceBudget.OreWorkBudgetMilliseconds,
+            performanceBudget.VegetationWorkBudgetMilliseconds
         );
         render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
+        if (rendered)
+        {
+            AdvanceAutomatedAtlasDetailRenderCheck();
+        }
         if (!rendered)
         {
             if (exactChunkRenderer.RenderingFailed)

@@ -226,12 +226,15 @@ internal sealed class AtlasSurfaceHeightTexture : IDisposable
         texture ??= new LoadedTexture(capi);
     }
 
-    public bool Advance()
+    public bool Advance(
+        double workBudgetMilliseconds = WorkBudgetMilliseconds,
+        int maximumChunksPerFrame = MaximumChunksPerFrame
+    )
     {
         if (sourcePixels == null || pixels == null || texture == null) return false;
         if (Ready)
         {
-            AdvanceMissingChunkRefresh();
+            AdvanceMissingChunkRefresh(workBudgetMilliseconds);
             return true;
         }
 
@@ -239,9 +242,9 @@ internal sealed class AtlasSurfaceHeightTexture : IDisposable
         int totalChunks = chunkCountX * chunkCountZ;
         int processed = 0;
         while (nextChunkIndex < totalChunks
-            && processed < MaximumChunksPerFrame
+            && processed < Math.Max(1, maximumChunksPerFrame)
             && (processed == 0
-                || capi.ElapsedMilliseconds - started < WorkBudgetMilliseconds))
+                || capi.ElapsedMilliseconds - started < workBudgetMilliseconds))
         {
             int relativeChunkX = nextChunkIndex % chunkCountX;
             int relativeChunkZ = nextChunkIndex / chunkCountX;
@@ -264,7 +267,7 @@ internal sealed class AtlasSurfaceHeightTexture : IDisposable
         int processedRows = 0;
         while (nextExteriorRow < texture.Height
             && (processedRows == 0
-                || capi.ElapsedMilliseconds - started < WorkBudgetMilliseconds))
+                || capi.ElapsedMilliseconds - started < workBudgetMilliseconds))
         {
             FillExteriorEnvelopeRow(nextExteriorRow);
             nextExteriorRow++;
@@ -493,7 +496,7 @@ internal sealed class AtlasSurfaceHeightTexture : IDisposable
         }
     }
 
-    private void AdvanceMissingChunkRefresh()
+    private void AdvanceMissingChunkRefresh(double workBudgetMilliseconds)
     {
         if (sourcePixels == null || texture == null) return;
 
@@ -503,7 +506,7 @@ internal sealed class AtlasSurfaceHeightTexture : IDisposable
             int processedRows = 0;
             while (nextExteriorRow < texture.Height
                 && (processedRows == 0
-                    || capi.ElapsedMilliseconds - started < WorkBudgetMilliseconds))
+                    || capi.ElapsedMilliseconds - started < workBudgetMilliseconds))
             {
                 FillExteriorEnvelopeRow(nextExteriorRow);
                 nextExteriorRow++;
@@ -527,7 +530,7 @@ internal sealed class AtlasSurfaceHeightTexture : IDisposable
         while (checkedIndices < totalChunks
             && retriedChunks < 32
             && (retriedChunks == 0
-                || capi.ElapsedMilliseconds - started < WorkBudgetMilliseconds))
+                || capi.ElapsedMilliseconds - started < workBudgetMilliseconds))
         {
             int index = missingRetryCursor;
             missingRetryCursor = (missingRetryCursor + 1) % totalChunks;

@@ -20,6 +20,20 @@ public sealed partial class ModernAtlasDialog
 {
     internal void BeginAutomatedSmokeTest(Action<bool> completion)
     {
+        string? performancePolicyFailure = AtlasPerformanceModeInfo.Validate()
+            ?? AtlasDetailModeInfo.Validate()
+            ?? AtlasPresetProfile.Validate()
+            ?? AtlasOrdinaryWorldScreenshotRenderer.ValidatePerformancePolicy();
+        if (performancePolicyFailure != null)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated performance-policy self-check failed: {0}.",
+                performancePolicyFailure
+            );
+            completion(false);
+            return;
+        }
+
         presentationChangeCoordinator.Reset(config.RenderOnScroll);
         automatedOriginalMapLayersEnabled = config.MapLayersEnabled;
         automatedOriginalCaveModeEnabled = config.CaveModeEnabled;
@@ -34,6 +48,8 @@ public sealed partial class ModernAtlasDialog
         automatedOriginalPerformanceLightingEnabled =
             config.PerformanceLightingEnabled;
         automatedOriginalHideVegetation = config.HideVegetation;
+        automatedOriginalPerformanceMode = config.PerformanceMode;
+        automatedOriginalAtlasDetail = config.AtlasDetail;
         automatedOriginalCheatModeEnabled = cheatModeEnabled;
         automatedOriginalScreenshotScale = config.ScreenshotScale;
         automatedOriginalScreenshotCaptureAreaPercent =
@@ -328,6 +344,9 @@ public sealed partial class ModernAtlasDialog
         automatedSmokeTestHoldLayerHover = false;
         automatedSmokeTestPerformanceModeSelected = false;
         automatedSmokeTestPerformanceModeRendered = false;
+        automatedSmokeTestAtlasDetailSelected = false;
+        automatedSmokeTestAtlasDetailRendered = false;
+        automatedSmokeTestAtlasDetailRenderPhase = 0;
         automatedSmokeTestPresentationPassed = false;
         automatedSmokeTestResolvedAtlasAlphaChecked = false;
         automatedSmokeTestResolvedAtlasAlphaPassed = false;
@@ -554,6 +573,7 @@ public sealed partial class ModernAtlasDialog
             && automatedSmokeTestSearchPassed
             && automatedSmokeTestMapLayerPassed
             && automatedSmokeTestPerformanceModeRendered
+            && automatedSmokeTestAtlasDetailRendered
             && automatedSmokeTestPresentationPassed
             && automatedSmokeTestResolvedAtlasAlphaPassed
             && automatedSmokeTestViewDistancePassed
@@ -670,7 +690,7 @@ public sealed partial class ModernAtlasDialog
         if (!passed)
         {
             capi.Logger.Error(
-                "[ModernAtlas] Automated smoke summary: exact={0}, boundary={1}, resolvedAlpha={2}(checked={3}), viewDistance={4}(unchanged={5}, initial={6}), safeSurface={7}, pitch={8}/{9}, interface={10}, unit={11}/{12}, searchInput={13}, bilingual={14}, ore={15}, creativeOre={16}, partialZoom={17}, maximumZoom={18}, search={19}(phase={20}), layers={21}(phase={22}), performance={23}(selected={24}, renderedVegetationHidden={25}, flatLighting={26}), presentation={27}, screenshotPreview={34}, screenshotCapture={28}(requested={29}, sequenceStep={30}, outputs={31}, cancel={32}/{33}).",
+                "[ModernAtlas] Automated smoke summary: exact={0}, boundary={1}, resolvedAlpha={2}(checked={3}), viewDistance={4}(unchanged={5}, initial={6}), safeSurface={7}, pitch={8}/{9}, interface={10}, unit={11}/{12}, searchInput={13}, bilingual={14}, ore={15}, creativeOre={16}, partialZoom={17}, maximumZoom={18}, search={19}(phase={20}), layers={21}(phase={22}), performance={23}(selected={24}, renderedVegetationHidden={25}, flatLighting={26}), atlasDetail(selected={35}, rendered={36}), presentation={27}, screenshotPreview={34}, screenshotCapture={28}(requested={29}, sequenceStep={30}, outputs={31}, cancel={32}/{33}).",
                 AutomatedSmokeTestRenderedExactWorld,
                 exactChunkRenderer?.BoundaryResolvedLastFrame == true,
                 automatedSmokeTestResolvedAtlasAlphaPassed,
@@ -705,7 +725,9 @@ public sealed partial class ModernAtlasDialog
                 automatedScreenshotOutputValidationPassed,
                 automatedScreenshotCancelPassed,
                 automatedScreenshotCancelMode,
-                automatedSmokeScreenshotPreviewPassed
+                automatedSmokeScreenshotPreviewPassed,
+                automatedSmokeTestAtlasDetailSelected,
+                automatedSmokeTestAtlasDetailRendered
             );
         }
 
@@ -960,6 +982,92 @@ public sealed partial class ModernAtlasDialog
             && queuedBottomPanelSection == AtlasPanelSection.Performance;
         OpenBottomPanelImmediately(AtlasPanelSection.Performance);
         bool performanceOpened = performanceQueued && performanceModalOpen;
+        bool performanceModeControlPresent = performanceOpened
+            && performanceModal?.GetAtlasChoice("performance-mode") != null;
+        bool performanceModeHighSelected = false;
+        bool performanceModeOnDemandSelected = false;
+        if (performanceModeControlPresent)
+        {
+            bool startedOnDemand = PerformanceMode == AtlasPerformanceMode.OnDemand;
+            if (startedOnDemand)
+            {
+                performanceModeHighSelected =
+                    ClickAtlasControlForAutomatedTest(performanceModal, "performance-mode")
+                    && PerformanceMode == AtlasPerformanceMode.HighThroughput;
+                performanceModeOnDemandSelected = performanceModeHighSelected
+                    && ClickAtlasControlForAutomatedTest(performanceModal, "performance-mode", 0.1)
+                    && PerformanceMode == AtlasPerformanceMode.OnDemand;
+            }
+            else
+            {
+                performanceModeOnDemandSelected =
+                    ClickAtlasControlForAutomatedTest(performanceModal, "performance-mode", 0.1)
+                    && PerformanceMode == AtlasPerformanceMode.OnDemand;
+                performanceModeHighSelected = performanceModeOnDemandSelected
+                    && ClickAtlasControlForAutomatedTest(performanceModal, "performance-mode")
+                    && PerformanceMode == AtlasPerformanceMode.HighThroughput;
+                if (performanceModeHighSelected)
+                {
+                    performanceModeOnDemandSelected =
+                        ClickAtlasControlForAutomatedTest(performanceModal, "performance-mode", 0.1)
+                        && PerformanceMode == AtlasPerformanceMode.OnDemand;
+                }
+            }
+        }
+        bool atlasDetailControlPresent = performanceOpened
+            && performanceModal?.GetAtlasChoice("atlas-detail") != null;
+        bool atlasDetailReducedSelected = false;
+        bool atlasDetailFullSelected = false;
+        if (atlasDetailControlPresent)
+        {
+            bool startedFull = CurrentAtlasDetailMode == AtlasDetailMode.Full;
+            if (startedFull)
+            {
+                atlasDetailReducedSelected =
+                    ClickAtlasControlForAutomatedTest(
+                        performanceModal,
+                        "atlas-detail",
+                        0.1
+                    )
+                    && CurrentAtlasDetailMode == AtlasDetailMode.Reduced;
+                atlasDetailFullSelected = atlasDetailReducedSelected
+                    && ClickAtlasControlForAutomatedTest(
+                        performanceModal,
+                        "atlas-detail"
+                    )
+                    && CurrentAtlasDetailMode == AtlasDetailMode.Full;
+            }
+            else
+            {
+                atlasDetailFullSelected =
+                    ClickAtlasControlForAutomatedTest(
+                        performanceModal,
+                        "atlas-detail"
+                    )
+                    && CurrentAtlasDetailMode == AtlasDetailMode.Full;
+                atlasDetailReducedSelected = atlasDetailFullSelected
+                    && ClickAtlasControlForAutomatedTest(
+                        performanceModal,
+                        "atlas-detail",
+                        0.1
+                    )
+                    && CurrentAtlasDetailMode == AtlasDetailMode.Reduced;
+            }
+        }
+        automatedSmokeTestAtlasDetailSelected = atlasDetailControlPresent
+            && atlasDetailReducedSelected
+            && atlasDetailFullSelected;
+        if (automatedSmokeTestAtlasDetailSelected)
+        {
+            // Render both visual profiles after the UI clicks. The preference
+            // is restored by AdvanceAutomatedAtlasDetailRenderCheck after the
+            // two effective atlas-frame diagnostics have passed.
+            config.AtlasDetail = AtlasDetailModeInfo.ReducedValue;
+            saveConfig();
+            SyncPerformanceControls();
+            automatedSmokeTestAtlasDetailRenderPhase = 1;
+            lastAtlasWorldRenderMilliseconds = 0;
+        }
         bool flatLightingSelected = performanceOpened
             && ClickAtlasControlForAutomatedTest(
                 performanceModal,
@@ -972,9 +1080,21 @@ public sealed partial class ModernAtlasDialog
             );
         automatedSmokeTestPerformanceModeSelected = performanceOpened
             && flatLightingSelected
-            && vegetationSelected;
+            && vegetationSelected
+            && performanceModeControlPresent
+            && performanceModeHighSelected
+            && performanceModeOnDemandSelected
+            && automatedSmokeTestAtlasDetailSelected;
         if (automatedSmokeTestPerformanceModeSelected)
         {
+            // The broad visual smoke suite already exercises every expensive
+            // atlas filter. Keep that suite deterministic by running its
+            // rendering phase with the existing high-throughput budgets after
+            // the two profile choices and the On-demand scheduler self-check
+            // have passed. The original preference is restored at world exit.
+            config.PerformanceMode = AtlasPerformanceModeInfo.HighThroughputValue;
+            saveConfig();
+            SyncPerformanceControls();
             OnPerformanceLightingToggled(false);
             OnHideVegetationToggled(true);
             lastAtlasWorldRenderMilliseconds = 0;
@@ -1823,7 +1943,63 @@ public sealed partial class ModernAtlasDialog
             );
         }
     }
+
 #endif
+    }
+
+    private void AdvanceAutomatedAtlasDetailRenderCheck()
+    {
+        if (!automatedSmokeTestActive
+            || !automatedSmokeTestAtlasDetailSelected
+            || automatedSmokeTestAtlasDetailRendered
+            || exactChunkRenderer == null)
+        {
+            return;
+        }
+
+        if (automatedSmokeTestAtlasDetailRenderPhase == 1)
+        {
+            bool reducedPassed = CurrentAtlasDetailMode == AtlasDetailMode.Reduced
+                && exactChunkRenderer.LastRenderedTextureDetailReduction == 2
+                && !exactChunkRenderer.LastRenderedCloudOverlayRequested;
+            if (!reducedPassed) return;
+
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated Atlas detail check passed for Reduced: texture reduction=2, atlas clouds requested=False; world cloud preference remains {0}.",
+                config.CloudsEnabled
+            );
+            config.AtlasDetail = AtlasDetailModeInfo.FullValue;
+            saveConfig();
+            SyncPerformanceControls();
+            automatedSmokeTestAtlasDetailRenderPhase = 2;
+            lastAtlasWorldRenderMilliseconds = 0;
+            return;
+        }
+
+        if (automatedSmokeTestAtlasDetailRenderPhase != 2) return;
+
+        bool fullPassed = CurrentAtlasDetailMode == AtlasDetailMode.Full
+            && exactChunkRenderer.LastRenderedTextureDetailReduction == 0
+            && exactChunkRenderer.LastRenderedCloudOverlayRequested
+                == config.CloudsEnabled;
+        if (!fullPassed) return;
+
+        capi.Logger.Notification(
+            "[ModernAtlas] Automated Atlas detail check passed for Full: texture reduction=0, atlas clouds requested={0}; selected cloud preference was preserved.",
+            config.CloudsEnabled
+        );
+        config.AtlasDetail = AtlasDetailModeInfo.CanonicalValue(
+            AtlasDetailModeInfo.Parse(automatedOriginalAtlasDetail)
+        );
+        saveConfig();
+        SyncPerformanceControls();
+        automatedSmokeTestAtlasDetailRenderPhase = 3;
+        automatedSmokeTestAtlasDetailRendered = true;
+        lastAtlasWorldRenderMilliseconds = 0;
+        capi.Logger.Notification(
+            "[ModernAtlas] Automated Atlas detail profile check passed; restored the original Atlas detail preference to {0}.",
+            AtlasDetailModeInfo.Label(CurrentAtlasDetailMode)
+        );
     }
 
     private bool ValidateScreenshotPreviewRange()
@@ -3723,6 +3899,12 @@ public sealed partial class ModernAtlasDialog
         config.ShowPlayerCompass = automatedOriginalShowPlayerCompass;
         config.HandheldInstrumentMode = automatedOriginalHandheldInstrumentMode;
         config.PerformanceLightingEnabled = automatedOriginalPerformanceLightingEnabled;
+        config.PerformanceMode = AtlasPerformanceModeInfo.CanonicalValue(
+            AtlasPerformanceModeInfo.Parse(automatedOriginalPerformanceMode)
+        );
+        config.AtlasDetail = AtlasDetailModeInfo.CanonicalValue(
+            AtlasDetailModeInfo.Parse(automatedOriginalAtlasDetail)
+        );
         if (accessChanged)
         {
             ClampPitchToAccessLevel(immediate: true);

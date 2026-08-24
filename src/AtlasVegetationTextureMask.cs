@@ -53,14 +53,14 @@ internal sealed class AtlasVegetationTextureMask : IDisposable
         emptyMaskTexture = new LoadedTexture(capi);
     }
 
-    public bool Advance()
+    public bool Advance(double workBudgetMilliseconds = WorkBudgetMilliseconds)
     {
         if (disposed || Ready || Failed) return Ready;
 
         long started = Stopwatch.GetTimestamp();
         try
         {
-            while (WithinBudget(started) && !Ready && !Failed)
+            while (WithinBudget(started, workBudgetMilliseconds) && !Ready && !Failed)
             {
                 switch (stage)
                 {
@@ -355,12 +355,15 @@ internal sealed class AtlasVegetationTextureMask : IDisposable
         }
     }
 
-    private static bool WithinBudget(long started)
+    private static bool WithinBudget(
+        long started,
+        double workBudgetMilliseconds
+    )
     {
         double elapsedMilliseconds = (Stopwatch.GetTimestamp() - started)
             * 1000.0
             / Stopwatch.Frequency;
-        return elapsedMilliseconds < WorkBudgetMilliseconds;
+        return elapsedMilliseconds < Math.Max(0.1, workBudgetMilliseconds);
     }
 
     private readonly record struct TextureUsage(

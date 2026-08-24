@@ -54,6 +54,15 @@ public sealed class ModernAtlasSystem : ModSystem
     private bool automatedSmokeAllCyclesPassed = true;
     private bool automatedSmokeCycleFinishing;
     private bool automatedSmokeOriginalCheatMode;
+    private bool automatedPresetCommandTestCaptured;
+    private string automatedPresetOriginalPerformanceMode =
+        AtlasPerformanceModeInfo.OnDemandValue;
+    private string automatedPresetOriginalAtlasDetail =
+        AtlasDetailModeInfo.FullValue;
+    private bool automatedPresetOriginalAnimationsEnabled;
+    private bool automatedPresetOriginalPerformanceLightingEnabled;
+    private bool automatedPresetOriginalHideVegetation;
+    private bool automatedPresetOriginalCloudsEnabled;
     private Harmony? smokeGodModeHarmony;
     private bool smokeGodModeEnabled;
     private long smokeGodModeEntityId;
@@ -89,6 +98,7 @@ public sealed class ModernAtlasSystem : ModSystem
             .RegisterMessageType<ModernAtlasServerPolicy>()
             .RegisterMessageType<AtlasScrollAnimationMessage>()
             .RegisterMessageType<AtlasCheatModeMessage>()
+            .RegisterMessageType<AtlasPresetMessage>()
             .SetMessageHandler<AtlasScrollAnimationMessage>(
                 OnServerScrollAnimation
             );
@@ -98,6 +108,18 @@ public sealed class ModernAtlasSystem : ModSystem
             .Create("ma")
             .WithDescription("ModernAtlas server controls")
             .RequiresPrivilege(Privilege.chat)
+            .BeginSubCommand("low")
+                .WithDescription("Apply the ModernAtlas Low client profile")
+                .RequiresPlayer()
+                .RequiresPrivilege(Privilege.chat)
+                .HandleWith(OnServerLowPresetCommand)
+            .EndSubCommand()
+            .BeginSubCommand("high")
+                .WithDescription("Apply the ModernAtlas High client profile")
+                .RequiresPlayer()
+                .RequiresPrivilege(Privilege.chat)
+                .HandleWith(OnServerHighPresetCommand)
+            .EndSubCommand()
             .BeginSubCommand("cheat")
                 .WithDescription("ModernAtlas Cheat Mode controls")
                 .RequiresPrivilege(Privilege.chat)
@@ -125,7 +147,52 @@ public sealed class ModernAtlasSystem : ModSystem
     {
         clientApi = api;
         config = api.LoadModConfig<ModernAtlasConfig>(ConfigFileName) ?? new ModernAtlasConfig();
+        bool performanceModeNormalized = config.NormalizePerformanceMode();
+        bool atlasDetailNormalized = config.NormalizeAtlasDetail();
         SaveConfig();
+        api.Logger.Notification(
+            "[ModernAtlas] Atlas performance mode: {0}; closed-atlas work: disabled; opening preparation: {1}.",
+            AtlasPerformanceModeInfo.Label(config.GetPerformanceMode()),
+            AtlasPerformanceModeInfo.PreparesAtlasDuringOpening(
+                config.GetPerformanceMode()
+            ) ? "enhanced" : "on-demand"
+        );
+        if (performanceModeNormalized)
+        {
+            api.Logger.Notification(
+                "[ModernAtlas] Normalized the ModernAtlas PerformanceMode configuration value to '{0}'.",
+                config.PerformanceMode
+            );
+        }
+        api.Logger.Notification(
+            "[ModernAtlas] Atlas detail: {0}; texture reduction={1}; selected atlas clouds are {2}.",
+            AtlasDetailModeInfo.Label(config.GetAtlasDetail()),
+            AtlasDetailModeInfo.EffectiveTextureDetailReduction(config.GetAtlasDetail()),
+            config.CloudsEnabled ? "enabled" : "disabled"
+        );
+        if (atlasDetailNormalized)
+        {
+            api.Logger.Notification(
+                "[ModernAtlas] Normalized the ModernAtlas AtlasDetail configuration value to '{0}'.",
+                config.AtlasDetail
+            );
+        }
+        api.ChatCommands
+            .Create("ma")
+            .WithDescription(
+                "Apply a ModernAtlas client profile without opening the atlas."
+            )
+            .BeginSubCommand("low")
+                .WithDescription("Apply the ModernAtlas Low client profile")
+                .HandleWith(_ => ApplyClientPresetCommand(AtlasPresetKind.Low))
+            .EndSubCommand()
+            .BeginSubCommand("high")
+                .WithDescription("Apply the ModernAtlas High client profile")
+                .HandleWith(_ => ApplyClientPresetCommand(AtlasPresetKind.High))
+            .EndSubCommand();
+        api.Logger.Notification(
+            "[ModernAtlas] Registered client presets: .ma low and .ma high."
+        );
         serverPolicy.ResetToSafeDefaults();
 
         clientPolicyChannel = api.Network
@@ -133,11 +200,13 @@ public sealed class ModernAtlasSystem : ModSystem
             .RegisterMessageType<ModernAtlasServerPolicy>()
             .RegisterMessageType<AtlasScrollAnimationMessage>()
             .RegisterMessageType<AtlasCheatModeMessage>()
+            .RegisterMessageType<AtlasPresetMessage>()
             .SetMessageHandler<ModernAtlasServerPolicy>(OnServerPolicyReceived)
             .SetMessageHandler<AtlasScrollAnimationMessage>(
                 OnRemoteScrollAnimation
             )
-            .SetMessageHandler<AtlasCheatModeMessage>(OnCheatModeMessage);
+            .SetMessageHandler<AtlasCheatModeMessage>(OnCheatModeMessage)
+            .SetMessageHandler<AtlasPresetMessage>(OnAtlasPresetMessage);
         api.Event.LeaveWorld += OnLeaveWorld;
         api.Event.LevelFinalize += OnLevelFinalize;
         handActionSuppressionListenerId = api.Event.RegisterGameTickListener(
@@ -184,7 +253,12 @@ public sealed class ModernAtlasSystem : ModSystem
             GetAtlasScreenshotFilterShader,
             GetAtlasOpacityShader,
             GetAtlasScrollShader,
-            soundController
+            soundController,
+            reason =>
+            {
+                ordinaryWorldScreenshotRenderer?.LogTelemetry(reason);
+                openingTransition?.LogSnapshotTelemetry(reason);
+            }
         );
         openingTransition = new AtlasOpeningTransitionDialog(
             api,
@@ -192,23 +266,28 @@ public sealed class ModernAtlasSystem : ModSystem
             dialog.PrepareOpeningTransitionFrame,
             GetAtlasScrollShader,
             PublishScrollAnimationPhase,
-            soundController
-        );
-        ordinaryWorldScreenshotRenderer = new AtlasOrdinaryWorldScreenshotRenderer(
-            dialog.CaptureAutomatedOrdinaryWorldScreenshot,
-            openingTransition.ShouldRefreshOrdinaryWorldSnapshot,
-            openingTransition.TryRefreshOrdinaryWorldSnapshot
+            soundController,
+            () => config?.GetPerformanceMode() ?? AtlasPerformanceMode.OnDemand
         );
         api.Event.RegisterRenderer(
             openingTransition,
             EnumRenderStage.Opaque,
             "modernatlas-opening-scroll"
         );
-        api.Event.RegisterRenderer(
-            ordinaryWorldScreenshotRenderer,
-            EnumRenderStage.AfterBlit,
-            "modernatlas-ordinary-world-smoke-screenshot"
-        );
+        // Ordinary gameplay must not own an atlas AfterBlit callback. This
+        // renderer exists only for explicit automated lifecycle screenshots.
+        if (AutomatedSmokeTestEnabled)
+        {
+            ordinaryWorldScreenshotRenderer = new AtlasOrdinaryWorldScreenshotRenderer(
+                dialog.CaptureAutomatedOrdinaryWorldScreenshot,
+                message => clientApi?.Logger.Notification(message)
+            );
+            api.Event.RegisterRenderer(
+                ordinaryWorldScreenshotRenderer,
+                EnumRenderStage.AfterBlit,
+                "modernatlas-ordinary-world-smoke-screenshot"
+            );
+        }
 
         api.Input.RegisterHotKey(
             "modernatlas-open",
@@ -419,10 +498,8 @@ public sealed class ModernAtlasSystem : ModSystem
     {
         if (dialog?.IsOpened() != true) return false;
 
-        // Freeze the last complete ordinary-world snapshot before closing the
-        // atlas GUI.  The first AfterBlit callback after TryClose can observe
-        // a transient handoff frame; that frame must never replace the
-        // closing backdrop with a dark/partially restored scene.
+        // Keep the opening transition snapshot fixed through the closing
+        // animation so its backdrop cannot change during the atlas handoff.
         openingTransition?.LockOrdinaryWorldSnapshotForClosing();
         if (!dialog.TryClose())
         {
@@ -465,8 +542,7 @@ public sealed class ModernAtlasSystem : ModSystem
         if (dialog?.IsOpened() != true) return false;
 
         bool closed = dialog.TryClose();
-        // CancelWithoutOpening also unlocks the ordinary-world snapshot, so the
-        // backdrop resumes refreshing after the emergency close.
+        // CancelWithoutOpening also releases the transition snapshot lock.
         openingTransition?.CancelWithoutOpening();
         if (!closed)
         {
@@ -554,6 +630,7 @@ public sealed class ModernAtlasSystem : ModSystem
 
     public override void Dispose()
     {
+        RestoreAutomatedPresetCommandPreferences();
         DisableAutomatedSmokeGodMode();
         if (clientApi != null)
         {
@@ -584,6 +661,7 @@ public sealed class ModernAtlasSystem : ModSystem
                 EnumRenderStage.AfterBlit
             );
         }
+        ordinaryWorldScreenshotRenderer?.LogTelemetry("dispose");
         openingTransition?.CancelWithoutOpening();
         openingTransition?.Dispose();
         openingTransition = null;
@@ -670,6 +748,96 @@ public sealed class ModernAtlasSystem : ModSystem
                 : creativeStillGrantsAccess
                     ? "ModernAtlas Cheat Mode is off. Creative mode still provides Creative/Cheat controls."
                     : "ModernAtlas Cheat Mode is off."
+        );
+    }
+
+    private TextCommandResult OnServerLowPresetCommand(
+        TextCommandCallingArgs args
+    ) => SendServerPresetToCaller(args, AtlasPresetKind.Low);
+
+    private TextCommandResult OnServerHighPresetCommand(
+        TextCommandCallingArgs args
+    ) => SendServerPresetToCaller(args, AtlasPresetKind.High);
+
+    private TextCommandResult SendServerPresetToCaller(
+        TextCommandCallingArgs args,
+        AtlasPresetKind preset
+    )
+    {
+        if (args.Caller.Player is not IServerPlayer player)
+        {
+            return TextCommandResult.Error("ModernAtlas requires a player caller.");
+        }
+
+        if (serverPolicyChannel == null)
+        {
+            return TextCommandResult.Error(
+                "ModernAtlas could not reach the client policy channel."
+            );
+        }
+
+        serverPolicyChannel.SendPacket(
+            new AtlasPresetMessage { Preset = AtlasPresetProfile.Value(preset) },
+            player
+        );
+        return TextCommandResult.Success(AtlasPresetProfile.ServerRequestMessage(preset));
+    }
+
+    private TextCommandResult ApplyClientPresetCommand(AtlasPresetKind preset)
+    {
+        if (clientApi == null || config == null)
+        {
+            return TextCommandResult.Error(
+                "ModernAtlas client configuration is not available."
+            );
+        }
+
+        ApplyClientPreset(preset, "client command", showConfirmation: false);
+        return TextCommandResult.Success(AtlasPresetProfile.AppliedMessage(preset));
+    }
+
+    private void OnAtlasPresetMessage(AtlasPresetMessage message)
+    {
+        if (clientApi == null || config == null)
+        {
+            return;
+        }
+
+        if (!AtlasPresetProfile.TryParse(message.Preset, out AtlasPresetKind preset))
+        {
+            clientApi.Logger.Warning(
+                "[ModernAtlas] Ignored an unknown client preset message value '{0}'.",
+                message.Preset
+            );
+            return;
+        }
+
+        ApplyClientPreset(preset, "server request", showConfirmation: true);
+    }
+
+    private void ApplyClientPreset(
+        AtlasPresetKind preset,
+        string source,
+        bool showConfirmation
+    )
+    {
+        if (clientApi == null || config == null)
+        {
+            return;
+        }
+
+        bool changed = AtlasPresetProfile.Apply(config, preset);
+        SaveConfig();
+        string message = AtlasPresetProfile.AppliedMessage(preset);
+        if (showConfirmation)
+        {
+            clientApi.ShowChatMessage(message);
+        }
+        clientApi.Logger.Notification(
+            "[ModernAtlas] {0} Source={1}; changed={2}.",
+            message,
+            source,
+            changed
         );
     }
 
@@ -790,6 +958,9 @@ public sealed class ModernAtlasSystem : ModSystem
     {
         bool completeAutomatedWorldExit = automatedWorldExitRequested;
         automatedWorldExitRequested = false;
+        ordinaryWorldScreenshotRenderer?.LogTelemetry("world leave");
+        openingTransition?.LogSnapshotTelemetry("world leave");
+        RestoreAutomatedPresetCommandPreferences();
         DisableAutomatedSmokeGodMode();
         clientApi?.Logger.Notification(
             "[ModernAtlas] World leave received; releasing atlas state without activating engine shaders."
@@ -879,7 +1050,7 @@ public sealed class ModernAtlasSystem : ModSystem
         if (AutomatedSmokeTestEnabled)
         {
             EnableAutomatedSmokeGodMode();
-            ScheduleAutomatedCheatCommandTest(worldIdentifier, sessionGeneration);
+            ScheduleAutomatedPresetCommandTest(worldIdentifier, sessionGeneration);
         }
     }
 
@@ -1071,6 +1242,309 @@ public sealed class ModernAtlasSystem : ModSystem
         clientApi?.Logger.Notification(
             "[ModernAtlas] AUTOMATED SMOKE GOD MODE RESTORED: the temporary local-player damage guard is disabled."
         );
+    }
+
+    private void ScheduleAutomatedPresetCommandTest(
+        string worldIdentifier,
+        int sessionGeneration
+    )
+    {
+        if (clientApi == null || config == null)
+        {
+            clientApi?.Logger.Error(
+                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: client config was unavailable before the preset command check."
+            );
+            DisableAutomatedSmokeGodMode();
+            return;
+        }
+
+        CaptureAutomatedPresetCommandPreferences();
+        clientApi.Event.RegisterCallback(
+            _ => ExecuteAutomatedPresetCommandStep(
+                worldIdentifier,
+                sessionGeneration,
+                0
+            ),
+            500
+        );
+    }
+
+    private void CaptureAutomatedPresetCommandPreferences()
+    {
+        if (automatedPresetCommandTestCaptured || config == null) return;
+
+        automatedPresetOriginalPerformanceMode = config.PerformanceMode;
+        automatedPresetOriginalAtlasDetail = config.AtlasDetail;
+        automatedPresetOriginalAnimationsEnabled = config.AnimationsEnabled;
+        automatedPresetOriginalPerformanceLightingEnabled =
+            config.PerformanceLightingEnabled;
+        automatedPresetOriginalHideVegetation = config.HideVegetation;
+        automatedPresetOriginalCloudsEnabled = config.CloudsEnabled;
+        automatedPresetCommandTestCaptured = true;
+    }
+
+    private void ExecuteAutomatedPresetCommandStep(
+        string worldIdentifier,
+        int sessionGeneration,
+        int step
+    )
+    {
+        if (!IsCurrentAutomatedWorld(worldIdentifier, sessionGeneration)
+            || clientApi == null)
+        {
+            return;
+        }
+
+        switch (step)
+        {
+            case 0:
+                // TriggerChatMessage is the public client-command path. The
+                // API reserves the dot prefix for client commands, while the
+                // slash path below is sent to the server command registry.
+                clientApi.TriggerChatMessage(".ma low");
+                ScheduleAutomatedPresetCommandStep(
+                    worldIdentifier,
+                    sessionGeneration,
+                    1
+                );
+                return;
+            case 1:
+                if (!ValidateAutomatedPresetCommandStep(
+                    AtlasPresetKind.Low,
+                    ".ma low"
+                ))
+                {
+                    FailAutomatedPresetCommandTest(
+                        worldIdentifier,
+                        sessionGeneration,
+                        ".ma low"
+                    );
+                    return;
+                }
+
+                clientApi.TriggerChatMessage(".ma high");
+                ScheduleAutomatedPresetCommandStep(
+                    worldIdentifier,
+                    sessionGeneration,
+                    2
+                );
+                return;
+            case 2:
+                if (!ValidateAutomatedPresetCommandStep(
+                    AtlasPresetKind.High,
+                    ".ma high"
+                ))
+                {
+                    FailAutomatedPresetCommandTest(
+                        worldIdentifier,
+                        sessionGeneration,
+                        ".ma high"
+                    );
+                    return;
+                }
+
+                clientApi.SendChatMessage("/ma low", "");
+                ScheduleAutomatedPresetCommandStep(
+                    worldIdentifier,
+                    sessionGeneration,
+                    3
+                );
+                return;
+            case 3:
+                if (!ValidateAutomatedPresetCommandStep(
+                    AtlasPresetKind.Low,
+                    "/ma low (network)"
+                ))
+                {
+                    FailAutomatedPresetCommandTest(
+                        worldIdentifier,
+                        sessionGeneration,
+                        "/ma low (network)"
+                    );
+                    return;
+                }
+
+                clientApi.SendChatMessage("/ma high", "");
+                ScheduleAutomatedPresetCommandStep(
+                    worldIdentifier,
+                    sessionGeneration,
+                    4
+                );
+                return;
+            case 4:
+                if (!ValidateAutomatedPresetCommandStep(
+                    AtlasPresetKind.High,
+                    "/ma high (network)"
+                ))
+                {
+                    FailAutomatedPresetCommandTest(
+                        worldIdentifier,
+                        sessionGeneration,
+                        "/ma high (network)"
+                    );
+                    return;
+                }
+
+                long queuedClosedAtlasCaptures =
+                    ordinaryWorldScreenshotRenderer?.QueuedCaptureCount ?? 0;
+                long completedClosedAtlasCaptures =
+                    ordinaryWorldScreenshotRenderer?.CompletedCaptureCount ?? 0;
+                long transitionClosedAtlasCaptures =
+                    openingTransition?.OrdinaryWorldSnapshotAttemptCount ?? 0;
+                if (queuedClosedAtlasCaptures != 0
+                    || completedClosedAtlasCaptures != 0
+                    || transitionClosedAtlasCaptures != 0)
+                {
+                    bool idleRestored = RestoreAutomatedPresetCommandPreferences();
+                    clientApi.Logger.Error(
+                        "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: High profile performed work while the atlas was closed; queuedScreenshots={0}; completedScreenshots={1}; transitionCaptures={2}; restored={3}.",
+                        queuedClosedAtlasCaptures,
+                        completedClosedAtlasCaptures,
+                        transitionClosedAtlasCaptures,
+                        idleRestored
+                    );
+                    DisableAutomatedSmokeGodMode();
+                    return;
+                }
+                clientApi.Logger.Notification(
+                    "[ModernAtlas] AUTOMATED CLOSED-ATLAS PERFORMANCE CHECK PASSED: High remained idle before G; queuedScreenshots=0; completedScreenshots=0; transitionCaptures=0."
+                );
+
+                bool restored = RestoreAutomatedPresetCommandPreferences();
+                if (!restored)
+                {
+                    clientApi.Logger.Error(
+                        "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: preset command values passed, but the original client preferences could not be restored. Atlas opening was skipped."
+                    );
+                    DisableAutomatedSmokeGodMode();
+                    return;
+                }
+
+                clientApi.Logger.Notification(
+                    "[ModernAtlas] AUTOMATED PRESET COMMAND CHECK PASSED: .ma low/high and /ma low/high applied all five values, preserved CloudsEnabled, and restored the original profile."
+                );
+                ScheduleAutomatedCheatCommandTest(
+                    worldIdentifier,
+                    sessionGeneration
+                );
+                return;
+            default:
+                return;
+        }
+    }
+
+    private void ScheduleAutomatedPresetCommandStep(
+        string worldIdentifier,
+        int sessionGeneration,
+        int step
+    )
+    {
+        clientApi?.Event.RegisterCallback(
+            _ => ExecuteAutomatedPresetCommandStep(
+                worldIdentifier,
+                sessionGeneration,
+                step
+            ),
+            500
+        );
+    }
+
+    private bool ValidateAutomatedPresetCommandStep(
+        AtlasPresetKind expected,
+        string command
+    )
+    {
+        if (config == null || !automatedPresetCommandTestCaptured)
+        {
+            return false;
+        }
+
+        bool passed = string.Equals(
+                config.PerformanceMode,
+                expected == AtlasPresetKind.Low
+                    ? AtlasPerformanceModeInfo.OnDemandValue
+                    : AtlasPerformanceModeInfo.HighThroughputValue,
+                StringComparison.Ordinal
+            )
+            && string.Equals(
+                config.AtlasDetail,
+                expected == AtlasPresetKind.Low
+                    ? AtlasDetailModeInfo.ReducedValue
+                    : AtlasDetailModeInfo.FullValue,
+                StringComparison.Ordinal
+            )
+            && config.AnimationsEnabled == (expected == AtlasPresetKind.High)
+            && config.PerformanceLightingEnabled == (expected == AtlasPresetKind.High)
+            && config.HideVegetation == (expected == AtlasPresetKind.Low)
+            && config.CloudsEnabled == automatedPresetOriginalCloudsEnabled;
+
+        clientApi?.Logger.Notification(
+            "[ModernAtlas] Automated preset command step {0}: passed={1}; performance={2}; detail={3}; animations={4}; lighting={5}; vegetationHidden={6}; clouds={7}.",
+            command,
+            passed,
+            config.PerformanceMode,
+            config.AtlasDetail,
+            config.AnimationsEnabled,
+            config.PerformanceLightingEnabled,
+            config.HideVegetation,
+            config.CloudsEnabled
+        );
+        return passed;
+    }
+
+    private void FailAutomatedPresetCommandTest(
+        string worldIdentifier,
+        int sessionGeneration,
+        string command
+    )
+    {
+        bool restored = RestoreAutomatedPresetCommandPreferences();
+        clientApi?.Logger.Error(
+            "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: preset command '{0}' did not apply the expected client/network values; restored={1}. Atlas opening and the remaining command checks were skipped.",
+            command,
+            restored
+        );
+        DisableAutomatedSmokeGodMode();
+    }
+
+    private bool RestoreAutomatedPresetCommandPreferences()
+    {
+        if (!automatedPresetCommandTestCaptured)
+        {
+            return true;
+        }
+
+        if (config == null)
+        {
+            return false;
+        }
+
+        config.PerformanceMode = automatedPresetOriginalPerformanceMode;
+        config.AtlasDetail = automatedPresetOriginalAtlasDetail;
+        config.AnimationsEnabled = automatedPresetOriginalAnimationsEnabled;
+        config.PerformanceLightingEnabled =
+            automatedPresetOriginalPerformanceLightingEnabled;
+        config.HideVegetation = automatedPresetOriginalHideVegetation;
+        config.CloudsEnabled = automatedPresetOriginalCloudsEnabled;
+        SaveConfig();
+
+        bool restored = string.Equals(
+                config.PerformanceMode,
+                automatedPresetOriginalPerformanceMode,
+                StringComparison.Ordinal
+            )
+            && string.Equals(
+                config.AtlasDetail,
+                automatedPresetOriginalAtlasDetail,
+                StringComparison.Ordinal
+            )
+            && config.AnimationsEnabled == automatedPresetOriginalAnimationsEnabled
+            && config.PerformanceLightingEnabled
+                == automatedPresetOriginalPerformanceLightingEnabled
+            && config.HideVegetation == automatedPresetOriginalHideVegetation
+            && config.CloudsEnabled == automatedPresetOriginalCloudsEnabled;
+        automatedPresetCommandTestCaptured = false;
+        return restored;
     }
 
     private void ScheduleAutomatedCheatCommandTest(

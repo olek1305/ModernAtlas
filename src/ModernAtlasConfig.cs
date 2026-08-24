@@ -32,6 +32,17 @@ public sealed class ModernAtlasConfig
     public bool ScrollRealtimeWeatherEnabled { get; set; } = true;
     public bool SkipOpeningAnimation { get; set; }
     public bool CloudsEnabled { get; set; }
+    /// <summary>
+    /// Canonical values are "on-demand" and "high-throughput". Keep this as
+    /// a string so config files remain stable if enum ordering changes.
+    /// </summary>
+    public string PerformanceMode { get; set; } = AtlasPerformanceModeInfo.OnDemandValue;
+    /// <summary>
+    /// Canonical values are "reduced" and "full". This affects only the
+    /// ModernAtlas framebuffer and defaults to Full to preserve the current
+    /// atlas appearance.
+    /// </summary>
+    public string AtlasDetail { get; set; } = AtlasDetailModeInfo.FullValue;
     public bool PerformanceLightingEnabled { get; set; } = true;
     public bool HideVegetation { get; set; }
     public bool LiveLightingEnabled { get; set; } = true;
@@ -164,5 +175,45 @@ public sealed class ModernAtlasConfig
     {
         get => cheatModeByWorld;
         set => cheatModeByWorld = value ?? new Dictionary<string, bool>();
+    }
+
+    internal AtlasPerformanceMode GetPerformanceMode() =>
+        AtlasPerformanceModeInfo.Parse(PerformanceMode);
+
+    /// <summary>
+    /// Normalizes missing, old or malformed values before the config is saved.
+    /// Returns true when the serialized value changed.
+    /// </summary>
+    internal bool NormalizePerformanceMode()
+    {
+        string canonical = AtlasPerformanceModeInfo.CanonicalValue(
+            GetPerformanceMode()
+        );
+        if (string.Equals(PerformanceMode, canonical, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        PerformanceMode = canonical;
+        return true;
+    }
+
+    internal AtlasDetailMode GetAtlasDetail() =>
+        AtlasDetailModeInfo.Parse(AtlasDetail);
+
+    /// <summary>
+    /// Normalizes missing or malformed Atlas detail values before saving.
+    /// Returns true when the serialized value changed.
+    /// </summary>
+    internal bool NormalizeAtlasDetail()
+    {
+        string canonical = AtlasDetailModeInfo.CanonicalValue(GetAtlasDetail());
+        if (string.Equals(AtlasDetail, canonical, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        AtlasDetail = canonical;
+        return true;
     }
 }

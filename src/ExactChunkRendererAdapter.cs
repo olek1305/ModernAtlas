@@ -222,6 +222,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
     private bool loggedCaveFilterReady;
     private bool loggedUndergroundSafetyFailure;
     private bool loggedOreTextureBindingFailure;
+    private bool loggedVegetationFallback;
     private bool loggedPreparationClearFailure;
     private bool loggedNormalWorldShaderRestore;
     private bool loggedTerrainCoverage;
@@ -257,6 +258,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
     public float LastRenderedVegetationPixelsPerBlock { get; private set; }
     public bool LastRenderedVegetationHidden { get; private set; }
     public bool LastRenderedPerformanceLightingEnabled { get; private set; } = true;
+    public bool LastRenderedCloudOverlayRequested { get; private set; }
     public bool RenderingFailed => disabled;
 
     public bool AtlasStateIsClear =>
@@ -822,13 +824,34 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
         float pausedCloudAnimationDeltaTime,
         Vec3f? frozenCloudOffset,
         ModernAtlasServerPolicy entityPolicy,
-        bool blitToDefault
+        bool blitToDefault,
+        double oreWorkBudgetMilliseconds = 4,
+        double vegetationWorkBudgetMilliseconds = 4
     )
     {
         if (disabled) return false;
-        if (concealSurvivalOres && !oreTextureReplacement.Advance()) return false;
-        bool vegetationMaskReady = vegetationTextureMask.Advance();
-        if (hideVegetation && !vegetationMaskReady) return false;
+        LastRenderedCloudOverlayRequested = cloudsEnabled;
+        if (concealSurvivalOres
+            && !oreTextureReplacement.Advance(oreWorkBudgetMilliseconds))
+        {
+            return false;
+        }
+        // The mask is only needed when the caller requests vegetation hiding.
+        // Keep the binding flag false for the normal-vegetation path: it must
+        // not bind an optional mask merely because no preparation was needed.
+        bool vegetationMaskReady = hideVegetation
+            && vegetationTextureMask.Advance(vegetationWorkBudgetMilliseconds);
+        if (hideVegetation && !vegetationMaskReady)
+        {
+            if (!loggedVegetationFallback)
+            {
+                loggedVegetationFallback = true;
+                capi.Logger.Warning(
+                    "[ModernAtlas] Optional vegetation hiding is not ready; rendering normal vegetation until its atlas mask becomes available."
+                );
+            }
+            hideVegetation = false;
+        }
 
         IRenderAPI render = capi.Render;
         AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
@@ -1500,14 +1523,16 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
         }
     }
 
-    public bool AdvanceSurvivalOreConcealment() =>
-        !disabled && oreTextureReplacement.Advance();
+    public bool AdvanceSurvivalOreConcealment(
+        double workBudgetMilliseconds = 4
+    ) => !disabled && oreTextureReplacement.Advance(workBudgetMilliseconds);
 
     public bool ValidateSurvivalOreConcealment(out string diagnostic) =>
         oreTextureReplacement.Validate(out diagnostic);
 
-    public bool AdvanceVegetationMask() =>
-        !disabled && vegetationTextureMask.Advance();
+    public bool AdvanceVegetationMask(
+        double workBudgetMilliseconds = 4
+    ) => !disabled && vegetationTextureMask.Advance(workBudgetMilliseconds);
 
     public bool ValidateVegetationMask(out string diagnostic) =>
         vegetationTextureMask.Validate(out diagnostic);
