@@ -27,6 +27,9 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
     private const string MinimumSupportedVersion = "1.22.3";
     private const string VisibilityPatchId = "modernatlas.exactchunkvisibility";
     private const string AtlasFilterMarker = "// MODERNATLAS_SURFACE_AND_BOUNDARY_FILTER";
+    private const string AtlasVertexFilterMarker = "// MODERNATLAS_DECORATION_DEPTH_FILTER";
+    private const double AtlasDecorationDepthBiasNdc = 0.000001d;
+    private const int AtlasDecorationDepthBiasMaximum = 4;
     private const int CaveFilterTextureUnit = 12;
     private const int MapLayerTextureUnit = 13;
     private const int OreMappingTextureUnit = 14;
@@ -288,11 +291,17 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
     {
         public IShaderProgram Shader { get; }
         public string OriginalFragmentCode { get; }
+        public string OriginalVertexCode { get; }
 
-        public AtlasFilterShaderState(IShaderProgram shader, string originalFragmentCode)
+        public AtlasFilterShaderState(
+            IShaderProgram shader,
+            string originalFragmentCode,
+            string originalVertexCode
+        )
         {
             Shader = shader;
             OriginalFragmentCode = originalFragmentCode;
+            OriginalVertexCode = originalVertexCode;
         }
     }
 

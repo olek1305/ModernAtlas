@@ -24,6 +24,7 @@ public sealed partial class ModernAtlasDialog
             ?? AtlasDetailModeInfo.Validate()
             ?? AtlasPresetProfile.Validate()
             ?? ExactChunkRendererAdapter.ValidateAtlasBrightnessPolicy()
+            ?? ExactChunkRendererAdapter.ValidateAtlasDecorationDepthBiasPolicy()
             ?? AtlasOrdinaryWorldScreenshotRenderer.ValidatePerformancePolicy();
         if (performancePolicyFailure != null)
         {

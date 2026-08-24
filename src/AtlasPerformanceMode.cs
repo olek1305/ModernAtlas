@@ -51,8 +51,8 @@ internal static class AtlasPerformanceModeInfo
 
     public static string Description(AtlasPerformanceMode mode) =>
         mode == AtlasPerformanceMode.HighThroughput
-            ? "Larger atlas-only preparation budgets after opening starts; no work while closed."
-            : "Smaller atlas-only preparation budgets; no work while closed.";
+            ? "Larger atlas-only preparation budgets after opening starts; one opening-time ordinary-world snapshot; no work while closed."
+            : "Smaller atlas-only preparation budgets; one opening-time ordinary-world snapshot; no work while closed.";
 
     /// <summary>
     /// This explicit invariant prevents a performance profile from turning
@@ -70,12 +70,20 @@ internal static class AtlasPerformanceModeInfo
 
     public static bool UsesCapturedTransitionBackground(
         AtlasPerformanceMode mode
-    ) => mode == AtlasPerformanceMode.HighThroughput;
+    )
+    {
+        _ = mode;
+        // The snapshot is captured exactly when the player requests opening
+        // the atlas, then remains locked through opening and closing. The
+        // profile only changes atlas preparation budgets; neither profile may
+        // fall back to a blank transition solely because it is on-demand.
+        return true;
+    }
 
     /// <summary>
-    /// Resolves both the configured profile and texture readiness. On-demand
-    /// must return false even when a previous High snapshot is still resident,
-    /// so a profile change can never expose stale ordinary-world pixels.
+    /// Resolves both the configured profile and texture readiness. A snapshot
+    /// is usable only after the opening-time capture has produced a complete
+    /// texture; both profiles use that same locked image through closing.
     /// </summary>
     public static bool CanUseOrdinaryWorldSnapshot(
         AtlasPerformanceMode mode,
@@ -119,19 +127,17 @@ internal static class AtlasPerformanceModeInfo
         {
             return "only High throughput may prepare atlas resources during opening";
         }
-        if (UsesCapturedTransitionBackground(AtlasPerformanceMode.OnDemand)
+        if (!UsesCapturedTransitionBackground(AtlasPerformanceMode.OnDemand)
             || !UsesCapturedTransitionBackground(AtlasPerformanceMode.HighThroughput))
         {
-            return "only High throughput may capture its transition background after opening starts";
+            return "both profiles must capture one transition background after opening starts";
         }
-        if (CanUseOrdinaryWorldSnapshot(AtlasPerformanceMode.OnDemand, true))
-        {
-            return "On-demand must ignore a resident ordinary-world snapshot";
-        }
-        if (!CanUseOrdinaryWorldSnapshot(AtlasPerformanceMode.HighThroughput, true)
+        if (!CanUseOrdinaryWorldSnapshot(AtlasPerformanceMode.OnDemand, true)
+            || CanUseOrdinaryWorldSnapshot(AtlasPerformanceMode.OnDemand, false)
+            || !CanUseOrdinaryWorldSnapshot(AtlasPerformanceMode.HighThroughput, true)
             || CanUseOrdinaryWorldSnapshot(AtlasPerformanceMode.HighThroughput, false))
         {
-            return "High throughput snapshot use must follow texture readiness";
+            return "both profiles must use the transition snapshot only when its texture is ready";
         }
 
         AtlasPerformanceBudget low = Budget(AtlasPerformanceMode.OnDemand);

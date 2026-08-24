@@ -1397,7 +1397,7 @@ public sealed class ModernAtlasSystem : ModSystem
                 {
                     bool idleRestored = RestoreAutomatedPresetCommandPreferences();
                     clientApi.Logger.Error(
-                        "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: High profile performed work while the atlas was closed; queuedScreenshots={0}; completedScreenshots={1}; transitionCaptures={2}; restored={3}.",
+                        "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: the selected atlas profile performed work while the atlas was closed; queuedScreenshots={0}; completedScreenshots={1}; transitionCaptures={2}; restored={3}.",
                         queuedClosedAtlasCaptures,
                         completedClosedAtlasCaptures,
                         transitionClosedAtlasCaptures,
@@ -1407,7 +1407,7 @@ public sealed class ModernAtlasSystem : ModSystem
                     return;
                 }
                 clientApi.Logger.Notification(
-                    "[ModernAtlas] AUTOMATED CLOSED-ATLAS PERFORMANCE CHECK PASSED: High remained idle before G; queuedScreenshots=0; completedScreenshots=0; transitionCaptures=0."
+                    "[ModernAtlas] AUTOMATED CLOSED-ATLAS PERFORMANCE CHECK PASSED: the selected atlas profile remained idle before G; queuedScreenshots=0; completedScreenshots=0; transitionCaptures=0."
                 );
 
                 bool restored = RestoreAutomatedPresetCommandPreferences();

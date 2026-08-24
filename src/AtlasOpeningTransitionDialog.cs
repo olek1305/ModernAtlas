@@ -629,9 +629,10 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         if (!closing && !normalWorldBackgroundCaptured)
         {
             normalWorldBackgroundCaptured = captureNormalWorldBackground();
-            // High captures one transition background only after the player
-            // starts opening the atlas. No profile performs this readback while
-            // the atlas is closed.
+            // Both profiles capture one transition background only after the
+            // player starts opening the atlas. No profile performs this
+            // readback while the atlas is closed; preparation budgets remain
+            // the only performance-mode difference.
             if (normalWorldBackgroundCaptured
                 && UsesCapturedTransitionBackground())
             {
@@ -1679,9 +1680,9 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             render.GLDisableDepthTest();
             render.GlDisableCullFace();
             // This is the transition's complete opaque base. It is a frozen,
-            // blurred ordinary-world photo only when the active profile allows
-            // it and a valid texture is available; otherwise it is the neutral
-            // atlas fallback. It is drawn before the physical scroll and never
+            // blurred ordinary-world photo when the opening-time capture
+            // produced a valid texture; otherwise it is the neutral atlas
+            // fallback. It is drawn before the physical scroll and never
             // blends with the ordinary world framebuffer, so no terrain, OIT,
             // cloud or stale depth fragment can remain visible around the scroll.
             render.GlToggleBlend(false, EnumBlendMode.Standard);
@@ -2222,13 +2223,15 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         if (requiresSnapshot && !snapshotReady)
         {
             capi.Logger.Error(
-                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: High throughput screenshot validation requires a blurred ordinary-world snapshot."
+                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: {0} screenshot validation requires a blurred ordinary-world snapshot captured after opening started.",
+                AtlasPerformanceModeInfo.Label(CurrentPerformanceMode)
             );
         }
         else if (screenshotRequired && !UsesCapturedTransitionBackground())
         {
             capi.Logger.Notification(
-                "[ModernAtlas] On-demand screenshot validation expects the opaque neutral transition fallback; an ordinary-world snapshot is intentionally not required."
+                "[ModernAtlas] {0} screenshot validation is using the opaque neutral transition fallback because its opening-time snapshot policy is disabled.",
+                AtlasPerformanceModeInfo.Label(CurrentPerformanceMode)
             );
         }
         return resourcesReady
