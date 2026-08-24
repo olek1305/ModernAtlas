@@ -23,6 +23,7 @@ public sealed partial class ModernAtlasDialog
         string? performancePolicyFailure = AtlasPerformanceModeInfo.Validate()
             ?? AtlasDetailModeInfo.Validate()
             ?? AtlasPresetProfile.Validate()
+            ?? ExactChunkRendererAdapter.ValidateAtlasBrightnessPolicy()
             ?? AtlasOrdinaryWorldScreenshotRenderer.ValidatePerformancePolicy();
         if (performancePolicyFailure != null)
         {

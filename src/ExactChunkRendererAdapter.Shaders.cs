@@ -618,7 +618,6 @@ internal sealed partial class ExactChunkRendererAdapter
                 + "bool modernAtlasIsWindVegetation();\n"
                 + "float modernAtlasAlphaTestThreshold(float alphaValue, float baseThreshold);\n"
                 + "vec4 modernAtlasApplyFogAndDirectionalWithNormal(vec4 targetColor, float fogAmount, vec3 surfaceNormal, float normalShadeIntensity, float minimumNormalShade, vec3 fragmentWorldPosition);\n"
-                + "void modernAtlasClampMinimumBrightness(inout vec4 targetColor);\n"
                 + "vec4 modernAtlasVegetationDebugColor(vec4 color, float alphaValue, float threshold, float lodFadeValue);\n\n"
         );
         const string lod0FadeTerm = "- lod0Fade";
@@ -760,9 +759,14 @@ internal sealed partial class ExactChunkRendererAdapter
                 }
             }
         }
-        string atlasBrightnessCode = supportsBoundaryColor
-            ? "    modernAtlasClampMinimumBrightness(outColor);\n"
-            : "";
+        // Keep the atlas brightness floor in the scalar lighting term above
+        // for shaders that use the native min(b, nb) path.
+        // Scaling a dark final RGB value by luminance amplifies tiny channel
+        // remnants in mod textures into saturated red/green/blue pixels. The
+        // scalar floor avoids an overly dark lighting multiplier without
+        // changing sampled texture hue, so no post-color brightness lift is
+        // emitted here.
+        const string atlasBrightnessCode = "";
         string mapLayerCode = supportsBoundaryColor
             ? """
     modernAtlasApplyMapLayer(outColor, modernAtlasAbsoluteWorldPosition);
@@ -1012,33 +1016,6 @@ uniform sampler2D atlasOreMapTex;
 uniform sampler2D atlasStoneTex;
 uniform int atlasHideVegetation;
 uniform sampler2D atlasVegetationMaskTex;
-
-void modernAtlasClampMinimumBrightness(inout vec4 targetColor)
-{
-    if (atlasFilteringEnabled <= 0) return;
-
-    float minimumBrightness = clamp(
-        atlasMinimumTerrainBrightness,
-        0.0,
-        1.0
-    );
-    float luminance = dot(
-        max(targetColor.rgb, vec3(0.0)),
-        vec3(0.2126, 0.7152, 0.0722)
-    );
-    if (luminance >= minimumBrightness) return;
-    if (luminance > 0.001)
-    {
-        targetColor.rgb *= minimumBrightness / luminance;
-    }
-    else
-    {
-        // A block with no native vertex light is still real loaded geometry.
-        // Use the same subdued atlas floor as the cave occlusion material so
-        // it cannot become a camera-dependent black strip.
-        targetColor.rgb = vec3(minimumBrightness);
-    }
-}
 
 void modernAtlasApplyMapLayer(
     inout vec4 targetColor,
@@ -1414,6 +1391,50 @@ void main()
 """ + atlasBrightnessCode + mapLayerCode + """
 }
 """;
+    }
+
+    internal static string? ValidateAtlasBrightnessPolicy()
+    {
+        // This source fragment is deliberately small: it exercises the same
+        // injection function used by the live chunk shaders and proves that
+        // opaque atlas lighting keeps its scalar floor while emitting no
+        // channel-scaling post-pass.
+        const string source = """
+#version 330 core
+uniform sampler2D terrainTex;
+in vec2 uv;
+in vec4 rgba;
+in vec4 worldPos;
+in float nb;
+layout(location = 0) out vec4 outColor;
+void main()
+{
+    vec4 texColor = texture(terrainTex, uv);
+    float b = getBrightnessFromShadowMap();
+    outColor = applyFogAndShadowFromBrightness(texColor, 0.0, min(b, nb), worldPos.xyz);
+}
+""";
+
+        string? injected = InjectAtlasFilter(source, true, false);
+        if (injected == null)
+        {
+            return "Atlas brightness policy fixture was not injectable.";
+        }
+        if (injected.Contains(
+                "modernAtlasClampMinimumBrightness",
+                StringComparison.Ordinal
+            ))
+        {
+            return "Atlas brightness injection still contains the channel-scaling post-pass.";
+        }
+        if (!injected.Contains(
+                "max(min(b, nb), atlasFilteringEnabled > 0 ? atlasMinimumTerrainBrightness",
+                StringComparison.Ordinal
+            ))
+        {
+            return "Atlas brightness injection lost the scalar lighting floor.";
+        }
+        return null;
     }
 
 }

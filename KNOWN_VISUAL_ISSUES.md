@@ -27,6 +27,20 @@ boundary resolve, but no longer requires an unrelated opaque screen pixel
 behind a leaf. The owner confirmed the corrected crowns from the same location
 at opposite camera yaws.
 
+## Resolved: saturated colors on dark modded blocks
+
+The atlas applied its minimum-brightness floor by scaling the final material
+color to a target luminance. On very dark block faces, a tiny surviving color
+channel could therefore be multiplied into a saturated red, green or blue
+pixel. This was most visible on loaded structures from Primitive Survival and
+Butchering, even though their ordinary-world textures were correct.
+
+Resolved in the current `0.6.8` test package by removing the final-color
+luminance lift while preserving the opaque shader's scalar lighting floor.
+The source texture hue is no longer changed by the visibility safeguard. The
+owner confirmed the corrected modded structures in the live atlas from the
+same test world.
+
 ## 1. Central dark band in the tiled capture
 
 The stitched tiled screenshot shows a hard vertical dark band near the middle
