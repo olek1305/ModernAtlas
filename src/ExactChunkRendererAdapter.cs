@@ -1311,7 +1311,11 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
                 atlasCompleteMinimumChunkX * (float)GlobalConstants.ChunkSize,
                 atlasCompleteMinimumChunkZ * (float)GlobalConstants.ChunkSize,
                 (atlasCompleteMaximumChunkX + 1) * (float)GlobalConstants.ChunkSize,
-                (atlasCompleteMaximumChunkZ + 1) * (float)GlobalConstants.ChunkSize
+                (atlasCompleteMaximumChunkZ + 1) * (float)GlobalConstants.ChunkSize,
+                atlasSunDirection,
+                atlasSunColor,
+                atlasSkyDaylight,
+                atlasExposure
             ))
             {
                 throw new InvalidOperationException(
@@ -1327,7 +1331,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
                     "[ModernAtlas] Rendering the atlas from the game's completed chunk meshes and materials."
                 );
                 capi.Logger.Notification(
-                    "[ModernAtlas] Disabled the normal camera sky-horizon tint only inside the atlas terrain shader."
+                    "[ModernAtlas] Atlas background: procedural celestial gradient and restrained horizon haze are resolved after exact geometry, only inside the atlas framebuffer."
                 );
                 capi.Logger.Notification(
                     "[ModernAtlas] First atlas render timing: setup {0} ms, opaque terrain {1} ms, living entities {2} ms, transparent/liquids/clouds {3} ms, total {4} ms.",
@@ -1655,6 +1659,18 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
                 true
             );
 
+            // The procedural sky is intentionally opaque and no longer has a
+            // single clear-color signature. Use the resolver's independent
+            // validity attachment for the smoke coverage proof whenever the
+            // optional MRT is available. Procedural sky pixels are opaque by
+            // design, so a color-only fallback cannot prove terrain coverage
+            // and must fail closed for this diagnostic rather than report a
+            // false green. This does not disable normal atlas rendering.
+            bool hasValidityMask = boundaryResolver.TryReadValidityMask(
+                out _,
+                out AtlasValidityMaskDiagnostics validityDiagnostics
+            );
+
             int minimumAlpha = 255;
             int belowOpaque = 0;
             int backgroundPixels = 0;
@@ -1682,11 +1698,8 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
                 else nonBackgroundPixels++;
             }
 
-            bool sensibleCoverage = nonBackgroundPixels >= 64
-                && (nonBackgroundPixels >= 512
-                    || (screenshot.Pixels.Length > 0
-                        && (double)nonBackgroundPixels / screenshot.Pixels.Length
-                            >= 0.00025d));
+            bool sensibleCoverage = hasValidityMask
+                && validityDiagnostics.HasSensibleCoverage;
             bool valid = screenshot.Pixels.Length > 0
                 && minimumAlpha == 255
                 && belowOpaque == 0
@@ -1716,7 +1729,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
                 ? screenshot.Pixels[0]
                 : 0;
             diagnostic = string.Format(
-                "size={0}x{1}, minAlpha={2}, belowOpaque={3}, backgroundPixels={4}, nonBackgroundPixels={5}, nonBackgroundRatio={6:0.####}, sensibleCoverage={7}, drawBuffersChecked={8}, drawBuffersStable={9}, drawBuffers={10}, firstPacked=0x{11:X8}",
+                "size={0}x{1}, minAlpha={2}, belowOpaque={3}, backgroundPixels={4}, nonBackgroundPixels={5}, nonBackgroundRatio={6:0.####}, validityMask={7}, validPixels={8}, validRatio={9:0.####}, sensibleCoverage={10}, drawBuffersChecked={11}, drawBuffersStable={12}, drawBuffers={13}, firstPacked=0x{14:X8}",
                 resolved.Width,
                 resolved.Height,
                 minimumAlpha,
@@ -1726,6 +1739,9 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
                 screenshot.Pixels.Length > 0
                     ? (double)nonBackgroundPixels / screenshot.Pixels.Length
                     : 0d,
+                hasValidityMask,
+                validityDiagnostics.ValidPixelCount,
+                validityDiagnostics.ValidRatio,
                 sensibleCoverage,
                 BoundaryDrawBufferStateCheckPerformed,
                 BoundaryDrawBufferStateCheckPassed,

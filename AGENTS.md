@@ -580,7 +580,7 @@ empty while the automated exact-terrain check still reported success.
 - Losing health while the atlas is open draws a dark red edge vignette plus a
   short caption over the atlas framebuffer: `TAKING DAMAGE — CLOSE THE ATLAS`
   while the pulse runs, `LOW HEALTH` below 25 percent health. The pulse lasts
-  about 1.2 seconds, is driven by real render time so it animates while
+  about 3.2 seconds, is driven by real render time so it animates while
   singleplayer is paused, and a further hit restarts and slightly strengthens it.
 - It is a GUI overlay only. No shader, no world rendering and no engine state is
   involved, it adds no composer element, and it never captures mouse or keyboard

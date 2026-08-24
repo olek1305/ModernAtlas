@@ -31,7 +31,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private const int PresentationChangeDebounceMilliseconds = 125;
     private const int BottomPanelAnimationMilliseconds = 170;
     private const int AutomatedUiScreenshotPhaseCount = 9;
-    private const float DamageWarningDurationSeconds = 1.2f;
+    private const float DamageWarningDurationSeconds = 3.2f;
     private const float LowHealthWarningFraction = 0.25f;
     private const string AllOresFilterValue = "__all__";
     private const string SmokeScreenshotEnvironmentVariable =

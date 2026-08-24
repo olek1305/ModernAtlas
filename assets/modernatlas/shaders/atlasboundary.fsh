@@ -8,8 +8,7 @@ layout(location = 1) out vec4 outValidity;
 uniform sampler2D sourceColorTex;
 uniform sampler2D sourceDepthTex;
 uniform sampler2D surfaceHeightTex;
-uniform mat4 projectionMatrix;
-uniform mat4 modelViewMatrix;
+uniform mat4 inverseProjectionView;
 uniform vec3 worldOffset;
 uniform vec2 disclosureCenterXZ;
 uniform float disclosureRadius;
@@ -20,6 +19,10 @@ uniform int surfaceCoverageEnabled;
 uniform vec2 surfaceOriginXZ;
 uniform float surfaceSampleSize;
 uniform vec4 backgroundColor;
+uniform vec3 atlasSkyLightDirection;
+uniform vec3 atlasSkyLightColor;
+uniform float atlasSkyDaylight;
+uniform float atlasSkyExposure;
 
 vec3 unproject(mat4 inverseMvp, vec4 position)
 {
@@ -45,6 +48,90 @@ bool hasSurfaceCoverage(vec2 absoluteXZ)
     return texelFetch(surfaceHeightTex, samplePosition, 0).b >= 0.5;
 }
 
+float atlasSkyHash21(vec2 position)
+{
+    vec3 value = fract(vec3(position.xyx) * 0.1031);
+    value += dot(value, value.yzx + 33.33);
+    return fract((value.x + value.y) * value.z);
+}
+
+float atlasSkyNoise(vec2 position)
+{
+    vec2 cell = floor(position);
+    vec2 blend = smoothstep(vec2(0.0), vec2(1.0), fract(position));
+    float lower = mix(
+        atlasSkyHash21(cell),
+        atlasSkyHash21(cell + vec2(1.0, 0.0)),
+        blend.x
+    );
+    float upper = mix(
+        atlasSkyHash21(cell + vec2(0.0, 1.0)),
+        atlasSkyHash21(cell + vec2(1.0, 1.0)),
+        blend.x
+    );
+    return mix(lower, upper, blend.y);
+}
+
+// This is deliberately a world-anchored atmospheric dome, not terrain. The
+// exact atlas is orthographic, so a literal camera ray would be constant for
+// every pixel. The continuous world position keeps both the gradient and the
+// veil stable when a high-resolution screenshot is rendered as multiple tiles.
+vec3 atlasSkyBackground(
+    vec3 relativeWorldPosition,
+    vec3 cameraDirection,
+    vec3 cameraUp,
+    float skyScale
+)
+{
+    float verticalCoordinate = dot(relativeWorldPosition, cameraUp)
+        / max(skyScale, 1.0);
+    vec3 skyDirection = normalize(
+        cameraDirection + cameraUp * clamp(verticalCoordinate, -1.0, 1.0) * 0.46
+    );
+    float elevation = clamp(dot(skyDirection, vec3(0.0, 1.0, 0.0)), -1.0, 1.0);
+    float horizonGradient = smoothstep(-0.22, 0.42, elevation);
+
+    float daylight = smoothstep(0.10, 0.78, clamp(atlasSkyDaylight, 0.0, 1.5));
+    vec3 nightZenith = vec3(0.012, 0.024, 0.070);
+    vec3 nightHorizon = vec3(0.085, 0.135, 0.235);
+    vec3 dayZenith = vec3(0.075, 0.205, 0.475);
+    vec3 dayHorizon = vec3(0.52, 0.705, 0.90);
+    vec3 zenith = mix(nightZenith, dayZenith, daylight);
+    vec3 horizon = mix(nightHorizon, dayHorizon, daylight);
+    vec3 color = mix(horizon, zenith, horizonGradient);
+
+    // Keep dawn, sunset and moonlight recognizable without letting a native
+    // world tint or player-local effect leak into the atlas framebuffer.
+    vec3 celestialTint = clamp(atlasSkyLightColor, vec3(0.55), vec3(1.30));
+    color *= mix(vec3(0.82, 0.88, 1.0), celestialTint, 0.28);
+    color *= mix(0.72, 1.0, clamp(atlasSkyExposure / 1.15, 0.0, 1.0));
+
+    vec3 lightDirection = normalize(atlasSkyLightDirection);
+    float lightAlignment = max(dot(skyDirection, lightDirection), 0.0);
+    float glow = pow(lightAlignment, 18.0) * 0.085
+        + pow(lightAlignment, 72.0) * 0.115;
+    color += celestialTint * glow * mix(0.45, 1.0, daylight);
+
+    // A low-amplitude procedural veil prevents the empty space from reading
+    // as a flat UI fill. It is a color-only atmospheric detail and never
+    // represents a block, chunk or unexplored terrain.
+    float veil = atlasSkyNoise(
+        relativeWorldPosition.xz / max(skyScale, 1.0) * 3.2
+            + lightDirection.xz * 0.7
+    );
+    float veilAmount = smoothstep(0.60, 0.84, veil) * 0.045
+        * mix(0.35, 1.0, daylight);
+    color = mix(color, color + vec3(0.10, 0.13, 0.16), veilAmount);
+
+    // The horizon band is intentionally subdued so distant buildings remain
+    // legible while the atlas edge blends into the sky instead of exposing a
+    // dark void.
+    float horizonBand = 1.0 - smoothstep(0.03, 0.43, abs(elevation));
+    vec3 hazeColor = mix(vec3(0.25, 0.34, 0.43), horizon, 0.55);
+    color = mix(color, hazeColor, horizonBand * 0.16);
+    return clamp(color, vec3(0.0), vec3(1.0));
+}
+
 void main()
 {
     ivec2 pixel = ivec2(gl_FragCoord.xy);
@@ -58,16 +145,39 @@ void main()
     }
 
     float depth = texelFetch(sourceDepthTex, pixel, 0).r;
+    vec3 nearPoint = unproject(inverseProjectionView, vec4(ndc, -1.0, 1.0));
+    vec3 farPoint = unproject(inverseProjectionView, vec4(ndc, 1.0, 1.0));
+    vec3 upPoint = unproject(
+        inverseProjectionView,
+        vec4(ndc + vec2(0.0, 1.0), -1.0, 1.0)
+    );
+    vec3 cameraDirection = normalize(farPoint - nearPoint);
+    vec3 upDelta = upPoint - nearPoint;
+    vec3 cameraUp = length(upDelta) > 0.0001
+        ? normalize(upDelta)
+        : vec3(0.0, 1.0, 0.0);
+    vec3 worldPosition = nearPoint + worldOffset;
+    vec3 atlasAnchor = vec3(
+        disclosureCenterXZ.x,
+        worldOffset.y,
+        disclosureCenterXZ.y
+    );
+    vec3 relativeWorldPosition = worldPosition - atlasAnchor;
+    vec3 skyColor = atlasSkyBackground(
+        relativeWorldPosition,
+        cameraDirection,
+        cameraUp,
+        disclosureRadius
+    );
     if (depth >= 0.999999)
     {
-        outColor = vec4(backgroundColor.rgb, 1.0);
+        outColor = vec4(skyColor, 1.0);
         outValidity = vec4(0.0);
         return;
     }
 
-    mat4 inverseMvp = inverse(projectionMatrix * modelViewMatrix);
     vec3 relativePosition = unproject(
-        inverseMvp,
+        inverseProjectionView,
         vec4(ndc, depth * 2.0 - 1.0, 1.0)
     );
     vec3 absolutePosition = relativePosition + worldOffset;
@@ -78,7 +188,7 @@ void main()
                 completeBoundaryMaxXZ
             ))))
     {
-        outColor = vec4(backgroundColor.rgb, 1.0);
+        outColor = vec4(skyColor, 1.0);
         outValidity = vec4(0.0);
         return;
     }
@@ -87,11 +197,21 @@ void main()
             >= disclosureRadius * disclosureRadius
         || !hasSurfaceCoverage(absolutePosition.xz))
     {
-        outColor = vec4(backgroundColor.rgb, 1.0);
+        outColor = vec4(skyColor, 1.0);
         outValidity = vec4(0.0);
         return;
     }
 
-    outColor = vec4(texelFetch(sourceColorTex, pixel, 0).rgb, 1.0);
+    // Fade only the last part of the already-authorized disclosure radius.
+    // This soft atmospheric edge never changes validity, adds geometry or
+    // makes any unloaded terrain visible.
+    float edgeDistance = length(disclosureDelta);
+    float edgeHaze = smoothstep(
+        disclosureRadius * 0.62,
+        disclosureRadius * 0.98,
+        edgeDistance
+    ) * 0.12;
+    vec3 terrainColor = texelFetch(sourceColorTex, pixel, 0).rgb;
+    outColor = vec4(mix(terrainColor, skyColor, edgeHaze), 1.0);
     outValidity = vec4(1.0, 0.0, 0.0, 1.0);
 }

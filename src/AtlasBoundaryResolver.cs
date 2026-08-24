@@ -140,7 +140,11 @@ internal sealed class AtlasBoundaryResolver : IDisposable
         float completeMinimumX,
         float completeMinimumZ,
         float completeMaximumX,
-        float completeMaximumZ
+        float completeMaximumZ,
+        Vec3f atlasSkyLightDirection,
+        Vec3f atlasSkyLightColor,
+        float atlasSkyDaylight,
+        float atlasSkyExposure
     )
     {
         LastResolveSucceeded = false;
@@ -205,10 +209,21 @@ internal sealed class AtlasBoundaryResolver : IDisposable
             shader.Use();
             shader.BindTexture2D("sourceColorTex", source.ColorTextureIds[0], 0);
             shader.BindTexture2D("sourceDepthTex", source.DepthTextureId, 1);
-            shader.UniformMatrix("projectionMatrix", projection);
+            float[] modelView = Array.ConvertAll(
+                view,
+                value => (float)value
+            );
+            // Resolve camera matrices once on the CPU. The boundary shader
+            // runs for every atlas pixel, so doing a mat4 inverse in the
+            // fragment path would turn the opaque background into a sizeable
+            // avoidable per-pixel cost.
+            float[] projectionView = Mat4f.Create();
+            Mat4f.Multiply(projectionView, projection, modelView);
+            float[] inverseProjectionView = Mat4f.Create();
+            Mat4f.Invert(inverseProjectionView, projectionView);
             shader.UniformMatrix(
-                "modelViewMatrix",
-                Array.ConvertAll(view, value => (float)value)
+                "inverseProjectionView",
+                inverseProjectionView
             );
             shader.Uniform(
                 "worldOffset",
@@ -245,6 +260,22 @@ internal sealed class AtlasBoundaryResolver : IDisposable
                 BackgroundColor[1],
                 BackgroundColor[2],
                 BackgroundColor[3]
+            );
+            // The final resolve owns the atlas-only background. These values
+            // come from the already selected live/fixed-hour atlas lighting
+            // state and are never installed in the ordinary world shader
+            // path. The shader uses them only for pixels rejected by the
+            // disclosure/depth predicates (and a restrained edge haze for
+            // pixels that passed those predicates).
+            shader.Uniform("atlasSkyLightDirection", atlasSkyLightDirection);
+            shader.Uniform("atlasSkyLightColor", atlasSkyLightColor);
+            shader.Uniform(
+                "atlasSkyDaylight",
+                Math.Clamp(atlasSkyDaylight, 0f, 1.5f)
+            );
+            shader.Uniform(
+                "atlasSkyExposure",
+                Math.Clamp(atlasSkyExposure, 0.04f, 1.5f)
             );
 
             bool hasSurfaceCoverage = surfaceHeightTexture?.Ready == true
