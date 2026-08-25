@@ -156,7 +156,7 @@ public sealed partial class ModernAtlasDialog
             config.PerformanceLightingEnabled,
             config.HideVegetation && !preparingVegetationMask,
             config.AnimationsEnabled,
-            Math.Clamp(config.AtlasExposurePercent, 50, 150) / 100f,
+            AtlasExposureCalibration.ToMultiplier(config.AtlasExposurePercent),
             Math.Clamp(config.CaveMaskBrightnessPercent, 50, 150) / 100f,
             windWaveCounter,
             windWaveCounterHighFrequency,

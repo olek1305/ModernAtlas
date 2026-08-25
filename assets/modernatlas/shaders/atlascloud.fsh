@@ -160,6 +160,10 @@ void main()
             0.30,
             0.82,
             clamp(atlasCloudExposure / 1.5, 0.0, 1.0)
+        ) * mix(
+            1.0,
+            1.22,
+            clamp((atlasCloudExposure - 1.5) / 0.5, 0.0, 1.0)
         );
         vec3 boundedCloudColor = sourceTint
             * mix(vec3(1.0), atlasCloudLightColor, 0.32)

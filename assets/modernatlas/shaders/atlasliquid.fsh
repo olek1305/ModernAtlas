@@ -177,8 +177,14 @@ void main(void)
     if (!isLava)
     {
         float topLight = mix(0.55, 1.0, clamp(atlasSunDirection.y, 0.0, 1.0));
-        float exposure = mix(0.14, 1.0, clamp(atlasExposure, 0.0, 1.0))
-            * mix(1.0, 1.5, clamp((atlasExposure - 1.0) * 2.0, 0.0, 1.0));
+        // The user-facing 100% setting maps to the old 150% neutral output.
+        // Preserve the former curve through the new neutral point: the new
+        // 100% value supplies the old 1.5 multiplier exactly. Only extend the
+        // high shoulder to 2.0 so the new 150% value is genuinely brighter.
+        float lowExposure = clamp(atlasExposure, 0.0, 1.0);
+        float highExposure = clamp(atlasExposure - 1.0, 0.0, 1.0);
+        float exposure = mix(0.14, 1.0, lowExposure)
+            * mix(1.0, 2.0, highExposure);
         vec3 celestialTint = mix(vec3(1.0), atlasSunColor, 0.28);
         color.rgb *= celestialTint * topLight * exposure;
     }

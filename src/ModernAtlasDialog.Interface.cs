@@ -2196,7 +2196,7 @@ public sealed partial class ModernAtlasDialog
                 AtlasUiStyle.DrawSeparator
             )
             .AddStaticText(
-                "Exposure",
+                $"Exposure (neutral {DefaultAtlasExposurePercent}%)",
                 AtlasUiStyle.DetailFont(13),
                 ElementBounds.Fixed(28, 108, 170, 26)
             )

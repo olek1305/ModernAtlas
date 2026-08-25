@@ -31,7 +31,9 @@ internal sealed partial class ExactChunkRendererAdapter
         float visualExposureMultiplier
     )
     {
-        float visualExposure = Math.Clamp(visualExposureMultiplier, 0.5f, 1.5f);
+        float visualExposure = AtlasExposureCalibration.ClampMultiplier(
+            visualExposureMultiplier
+        );
         if (!performanceLightingEnabled)
         {
             Vec3f neutralLight = new(1f, 1f, 1f);
@@ -42,7 +44,7 @@ internal sealed partial class ExactChunkRendererAdapter
             );
             ambientSceneBrightnessProperty.SetValue(
                 ambient,
-                Math.Clamp(visualExposure, 0.5f, 1.5f)
+                AtlasExposureCalibration.ClampMultiplier(visualExposure)
             );
             shaderUniforms.LightPosition3D = overheadLight;
             shaderUniforms.SunPosition3D = overheadLight;
@@ -51,7 +53,9 @@ internal sealed partial class ExactChunkRendererAdapter
             atlasSunDirection = overheadLight;
             atlasSunColor = neutralLight;
             atlasSkyDaylight = 1f;
-            atlasSceneBrightness = Math.Clamp(visualExposure, 0.5f, 1.5f);
+            atlasSceneBrightness = AtlasExposureCalibration.ClampMultiplier(
+                visualExposure
+            );
             atlasExposure = visualExposure;
             return;
         }
@@ -101,7 +105,11 @@ internal sealed partial class ExactChunkRendererAdapter
             );
             ambientSceneBrightnessProperty.SetValue(
                 ambient,
-                Math.Clamp(readableSceneBrightness * visualExposure, 0.02f, 1.5f)
+                Math.Clamp(
+                    readableSceneBrightness * visualExposure,
+                    0.02f,
+                    AtlasExposureCalibration.MaximumMultiplier
+                )
             );
             shaderUniforms.LightPosition3D = lightDirection;
             // Chunk programs read lightPosition for directional face shading
@@ -118,7 +126,7 @@ internal sealed partial class ExactChunkRendererAdapter
             atlasSceneBrightness = Math.Clamp(
                 readableSceneBrightness * visualExposure,
                 0.02f,
-                1.5f
+                AtlasExposureCalibration.MaximumMultiplier
             );
             float readableCelestialBrightness = Math.Max(
                 daylight * Math.Max(0.2f, liveSceneBrightness),
@@ -129,7 +137,7 @@ internal sealed partial class ExactChunkRendererAdapter
             atlasExposure = Math.Clamp(
                 readableCelestialBrightness * visualExposure,
                 0.04f,
-                1.5f
+                AtlasExposureCalibration.MaximumMultiplier
             );
             return;
         }
@@ -155,7 +163,11 @@ internal sealed partial class ExactChunkRendererAdapter
             );
             ambientSceneBrightnessProperty.SetValue(
                 ambient,
-                Math.Clamp(readableSceneBrightness * visualExposure, 0.02f, 1.5f)
+                Math.Clamp(
+                    readableSceneBrightness * visualExposure,
+                    0.02f,
+                    AtlasExposureCalibration.MaximumMultiplier
+                )
             );
             shaderUniforms.LightPosition3D = liveLightPosition;
             Vec3f fallbackSunDirection = NormalizeDirection(
@@ -175,7 +187,7 @@ internal sealed partial class ExactChunkRendererAdapter
             atlasSceneBrightness = Math.Clamp(
                 readableSceneBrightness * visualExposure,
                 0.02f,
-                1.5f
+                AtlasExposureCalibration.MaximumMultiplier
             );
             float readableCelestialBrightness = Math.Max(
                 fallbackDaylight * Math.Max(0.2f, liveSceneBrightness),
@@ -186,7 +198,7 @@ internal sealed partial class ExactChunkRendererAdapter
             atlasExposure = Math.Clamp(
                 readableCelestialBrightness * visualExposure,
                 0.04f,
-                1.5f
+                AtlasExposureCalibration.MaximumMultiplier
             );
             return;
         }
@@ -270,12 +282,12 @@ internal sealed partial class ExactChunkRendererAdapter
         atlasSceneBrightness = Math.Clamp(
             fixedBrightness * visualExposure,
             0.02f,
-            1.5f
+            AtlasExposureCalibration.MaximumMultiplier
         );
         atlasExposure = Math.Clamp(
             fixedBrightness * visualExposure,
             0.04f,
-            1.5f
+            AtlasExposureCalibration.MaximumMultiplier
         );
         ambientColorProperty.SetValue(
             ambient,
@@ -396,9 +408,9 @@ internal sealed partial class ExactChunkRendererAdapter
     }
 
     private static Vec3f ScaleColor(Vec3f color, float scale) => new(
-        Math.Clamp(color.X * scale, 0f, 1.5f),
-        Math.Clamp(color.Y * scale, 0f, 1.5f),
-        Math.Clamp(color.Z * scale, 0f, 1.5f)
+        Math.Clamp(color.X * scale, 0f, AtlasExposureCalibration.MaximumMultiplier),
+        Math.Clamp(color.Y * scale, 0f, AtlasExposureCalibration.MaximumMultiplier),
+        Math.Clamp(color.Z * scale, 0f, AtlasExposureCalibration.MaximumMultiplier)
     );
 
 }

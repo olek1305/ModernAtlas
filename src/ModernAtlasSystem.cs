@@ -195,6 +195,7 @@ public sealed class ModernAtlasSystem : ModSystem
         config = api.LoadModConfig<ModernAtlasConfig>(ConfigFileName) ?? new ModernAtlasConfig();
         bool performanceModeNormalized = config.NormalizePerformanceMode();
         bool atlasDetailNormalized = config.NormalizeAtlasDetail();
+        bool atlasExposureNormalized = config.NormalizeAtlasExposure();
         SaveConfig();
         api.Logger.Notification(
             "[ModernAtlas] Atlas performance mode: {0}; closed-atlas work: disabled; opening preparation: {1}.",
@@ -221,6 +222,13 @@ public sealed class ModernAtlasSystem : ModSystem
             api.Logger.Notification(
                 "[ModernAtlas] Normalized the ModernAtlas AtlasDetail configuration value to '{0}'.",
                 config.AtlasDetail
+            );
+        }
+        if (atlasExposureNormalized)
+        {
+            api.Logger.Notification(
+                "[ModernAtlas] Normalized the ModernAtlas AtlasExposurePercent configuration value to {0}%.",
+                config.AtlasExposurePercent
             );
         }
         api.ChatCommands

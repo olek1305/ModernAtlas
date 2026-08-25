@@ -57,7 +57,11 @@ public sealed class ModernAtlasConfig
     public bool SearchModeEnabled { get; set; }
     public bool CameraAngleLocked { get; set; }
     public bool CloseAtlasOnDamage { get; set; } = true;
-    public int AtlasExposurePercent { get; set; } = 150;
+    /// <summary>
+    /// User-facing atlas-only exposure control. 100% is the neutral/default
+    /// point; see <see cref="AtlasExposureCalibration"/> for its multiplier.
+    /// </summary>
+    public int AtlasExposurePercent { get; set; } = AtlasExposureCalibration.DefaultPercent;
     public int MapLayerOpacityPercent { get; set; } = 75;
     public int CaveMaskBrightnessPercent { get; set; } = 100;
 
@@ -214,6 +218,23 @@ public sealed class ModernAtlasConfig
         }
 
         AtlasDetail = canonical;
+        return true;
+    }
+
+    /// <summary>
+    /// Clamps malformed serialized exposure values without rescaling existing
+    /// preferences. The calibration is semantic: a persisted 100% must keep
+    /// meaning the new neutral point.
+    /// </summary>
+    internal bool NormalizeAtlasExposure()
+    {
+        int normalized = AtlasExposureCalibration.ClampPercent(AtlasExposurePercent);
+        if (AtlasExposurePercent == normalized)
+        {
+            return false;
+        }
+
+        AtlasExposurePercent = normalized;
         return true;
     }
 }

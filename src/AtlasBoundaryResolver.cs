@@ -275,7 +275,11 @@ internal sealed class AtlasBoundaryResolver : IDisposable
             );
             shader.Uniform(
                 "atlasSkyExposure",
-                Math.Clamp(atlasSkyExposure, 0.04f, 1.5f)
+                Math.Clamp(
+                    atlasSkyExposure,
+                    0.04f,
+                    AtlasExposureCalibration.MaximumMultiplier
+                )
             );
 
             bool hasSurfaceCoverage = surfaceHeightTexture?.Ready == true

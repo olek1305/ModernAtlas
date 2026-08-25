@@ -104,7 +104,12 @@ vec3 atlasSkyBackground(
     // world tint or player-local effect leak into the atlas framebuffer.
     vec3 celestialTint = clamp(atlasSkyLightColor, vec3(0.55), vec3(1.30));
     color *= mix(vec3(0.82, 0.88, 1.0), celestialTint, 0.28);
-    color *= mix(0.72, 1.0, clamp(atlasSkyExposure / 1.15, 0.0, 1.0));
+    color *= mix(0.72, 1.0, clamp(atlasSkyExposure / 1.15, 0.0, 1.0))
+        * mix(
+            1.0,
+            1.12,
+            clamp((atlasSkyExposure - 1.5) / 0.5, 0.0, 1.0)
+        );
 
     vec3 lightDirection = normalize(atlasSkyLightDirection);
     float lightAlignment = max(dot(skyDirection, lightDirection), 0.0);

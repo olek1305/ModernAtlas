@@ -20,10 +20,10 @@ public sealed partial class ModernAtlasDialog
     private void ConfigureVisualLabSliders()
     {
         visualLabModal.GetAtlasSlider("atlas-exposure")?.SetValues(
-            Math.Clamp(config.AtlasExposurePercent, 50, 150),
-            50,
-            150,
-            5,
+            AtlasExposureCalibration.ClampPercent(config.AtlasExposurePercent),
+            AtlasExposureCalibration.MinimumPercent,
+            AtlasExposureCalibration.MaximumPercent,
+            AtlasExposureCalibration.SliderStepPercent,
             "%"
         );
         visualLabModal.GetAtlasSlider("cave-mask-brightness")?.SetValues(
@@ -42,7 +42,7 @@ public sealed partial class ModernAtlasDialog
         // next to them so "neutral" is a number, not a guess.
         visualLabModal?.GetDynamicText("visual-lab-exposure-default")?.SetNewText(
             FormattableString.Invariant(
-                $"now {Math.Clamp(config.AtlasExposurePercent, 50, 150)}% · default {DefaultAtlasExposurePercent}%"
+                $"now {AtlasExposureCalibration.ClampPercent(config.AtlasExposurePercent)}% · neutral {DefaultAtlasExposurePercent}%"
             )
         );
         visualLabModal?.GetDynamicText("visual-lab-cave-default")?.SetNewText(
@@ -52,13 +52,13 @@ public sealed partial class ModernAtlasDialog
         );
     }
 
-    internal const int DefaultAtlasExposurePercent = 150;
+    internal const int DefaultAtlasExposurePercent = AtlasExposureCalibration.DefaultPercent;
     internal const int DefaultCaveMaskBrightnessPercent = 100;
     internal const int DefaultMapLayerOpacityPercent = 75;
 
     private bool OnAtlasExposureChanged(int value)
     {
-        config.AtlasExposurePercent = Math.Clamp(value, 50, 150);
+        config.AtlasExposurePercent = AtlasExposureCalibration.ClampPercent(value);
         saveConfig();
         return true;
     }
