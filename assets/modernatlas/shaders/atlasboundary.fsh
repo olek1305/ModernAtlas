@@ -48,6 +48,62 @@ bool hasSurfaceCoverage(vec2 absoluteXZ)
     return texelFetch(surfaceHeightTex, samplePosition, 0).b >= 0.5;
 }
 
+bool atlasHasOccupiedDepth(ivec2 position, ivec2 dimensions)
+{
+    if (any(lessThan(position, ivec2(0)))
+        || any(greaterThanEqual(position, dimensions)))
+    {
+        return false;
+    }
+    return texelFetch(sourceDepthTex, position, 0).r < 0.999999;
+}
+
+bool atlasHasEnclosedDepthGap(ivec2 pixel, ivec2 dimensions)
+{
+    // Check only opposing horizontal or vertical neighbours. A second,
+    // bounded radius catches a two-pixel gap without creating a halo.
+    bool left = atlasHasOccupiedDepth(
+        pixel + ivec2(-1, 0),
+        dimensions
+    );
+    bool right = atlasHasOccupiedDepth(
+        pixel + ivec2(1, 0),
+        dimensions
+    );
+    bool up = atlasHasOccupiedDepth(
+        pixel + ivec2(0, 1),
+        dimensions
+    );
+    bool down = atlasHasOccupiedDepth(
+        pixel + ivec2(0, -1),
+        dimensions
+    );
+    if ((left && right) || (up && down)) return true;
+
+    left = atlasHasOccupiedDepth(pixel + ivec2(-2, 0), dimensions);
+    right = atlasHasOccupiedDepth(pixel + ivec2(2, 0), dimensions);
+    up = atlasHasOccupiedDepth(pixel + ivec2(0, 2), dimensions);
+    down = atlasHasOccupiedDepth(pixel + ivec2(0, -2), dimensions);
+    return (left && right) || (up && down);
+}
+
+vec3 atlasEnclosedGapBackgroundColor(
+    vec3 baseColor,
+    ivec2 pixel,
+    ivec2 dimensions
+)
+{
+    if (!atlasHasEnclosedDepthGap(pixel, dimensions)) return baseColor;
+
+    // Color-only shadow for a narrow enclosed framebuffer gap. This never
+    // changes depth, validity, geometry or the authored material/alpha.
+    return mix(
+        baseColor,
+        vec3(0.012, 0.016, 0.022),
+        0.68
+    );
+}
+
 // This is deliberately a world-anchored atmospheric dome, not terrain. The
 // exact atlas is orthographic, so a literal camera ray would be constant for
 // every pixel. The continuous world position keeps the gradient stable when a
@@ -185,7 +241,14 @@ void main()
     );
     if (depth >= 0.999999)
     {
-        outColor = vec4(emptyBackgroundColor, 1.0);
+        outColor = vec4(
+            atlasEnclosedGapBackgroundColor(
+                emptyBackgroundColor,
+                pixel,
+                dimensions
+            ),
+            1.0
+        );
         outValidity = vec4(0.0);
         return;
     }
@@ -202,7 +265,14 @@ void main()
                 completeBoundaryMaxXZ
             ))))
     {
-        outColor = vec4(emptyBackgroundColor, 1.0);
+        outColor = vec4(
+            atlasEnclosedGapBackgroundColor(
+                emptyBackgroundColor,
+                pixel,
+                dimensions
+            ),
+            1.0
+        );
         outValidity = vec4(0.0);
         return;
     }
@@ -211,7 +281,14 @@ void main()
             >= disclosureRadius * disclosureRadius
         || !hasSurfaceCoverage(absolutePosition.xz))
     {
-        outColor = vec4(emptyBackgroundColor, 1.0);
+        outColor = vec4(
+            atlasEnclosedGapBackgroundColor(
+                emptyBackgroundColor,
+                pixel,
+                dimensions
+            ),
+            1.0
+        );
         outValidity = vec4(0.0);
         return;
     }

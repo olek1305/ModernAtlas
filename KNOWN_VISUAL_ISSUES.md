@@ -54,6 +54,21 @@ Real captures at 35 and 72 degrees from test package SHA-256
 background in the live atlas from the installed package, so owner verification
 is complete.
 
+## Open: blue vertical gaps on wind-moving leaves at the chunk frontier
+
+Some live atlas captures show thin blue vertical gaps through wind-moving leaf
+crowns, concentrated where the last loaded/completed chunk meets the opaque
+atlas background. The final boundary resolve now applies a bounded,
+color-only enclosed-gap shadow to background or rejected pixels: it checks
+opposing horizontal/vertical occupied-depth neighbours at radius one, then two,
+and mixes only those narrow gaps toward neutral charcoal. It does not change
+leaf geometry, authored alpha, depth, validity or the large blue background.
+
+The exact candidate was captured with terrain visible at yaw 0 and 180, pitch
+20, while the large blue background remained unchanged. Close-up confirmation
+at the owner's location is still pending, so this issue remains open until
+that capture confirms the visual result.
+
 ## 1. Central dark band in the tiled capture
 
 The stitched tiled screenshot shows a hard vertical dark band near the middle
