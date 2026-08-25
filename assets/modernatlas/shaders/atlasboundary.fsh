@@ -48,34 +48,10 @@ bool hasSurfaceCoverage(vec2 absoluteXZ)
     return texelFetch(surfaceHeightTex, samplePosition, 0).b >= 0.5;
 }
 
-float atlasSkyHash21(vec2 position)
-{
-    vec3 value = fract(vec3(position.xyx) * 0.1031);
-    value += dot(value, value.yzx + 33.33);
-    return fract((value.x + value.y) * value.z);
-}
-
-float atlasSkyNoise(vec2 position)
-{
-    vec2 cell = floor(position);
-    vec2 blend = smoothstep(vec2(0.0), vec2(1.0), fract(position));
-    float lower = mix(
-        atlasSkyHash21(cell),
-        atlasSkyHash21(cell + vec2(1.0, 0.0)),
-        blend.x
-    );
-    float upper = mix(
-        atlasSkyHash21(cell + vec2(0.0, 1.0)),
-        atlasSkyHash21(cell + vec2(1.0, 1.0)),
-        blend.x
-    );
-    return mix(lower, upper, blend.y);
-}
-
 // This is deliberately a world-anchored atmospheric dome, not terrain. The
 // exact atlas is orthographic, so a literal camera ray would be constant for
-// every pixel. The continuous world position keeps both the gradient and the
-// veil stable when a high-resolution screenshot is rendered as multiple tiles.
+// every pixel. The continuous world position keeps the gradient stable when a
+// high-resolution screenshot is rendered as multiple tiles.
 vec3 atlasSkyBackground(
     vec3 relativeWorldPosition,
     vec3 cameraDirection,
@@ -117,17 +93,6 @@ vec3 atlasSkyBackground(
         + pow(lightAlignment, 72.0) * 0.115;
     color += celestialTint * glow * mix(0.45, 1.0, daylight);
 
-    // A low-amplitude procedural veil prevents the empty space from reading
-    // as a flat UI fill. It is a color-only atmospheric detail and never
-    // represents a block, chunk or unexplored terrain.
-    float veil = atlasSkyNoise(
-        relativeWorldPosition.xz / max(skyScale, 1.0) * 3.2
-            + lightDirection.xz * 0.7
-    );
-    float veilAmount = smoothstep(0.60, 0.84, veil) * 0.045
-        * mix(0.35, 1.0, daylight);
-    color = mix(color, color + vec3(0.10, 0.13, 0.16), veilAmount);
-
     // The horizon band is intentionally subdued so distant buildings remain
     // legible while the atlas edge blends into the sky instead of exposing a
     // dark void.
@@ -135,6 +100,43 @@ vec3 atlasSkyBackground(
     vec3 hazeColor = mix(vec3(0.25, 0.34, 0.43), horizon, 0.55);
     color = mix(color, hazeColor, horizonBand * 0.16);
     return clamp(color, vec3(0.0), vec3(1.0));
+}
+
+// Empty atlas space darkens toward neutral charcoal when the atlas camera
+// tilts down. The lower-screen gradient starts near 35 degrees and reaches
+// charcoal everywhere at a straight-down view; terrain edge haze keeps using
+// skyColor below so valid material pixels are unchanged.
+vec3 atlasEmptyBackgroundColor(
+    vec3 skyColor,
+    vec3 relativeWorldPosition,
+    vec3 cameraDirection,
+    vec3 cameraUp,
+    float skyScale
+)
+{
+    vec3 worldUp = vec3(0.0, 1.0, 0.0);
+    float downwardAngle = asin(clamp(
+        -dot(normalize(cameraDirection), worldUp),
+        0.0,
+        1.0
+    ));
+    float pitchOnset = smoothstep(
+        radians(30.0),
+        radians(35.0),
+        downwardAngle
+    );
+    float topDownProgress = smoothstep(
+        radians(35.0),
+        radians(90.0),
+        downwardAngle
+    );
+    float verticalCoordinate = dot(relativeWorldPosition, cameraUp)
+        / max(skyScale, 1.0);
+    float lowerScreen = 1.0 - smoothstep(-0.30, 0.52, verticalCoordinate);
+    float charcoalWeight = pitchOnset
+        * mix(lowerScreen * 0.78, 1.0, topDownProgress);
+    vec3 neutralCharcoal = vec3(0.0627451, 0.0745098, 0.0941176);
+    return mix(skyColor, neutralCharcoal, clamp(charcoalWeight, 0.0, 1.0));
 }
 
 void main()
@@ -174,9 +176,16 @@ void main()
         cameraUp,
         disclosureRadius
     );
+    vec3 emptyBackgroundColor = atlasEmptyBackgroundColor(
+        skyColor,
+        relativeWorldPosition,
+        cameraDirection,
+        cameraUp,
+        disclosureRadius
+    );
     if (depth >= 0.999999)
     {
-        outColor = vec4(skyColor, 1.0);
+        outColor = vec4(emptyBackgroundColor, 1.0);
         outValidity = vec4(0.0);
         return;
     }
@@ -193,7 +202,7 @@ void main()
                 completeBoundaryMaxXZ
             ))))
     {
-        outColor = vec4(skyColor, 1.0);
+        outColor = vec4(emptyBackgroundColor, 1.0);
         outValidity = vec4(0.0);
         return;
     }
@@ -202,7 +211,7 @@ void main()
             >= disclosureRadius * disclosureRadius
         || !hasSurfaceCoverage(absolutePosition.xz))
     {
-        outColor = vec4(skyColor, 1.0);
+        outColor = vec4(emptyBackgroundColor, 1.0);
         outValidity = vec4(0.0);
         return;
     }

@@ -41,6 +41,19 @@ The source texture hue is no longer changed by the visibility safeguard. The
 owner confirmed the corrected modded structures in the live atlas from the
 same test world.
 
+## Resolved: camera-moving procedural sky veil/noise
+
+The atlas background contained a subtle world-anchored procedural sky
+veil/noise. As the camera moved, the pattern could be perceived as dirt or
+floating eye debris rather than atmosphere.
+
+Removed from the test shader while retaining the smooth celestial and horizon
+gradient plus the pitch-driven neutral-charcoal empty-background gradient.
+Real captures at 35 and 72 degrees from test package SHA-256
+`eb247444…ead8b0` show a clean background. The owner also confirmed a clean
+background in the live atlas from the installed package, so owner verification
+is complete.
+
 ## 1. Central dark band in the tiled capture
 
 The stitched tiled screenshot shows a hard vertical dark band near the middle
