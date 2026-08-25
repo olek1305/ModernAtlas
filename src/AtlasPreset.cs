@@ -81,7 +81,7 @@ internal static class AtlasPresetProfile
             : "Applied ModernAtlas High profile (high-throughput, full detail, animations on, atlas lighting on, vegetation visible).";
 
     public static string ServerRequestMessage(AtlasPresetKind preset) =>
-        $"ModernAtlas {Label(preset)} profile request sent to your client.";
+        $"Applying the ModernAtlas {Label(preset)} profile.";
 
     private static bool Apply(
         ModernAtlasConfig config,

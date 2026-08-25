@@ -32,6 +32,20 @@ public sealed class ModernAtlasSystem : ModSystem
     private const int AutomatedSmokeFixtureRetryMilliseconds = 100;
     private const int AutomatedSmokeFixtureRetryCount = 80;
     private const string SmokeGodModePatchId = "modernatlas.smoke.godmode";
+    private const string ModernAtlasCommandHelp =
+        "ModernAtlas commands:\n"
+        + "/ma or /ma help - Show this command list.\n"
+        + "/ma low - Apply the ModernAtlas Low profile.\n"
+        + "/ma high - Apply the ModernAtlas High profile.\n"
+        + "/ma cheat on - Enable ModernAtlas Cheat Mode.\n"
+        + "/ma cheat off - Disable ModernAtlas Cheat Mode.\n"
+        + "Local alternatives:\n"
+        + ".ma low - Apply the ModernAtlas Low profile locally.\n"
+        + ".ma high - Apply the ModernAtlas High profile locally.";
+    private const string ModernAtlasCheatCommandHelp =
+        "Choose a ModernAtlas Cheat Mode command:\n"
+        + "/ma cheat off - Disable ModernAtlas Cheat Mode.\n"
+        + "/ma cheat on - Enable ModernAtlas Cheat Mode.";
 
     // Normal smoke keeps world state untouched. The two explicitly named
     // disposable smoke copies are the sole exception: their authoritative
@@ -152,8 +166,9 @@ public sealed class ModernAtlasSystem : ModSystem
 
         api.ChatCommands
             .Create("ma")
-            .WithDescription("ModernAtlas server controls")
+            .WithDescription("Show ModernAtlas commands or use server controls")
             .RequiresPrivilege(Privilege.chat)
+            .HandleWith(OnServerHelpCommand)
             .BeginSubCommand("low")
                 .WithDescription("Apply the ModernAtlas Low client profile")
                 .RequiresPlayer()
@@ -169,13 +184,23 @@ public sealed class ModernAtlasSystem : ModSystem
             .BeginSubCommand("cheat")
                 .WithDescription("ModernAtlas Cheat Mode controls")
                 .RequiresPrivilege(Privilege.chat)
-                .BeginSubCommand("mode")
-                    .WithDescription("Enable or disable ModernAtlas Cheat Mode")
+                .HandleWith(OnServerCheatHelpCommand)
+                .BeginSubCommand("on")
+                    .WithDescription("Enable ModernAtlas Cheat Mode")
                     .RequiresPlayer()
                     .RequiresPrivilege(Privilege.chat)
-                    .WithArgs(api.ChatCommands.Parsers.Word("state"))
-                    .HandleWith(OnServerCheatModeCommand)
+                    .HandleWith(OnServerCheatModeOnCommand)
                 .EndSubCommand()
+                .BeginSubCommand("off")
+                    .WithDescription("Disable ModernAtlas Cheat Mode")
+                    .RequiresPlayer()
+                    .RequiresPrivilege(Privilege.chat)
+                    .HandleWith(OnServerCheatModeOffCommand)
+                .EndSubCommand()
+            .EndSubCommand()
+            .BeginSubCommand("help")
+                .WithDescription("Show all ModernAtlas commands")
+                .HandleWith(OnServerHelpCommand)
             .EndSubCommand();
 
         ModernAtlasServerPolicy policy = serverConfig.ToPolicy();
@@ -1120,7 +1145,22 @@ public sealed class ModernAtlasSystem : ModSystem
         );
     }
 
-    private TextCommandResult OnServerCheatModeCommand(TextCommandCallingArgs args)
+    private static TextCommandResult OnServerCheatHelpCommand(
+        TextCommandCallingArgs args
+    ) => TextCommandResult.Success(ModernAtlasCheatCommandHelp);
+
+    private TextCommandResult OnServerCheatModeOnCommand(
+        TextCommandCallingArgs args
+    ) => SetServerCheatMode(args, enabled: true);
+
+    private TextCommandResult OnServerCheatModeOffCommand(
+        TextCommandCallingArgs args
+    ) => SetServerCheatMode(args, enabled: false);
+
+    private TextCommandResult SetServerCheatMode(
+        TextCommandCallingArgs args,
+        bool enabled
+    )
     {
         if (serverApi == null || serverConfig == null
             || args.Caller.Player is not IServerPlayer player)
@@ -1128,13 +1168,6 @@ public sealed class ModernAtlasSystem : ModSystem
             return TextCommandResult.Error("ModernAtlas requires a player caller.");
         }
 
-        string state = (args[0] as string ?? "").Trim().ToLowerInvariant();
-        if (state is not ("on" or "off"))
-        {
-            return TextCommandResult.Error("Use /ma cheat mode on or /ma cheat mode off.");
-        }
-
-        bool enabled = state == "on";
         if (enabled && serverApi.Server.IsDedicated && !serverConfig.CheatModeAllowed)
         {
             return TextCommandResult.Error(
@@ -1157,6 +1190,10 @@ public sealed class ModernAtlasSystem : ModSystem
                     : "ModernAtlas Cheat Mode is off."
         );
     }
+
+    private static TextCommandResult OnServerHelpCommand(
+        TextCommandCallingArgs args
+    ) => TextCommandResult.Success(ModernAtlasCommandHelp);
 
     private TextCommandResult OnServerLowPresetCommand(
         TextCommandCallingArgs args
@@ -2470,7 +2507,7 @@ public sealed class ModernAtlasSystem : ModSystem
             {
                 if (!IsCurrentAutomatedWorld(worldIdentifier, sessionGeneration)) return;
 
-                clientApi!.SendChatMessage("/ma cheat mode on", "");
+                clientApi!.SendChatMessage("/ma cheat on", "");
                 clientApi.Event.RegisterCallback(
                     _ => CompleteAutomatedCheatModeOn(
                         worldIdentifier,
@@ -2491,7 +2528,7 @@ public sealed class ModernAtlasSystem : ModSystem
         if (!IsCurrentAutomatedWorld(worldIdentifier, sessionGeneration)) return;
 
         bool enabled = dialog!.CheatModeEnabledForAutomation;
-        clientApi!.SendChatMessage("/ma cheat mode off", "");
+        clientApi!.SendChatMessage("/ma cheat off", "");
         clientApi.Event.RegisterCallback(
             _ =>
             {
@@ -2501,13 +2538,13 @@ public sealed class ModernAtlasSystem : ModSystem
                 if (enabled && disabled)
                 {
                     clientApi!.Logger.Notification(
-                        "[ModernAtlas] AUTOMATED CHEAT COMMAND CHECK PASSED: /ma cheat mode on and off were executed through the server command path."
+                        "[ModernAtlas] AUTOMATED CHEAT COMMAND CHECK PASSED: /ma cheat on and off were executed through the server command path."
                     );
                 }
                 else
                 {
                     clientApi!.Logger.Error(
-                        "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: /ma cheat mode command check returned on={0}, off={1}.",
+                        "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: /ma cheat on/off command check returned on={0}, off={1}.",
                         enabled,
                         disabled
                     );
