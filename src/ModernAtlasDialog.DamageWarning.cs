@@ -70,6 +70,18 @@ public sealed partial class ModernAtlasDialog
         DamageWarningPolicyActive && config.CloseAtlasOnDamage;
 
     /// <summary>
+    /// A dead local player must leave the atlas even when the optional
+    /// CloseAtlasOnDamage preference is disabled. Invalid health is ignored;
+    /// the caller passes <see cref="float.NaN"/> when no health observation is
+    /// available yet.
+    /// </summary>
+    private static bool DamageWarningEmergencyCloseRequired(
+        bool alive,
+        float currentHealth
+    ) => !alive
+        || float.IsFinite(currentHealth) && currentHealth <= 0f;
+
+    /// <summary>
     /// Runs the deferred safety close at the start of a frame, before the atlas
     /// binds any framebuffer. Returns true when the atlas was closed and the
     /// caller must skip the rest of the frame.
@@ -88,7 +100,8 @@ public sealed partial class ModernAtlasDialog
         damageWarningBaselineHealth = float.NaN;
         damageWarningElapsedSeconds = 0;
         damageWarningPulseStrength = 0;
-        damageWarningLowHealth = false;
+        damageWarningRepeatCarryAlpha = 0;
+        damageWarningRepeatCarryWidthScale = 0;
         damageWarningAutoCloseRequested = false;
         damageWarningEmergencyClosePending = false;
     }
@@ -100,6 +113,33 @@ public sealed partial class ModernAtlasDialog
     /// </summary>
     private void AdvanceDamageWarning()
     {
+        var localPlayer = capi.World.Player?.Entity;
+        bool localPlayerAlive = localPlayer?.Alive ?? true;
+        float current = float.NaN;
+        try
+        {
+            ITreeAttribute? healthTree = localPlayer
+                ?.WatchedAttributes.GetTreeAttribute("health");
+            if (healthTree != null)
+            {
+                current = healthTree.GetFloat("currenthealth", float.NaN);
+            }
+        }
+        catch
+        {
+            if (DamageWarningEmergencyCloseRequired(localPlayerAlive, current))
+            {
+                QueueDamageWarningEmergencyClose();
+            }
+            return;
+        }
+
+        if (DamageWarningEmergencyCloseRequired(localPlayerAlive, current))
+        {
+            QueueDamageWarningEmergencyClose();
+            return;
+        }
+
         if (!DamageWarningPolicyActive)
         {
             ResetDamageWarning();
@@ -111,27 +151,7 @@ public sealed partial class ModernAtlasDialog
             damageWarningElapsedSeconds += atlasRealDeltaTime;
         }
 
-        float current = float.NaN;
-        float maximum = float.NaN;
-        try
-        {
-            ITreeAttribute? healthTree = capi.World.Player?.Entity
-                ?.WatchedAttributes.GetTreeAttribute("health");
-            if (healthTree != null)
-            {
-                current = healthTree.GetFloat("currenthealth", float.NaN);
-                maximum = healthTree.GetFloat("maxhealth", float.NaN);
-            }
-        }
-        catch
-        {
-            return;
-        }
-
-        if (float.IsNaN(current) || float.IsNaN(maximum) || maximum <= 0) return;
-
-        damageWarningLowHealth = current > 0
-            && current / maximum < LowHealthWarningFraction;
+        if (!float.IsFinite(current)) return;
 
         if (!float.IsNaN(damageWarningBaselineHealth)
             && current < damageWarningBaselineHealth - 0.01f)
@@ -148,6 +168,25 @@ public sealed partial class ModernAtlasDialog
     /// </summary>
     private void SignalDamageWarning()
     {
+        bool ongoingPulse = damageWarningPulseStrength > 0
+            && damageWarningElapsedSeconds < DamageWarningDurationSeconds;
+        if (ongoingPulse)
+        {
+            // Restart the episode timer and strengthen its next breath, but
+            // carry the visible alpha across the signal so a repeat hit cannot
+            // blink the vignette or caption down to zero.
+            damageWarningRepeatCarryAlpha = Math.Clamp(
+                DamageWarningVignetteAlpha(),
+                0f,
+                DamageWarningMaximumPulseAlpha
+            );
+            damageWarningRepeatCarryWidthScale = DamageWarningEdgeWidthScale();
+        }
+        else
+        {
+            damageWarningRepeatCarryAlpha = 0;
+            damageWarningRepeatCarryWidthScale = 0;
+        }
         damageWarningElapsedSeconds = 0;
         damageWarningPulseStrength = Math.Min(
             1f,
@@ -158,6 +197,12 @@ public sealed partial class ModernAtlasDialog
         // Never close the dialog from inside the atlas render pass: OnGuiClosed
         // verifies that no world framebuffer is left bound, and mid-pass the
         // engine still has one. The close runs at the start of the next frame.
+        QueueDamageWarningEmergencyClose();
+    }
+
+    private void QueueDamageWarningEmergencyClose()
+    {
+        if (damageWarningAutoCloseRequested) return;
         damageWarningAutoCloseRequested = true;
         damageWarningEmergencyClosePending = true;
     }
@@ -166,15 +211,255 @@ public sealed partial class ModernAtlasDialog
     /// Test hook. It feeds the warning state machine directly, so the automated
     /// smoke test never has to hurt the player or write to the save.
     /// </summary>
-    internal void TriggerDamageWarningForAutomatedTest(bool lowHealth)
+    internal void TriggerDamageWarningForAutomatedTest()
     {
         if (!DamageWarningPolicyActive) return;
-        damageWarningLowHealth = lowHealth;
         SignalDamageWarning();
+    }
+
+    /// <summary>
+    /// Test-only render-time seek used to inspect a visible warning sample
+    /// without waiting on a wall-clock callback. Production timing always
+    /// advances from real render time in <see cref="AdvanceDamageWarning"/>.
+    /// </summary>
+    internal void SetDamageWarningAnimationTimeForAutomatedTest(
+        float elapsedSeconds
+    )
+    {
+        damageWarningElapsedSeconds = float.IsFinite(elapsedSeconds)
+            ? Math.Clamp(elapsedSeconds, 0f, DamageWarningDurationSeconds)
+            : 0f;
     }
 
     internal bool DamageWarningActiveForAutomatedTest =>
         DamageWarningVignetteAlpha() > 0;
+
+    /// <summary>
+    /// Requires a meaningful inhale before the real-damage smoke capture. A
+    /// merely non-zero attack sample is intentionally not enough: the first
+    /// rendered frames are almost transparent by design.
+    /// </summary>
+    internal bool DamageWarningMeaningfulInhaleForAutomatedTest =>
+        DamageWarningVignetteAlpha() >= 0.14f
+        && DamageWarningEdgeWidthScale() >= 0.45f;
+
+    internal static bool DamageWarningMeaningfulInhaleAtForAutomatedTest(
+        float elapsedSeconds,
+        float pulseStrength
+    ) => DamageWarningVignetteAlphaAt(elapsedSeconds, pulseStrength) >= 0.14f
+        && DamageWarningEdgeWidthScaleAt(elapsedSeconds, pulseStrength) >= 0.45f;
+
+    /// <summary>
+    /// Returns the deterministic vignette curve at an arbitrary render-time
+    /// sample. The smoke test uses this instead of assuming that a signal must
+    /// already be visible on the exact frame it is raised.
+    /// </summary>
+    internal static float DamageWarningVignetteAlphaForAutomatedTest(
+        float elapsedSeconds,
+        float pulseStrength
+    ) => DamageWarningVignetteAlphaAt(
+        elapsedSeconds,
+        pulseStrength
+    );
+
+    /// <summary>
+    /// Returns the caption alpha from the same attack, breathing and release
+    /// envelope as the edge vignette.
+    /// </summary>
+    internal static float DamageWarningCaptionAlphaForAutomatedTest(
+        float elapsedSeconds,
+        float pulseStrength
+    ) => DamageWarningCaptionAlpha(
+        DamageWarningVignetteAlphaAt(
+            elapsedSeconds,
+            pulseStrength
+        )
+    );
+
+    /// <summary>
+    /// Returns the edge-width breathing curve independently of the GUI
+    /// texture. The width starts at zero, reaches only the configured small
+    /// maximum, and returns to zero with the same pulse as the colour.
+    /// </summary>
+    internal static float DamageWarningEdgeWidthScaleForAutomatedTest(
+        float elapsedSeconds,
+        float pulseStrength
+    ) => DamageWarningEdgeWidthScaleAt(elapsedSeconds, pulseStrength);
+
+    internal static bool DamageWarningEmergencyCloseRequiredForAutomatedTest(
+        bool alive,
+        float currentHealth
+    ) => DamageWarningEmergencyCloseRequired(alive, currentHealth);
+
+    /// <summary>
+    /// Samples the restarted episode while carrying the previous visible
+    /// alpha. This keeps repeat-hit continuity deterministic and independent
+    /// of a live dialog instance.
+    /// </summary>
+    internal static float DamageWarningRepeatAlphaForAutomatedTest(
+        float previousAlpha,
+        float elapsedSeconds,
+        float pulseStrength
+    ) => DamageWarningApplyRepeatCarry(
+        DamageWarningVignetteAlphaAt(
+            elapsedSeconds,
+            pulseStrength
+        ),
+        previousAlpha,
+        elapsedSeconds
+    );
+
+    /// <summary>
+    /// Deterministic self-check for the damage-warning animation. It keeps the
+    /// first frame quiet, proves the attack rises into a slow inhale, proves a
+    /// later exhale is softer than that inhale, and proves both layers release
+    /// to zero at the preserved 3.2-second endpoint.
+    /// </summary>
+    internal static bool ValidateDamageWarningAnimationForAutomatedTest(
+        out string diagnostic
+    )
+    {
+        const float strength = 0.65f;
+        float start = DamageWarningVignetteAlphaAt(0f, strength);
+        float rising = DamageWarningVignetteAlphaAt(0.24f, strength);
+        float inhale = DamageWarningVignetteAlphaAt(0.72f, strength);
+        float exhale = DamageWarningVignetteAlphaAt(
+            DamageWarningBreathPeriodSeconds * 0.75f,
+            strength
+        );
+        float breathTrough = DamageWarningVignetteAlphaAt(
+            DamageWarningBreathPeriodSeconds,
+            strength
+        );
+        float secondBreathTrough = DamageWarningVignetteAlphaAt(
+            DamageWarningBreathPeriodSeconds * 2f,
+            strength
+        );
+        float end = DamageWarningVignetteAlphaAt(
+            DamageWarningDurationSeconds,
+            strength
+        );
+        float captionStart = DamageWarningCaptionAlphaForAutomatedTest(
+            0f,
+            strength
+        );
+        float captionRising = DamageWarningCaptionAlphaForAutomatedTest(
+            0.24f,
+            strength
+        );
+        float captionInhale = DamageWarningCaptionAlphaForAutomatedTest(
+            0.72f,
+            strength
+        );
+        float captionBreathTrough = DamageWarningCaptionAlphaForAutomatedTest(
+            DamageWarningBreathPeriodSeconds,
+            strength
+        );
+        float captionSecondBreathTrough = DamageWarningCaptionAlphaForAutomatedTest(
+            DamageWarningBreathPeriodSeconds * 2f,
+            strength
+        );
+        float captionEnd = DamageWarningCaptionAlphaForAutomatedTest(
+            DamageWarningDurationSeconds,
+            strength
+        );
+        float edgeStart = DamageWarningEdgeWidthScaleAt(0f, strength);
+        float edgeRising = DamageWarningEdgeWidthScaleAt(0.24f, strength);
+        float edgeInhale = DamageWarningEdgeWidthScaleAt(0.72f, strength);
+        float edgeTrough = DamageWarningEdgeWidthScaleAt(
+            DamageWarningBreathPeriodSeconds * 0.5f,
+            strength
+        );
+        float edgeBreathTrough = DamageWarningEdgeWidthScaleAt(
+            DamageWarningBreathPeriodSeconds,
+            strength
+        );
+        float edgeSecondBreathTrough = DamageWarningEdgeWidthScaleAt(
+            DamageWarningBreathPeriodSeconds * 2f,
+            strength
+        );
+        float edgeEnd = DamageWarningEdgeWidthScaleAt(
+            DamageWarningDurationSeconds,
+            strength
+        );
+        bool meaningfulInhale =
+            DamageWarningMeaningfulInhaleAtForAutomatedTest(0.72f, strength);
+        float repeatAtSignal = DamageWarningRepeatAlphaForAutomatedTest(
+            inhale,
+            0f,
+            1f
+        );
+        float repeatAtNextFrame = DamageWarningRepeatAlphaForAutomatedTest(
+            inhale,
+            0.016f,
+            1f
+        );
+
+        if (start > 0.001f
+            || captionStart > 0.001f
+            || edgeStart > 0.001f)
+        {
+            diagnostic = FormattableString.Invariant(
+                $"the damage signal must start quiet, got vignette={start:0.000}, caption={captionStart:0.000}"
+            );
+            return false;
+        }
+        if (!(rising > 0.01f
+            && inhale > rising
+            && captionRising > 0.01f
+            && captionInhale > captionRising
+            && edgeRising > 0.01f
+            && edgeInhale > edgeRising
+            && edgeTrough > 0.01f
+            && breathTrough <= 0.001f
+            && secondBreathTrough <= 0.001f
+            && captionBreathTrough <= 0.001f
+            && captionSecondBreathTrough <= 0.001f
+            && edgeBreathTrough <= 0.001f
+            && edgeSecondBreathTrough <= 0.001f))
+        {
+            diagnostic = FormattableString.Invariant(
+                $"the damage curve must rise smoothly into its inhale and return to zero between breaths, got vignette {rising:0.000} -> {inhale:0.000}, trough={breathTrough:0.000}, caption={captionRising:0.000}"
+            );
+            return false;
+        }
+        if (!(exhale > end + 0.01f && exhale < inhale))
+        {
+            diagnostic = FormattableString.Invariant(
+                $"the breathing exhale must be softer than inhale and precede release, got inhale={inhale:0.000}, exhale={exhale:0.000}, end={end:0.000}"
+            );
+            return false;
+        }
+        if (end > 0.001f
+            || captionEnd > 0.001f
+            || edgeEnd > 0.001f)
+        {
+            diagnostic = FormattableString.Invariant(
+                $"the damage curve must release at {DamageWarningDurationSeconds:0.0}s, got vignette={end:0.000}, caption={captionEnd:0.000}"
+            );
+            return false;
+        }
+        if (!meaningfulInhale)
+        {
+            diagnostic = FormattableString.Invariant(
+                $"the inhale sample must be meaningful for smoke capture, got vignette={inhale:0.000}, edge={edgeInhale:0.000}"
+            );
+            return false;
+        }
+        if (repeatAtSignal + 0.001f < inhale
+            || repeatAtNextFrame + 0.02f < inhale)
+        {
+            diagnostic = FormattableString.Invariant(
+                $"a repeat hit must not step the visible alpha down, got before={inhale:0.000}, signal={repeatAtSignal:0.000}, nextFrame={repeatAtNextFrame:0.000}"
+            );
+            return false;
+        }
+
+        diagnostic = FormattableString.Invariant(
+            $"start={start:0.000}, rising={rising:0.000}, inhale={inhale:0.000}, exhale={exhale:0.000}, trough={breathTrough:0.000}, secondTrough={secondBreathTrough:0.000}, end={end:0.000}, edgeStart={edgeStart:0.000}, edgeInhale={edgeInhale:0.000}, edgeTrough={edgeTrough:0.000}, edgeBreathTrough={edgeBreathTrough:0.000}, edgeSecondTrough={edgeSecondBreathTrough:0.000}, edgeEnd={edgeEnd:0.000}, captionStart={captionStart:0.000}, captionEnd={captionEnd:0.000}"
+        );
+        return true;
+    }
 
     /// <summary>
     /// Reports whether the warning would actually be drawn, including the
@@ -188,7 +473,6 @@ public sealed partial class ModernAtlasDialog
         && !screenshotPreviewOpening
         && DamageWarningVignetteAlpha() > 0.002f;
 
-    internal bool DamageWarningLowHealthForAutomatedTest => damageWarningLowHealth;
     internal EnumGameMode LocalGameModeForAutomatedTest
     {
         get
@@ -219,9 +503,12 @@ public sealed partial class ModernAtlasDialog
             AtlasViewportBounds viewport = AtlasViewport;
             return viewport.Width > 0
                 && viewport.Height > 0
-                && EnsureDamageVignetteTexture(viewport.Width, viewport.Height)
-                && EnsureDamageWarningCaption("LOW HEALTH")
-                && damageVignetteTexture?.TextureId > 0
+                && EnsureDamageEdgeTextures()
+                && EnsureDamageWarningCaption("TAKING DAMAGE — CLOSE THE ATLAS")
+                && damageEdgeTopTexture?.TextureId > 0
+                && damageEdgeBottomTexture?.TextureId > 0
+                && damageEdgeLeftTexture?.TextureId > 0
+                && damageEdgeRightTexture?.TextureId > 0
                 && damageWarningCaptionTexture?.TextureId > 0;
         }
     }
@@ -253,22 +540,158 @@ public sealed partial class ModernAtlasDialog
 
     private float DamageWarningVignetteAlpha()
     {
-        float steady = damageWarningLowHealth ? 0.30f : 0f;
-        if (damageWarningPulseStrength <= 0
-            || damageWarningElapsedSeconds >= DamageWarningDurationSeconds)
+        float alpha = DamageWarningVignetteAlphaAt(
+            damageWarningElapsedSeconds,
+            damageWarningPulseStrength
+        );
+        return DamageWarningApplyRepeatCarry(
+            alpha,
+            damageWarningRepeatCarryAlpha,
+            damageWarningElapsedSeconds
+        );
+    }
+
+    private float DamageWarningEdgeWidthScale()
+    {
+        float widthScale = DamageWarningEdgeWidthScaleAt(
+            damageWarningElapsedSeconds,
+            damageWarningPulseStrength
+        );
+        return DamageWarningApplyRepeatCarry(
+            widthScale,
+            damageWarningRepeatCarryWidthScale,
+            damageWarningElapsedSeconds
+        );
+    }
+
+    private static float DamageWarningApplyRepeatCarry(
+        float alpha,
+        float carryAlpha,
+        float elapsedSeconds
+    )
+    {
+        if (carryAlpha <= 0f
+            || elapsedSeconds >= DamageWarningRepeatCarryFadeSeconds)
         {
-            return steady;
+            return alpha;
         }
 
-        float progress = damageWarningElapsedSeconds / DamageWarningDurationSeconds;
-        // Two soft pulses that fade out over the window.
-        float envelope = (1f - progress) * (1f - progress);
-        float pulse = 0.55f + 0.45f * MathF.Sin(progress * MathF.PI * 4f);
-        return Math.Clamp(
-            steady + damageWarningPulseStrength * envelope * pulse * 0.55f,
-            0f,
-            0.62f
+        float carry = carryAlpha * (
+            1f - DamageWarningSmoothStep(
+                elapsedSeconds / DamageWarningRepeatCarryFadeSeconds
+            )
         );
+        return Math.Max(alpha, carry);
+    }
+
+    /// <summary>
+    /// Uses a zero-slope smooth attack and release around a slow breathing
+    /// pulse. Keeping this pure makes the first-frame and endpoint guarantees
+    /// testable without touching a live dialog or framebuffer.
+    /// </summary>
+    private static float DamageWarningVignetteAlphaAt(
+        float elapsedSeconds,
+        float pulseStrength
+    )
+    {
+        float strength = float.IsFinite(pulseStrength)
+            ? Math.Clamp(pulseStrength, 0f, 1f)
+            : 0f;
+        if (strength <= 0f) return 0f;
+
+        float envelope = DamageWarningPulseEnvelope(elapsedSeconds);
+        float breath = DamageWarningBreathAlpha(elapsedSeconds);
+        return Math.Clamp(
+            strength * envelope * breath * 0.52f,
+            0f,
+            DamageWarningMaximumPulseAlpha
+        );
+    }
+
+    private static float DamageWarningCaptionAlpha(float vignetteAlpha) =>
+        Math.Clamp(vignetteAlpha * 1.45f, 0f, 0.90f);
+
+    private static float DamageWarningEdgeWidthScaleAt(
+        float elapsedSeconds,
+        float pulseStrength
+    )
+    {
+        float strength = float.IsFinite(pulseStrength)
+            ? Math.Clamp(pulseStrength, 0f, 1f)
+            : 0f;
+        if (strength <= 0f) return 0f;
+        return Math.Clamp(
+            strength
+                * DamageWarningPulseEnvelope(elapsedSeconds)
+                * DamageWarningBreathWidthScale(elapsedSeconds),
+            0f,
+            1f
+        );
+    }
+
+    private static int DamageWarningEdgeThickness(
+        int width,
+        int height,
+        float edgeWidthScale
+    )
+    {
+        if (edgeWidthScale <= 0f || width <= 0 || height <= 0) return 0;
+        double maximum = Math.Min(width, height)
+            * DamageWarningMaximumEdgeFraction;
+        return Math.Clamp(
+            (int)Math.Ceiling(maximum * edgeWidthScale),
+            1,
+            DamageWarningMaximumEdgePixels
+        );
+    }
+
+    private static float DamageWarningPulseEnvelope(float elapsedSeconds)
+    {
+        if (!float.IsFinite(elapsedSeconds)
+            || elapsedSeconds <= 0f
+            || elapsedSeconds >= DamageWarningDurationSeconds)
+        {
+            return 0f;
+        }
+
+        float attack = DamageWarningSmoothStep(
+            elapsedSeconds / DamageWarningFadeInSeconds
+        );
+        float release = DamageWarningSmoothStep(
+            (DamageWarningDurationSeconds - elapsedSeconds)
+                / DamageWarningFadeOutSeconds
+        );
+        return attack * release;
+    }
+
+    private static float DamageWarningBreathAlpha(float elapsedSeconds)
+    {
+        if (!float.IsFinite(elapsedSeconds)) return 0f;
+        float phase = elapsedSeconds * MathF.PI * 2f
+            / DamageWarningBreathPeriodSeconds
+            - MathF.PI * 0.5f;
+        float inhale = 0.5f + 0.5f * MathF.Sin(phase);
+        // The whole warning reaches zero between breaths, so the caption and
+        // the edge width share the same transparent trough.
+        return inhale;
+    }
+
+    private static float DamageWarningBreathWidthScale(float elapsedSeconds)
+    {
+        if (!float.IsFinite(elapsedSeconds)) return 0f;
+        float phase = elapsedSeconds * MathF.PI * 2f
+            / DamageWarningBreathPeriodSeconds
+            - MathF.PI * 0.5f;
+        // The edge width disappears between breaths with the same true-zero
+        // trough as the colour and caption: 0 -> small maximum -> 0.
+        return Math.Clamp(0.5f + 0.5f * MathF.Sin(phase), 0f, 1f);
+    }
+
+    private static float DamageWarningSmoothStep(float value)
+    {
+        if (!float.IsFinite(value)) return value > 0f ? 1f : 0f;
+        float clamped = Math.Clamp(value, 0f, 1f);
+        return clamped * clamped * (3f - 2f * clamped);
     }
 
     /// <summary>
@@ -292,26 +715,24 @@ public sealed partial class ModernAtlasDialog
 
         AtlasViewportBounds viewport = AtlasViewport;
         if (viewport.Width <= 0 || viewport.Height <= 0) return;
-        if (!EnsureDamageVignetteTexture(viewport.Width, viewport.Height)) return;
-
-        capi.Render.Render2DTexture(
-            damageVignetteTexture!.TextureId,
-            viewport.X,
-            viewport.Y,
+        float edgeWidthScale = DamageWarningEdgeWidthScale();
+        int edgeWidth = DamageWarningEdgeThickness(
             viewport.Width,
             viewport.Height,
-            60,
-            new Vec4f(1f, 1f, 1f, alpha)
+            edgeWidthScale
         );
+        if (edgeWidth > 0 && EnsureDamageEdgeTextures())
+        {
+            RenderDamageEdges(viewport, edgeWidth, alpha);
+        }
 
-        string caption = damageWarningPulseStrength > 0
-            && damageWarningElapsedSeconds < DamageWarningDurationSeconds
-            ? "TAKING DAMAGE — CLOSE THE ATLAS"
-            : "LOW HEALTH";
+        const string caption = "TAKING DAMAGE — CLOSE THE ATLAS";
         if (!EnsureDamageWarningCaption(caption)) return;
 
         float captionWidth = damageWarningCaptionTexture!.Width;
         float captionHeight = damageWarningCaptionTexture.Height;
+        float captionAlpha = DamageWarningCaptionAlpha(alpha);
+        if (captionAlpha <= 0.002f) return;
         capi.Render.Render2DTexture(
             damageWarningCaptionTexture.TextureId,
             viewport.X + (viewport.Width - captionWidth) * 0.5f,
@@ -319,81 +740,132 @@ public sealed partial class ModernAtlasDialog
             captionWidth,
             captionHeight,
             61,
-            new Vec4f(1f, 1f, 1f, Math.Clamp(0.55f + alpha, 0f, 1f))
+            new Vec4f(1f, 1f, 1f, captionAlpha)
         );
     }
 
-    private bool EnsureDamageVignetteTexture(int width, int height)
+    private bool EnsureDamageEdgeTextures()
     {
-        if (damageVignetteTexture?.TextureId > 0
-            && damageVignetteTexture.Width == width
-            && damageVignetteTexture.Height == height)
+        if (damageEdgeTopTexture?.TextureId > 0
+            && damageEdgeBottomTexture?.TextureId > 0
+            && damageEdgeLeftTexture?.TextureId > 0
+            && damageEdgeRightTexture?.TextureId > 0)
         {
             return true;
         }
 
         try
         {
-            using ImageSurface surface = new(Format.Argb32, width, height);
-            using Context context = new(surface);
-            AtlasUiStyle.Clear(context);
-
-            // Dark red edges with a fully transparent centre so the map stays
-            // readable. The old red-border defect was a shader artifact; this is
-            // a GUI texture that never touches world rendering.
-            // Keep the band narrow and bounded: the map must stay readable and
-            // the effect must not read as a red frame around the atlas.
-            double thickness = Math.Clamp(Math.Min(width, height) * 0.085, 24, 96);
-            DrawDamageEdge(context, 0, 0, width, thickness, 0, 1);
-            DrawDamageEdge(context, 0, height - thickness, width, thickness, 0, -1);
-            DrawDamageEdge(context, 0, 0, thickness, height, 1, 0);
-            DrawDamageEdge(context, width - thickness, 0, thickness, height, -1, 0);
-            // LoadOrUpdateCairoTexture needs an existing instance, exactly like
-            // the ore hover and search marker textures.
-            damageVignetteTexture ??= new LoadedTexture(capi);
-            capi.Gui.LoadOrUpdateCairoTexture(
-                surface,
-                true,
-                ref damageVignetteTexture
+            bool top = BuildDamageEdgeTexture(
+                vertical: true,
+                reversed: false,
+                ref damageEdgeTopTexture
             );
-            return damageVignetteTexture?.TextureId > 0;
+            bool bottom = BuildDamageEdgeTexture(
+                vertical: true,
+                reversed: true,
+                ref damageEdgeBottomTexture
+            );
+            bool left = BuildDamageEdgeTexture(
+                vertical: false,
+                reversed: false,
+                ref damageEdgeLeftTexture
+            );
+            bool right = BuildDamageEdgeTexture(
+                vertical: false,
+                reversed: true,
+                ref damageEdgeRightTexture
+            );
+            return top && bottom && left && right;
         }
         catch (Exception exception)
         {
             capi.Logger.Warning(
-                "[ModernAtlas] Could not build the damage warning vignette: {0}",
+                "[ModernAtlas] Could not build the damage warning edge textures: {0}",
                 exception.Message
             );
             return false;
         }
     }
 
-    private static void DrawDamageEdge(
-        Context context,
-        double x,
-        double y,
-        double width,
-        double height,
-        int horizontalDirection,
-        int verticalDirection
+    private bool BuildDamageEdgeTexture(
+        bool vertical,
+        bool reversed,
+        ref LoadedTexture? texture
     )
     {
-        double startX = horizontalDirection >= 0 ? x : x + width;
-        double startY = verticalDirection >= 0 ? y : y + height;
-        double endX = horizontalDirection == 0
-            ? startX
-            : startX + horizontalDirection * width;
-        double endY = verticalDirection == 0
-            ? startY
-            : startY + verticalDirection * height;
+        if (texture?.TextureId > 0) return true;
+
+        int width = vertical ? 1 : DamageWarningEdgeGradientPixels;
+        int height = vertical ? DamageWarningEdgeGradientPixels : 1;
+        using ImageSurface surface = new(Format.Argb32, width, height);
+        using Context context = new(surface);
+        AtlasUiStyle.Clear(context);
+
+        double startX = vertical ? 0 : (reversed ? width : 0);
+        double startY = vertical ? (reversed ? height : 0) : 0;
+        double endX = vertical ? 0 : (reversed ? 0 : width);
+        double endY = vertical ? (reversed ? 0 : height) : 0;
         using LinearGradient gradient = new(startX, startY, endX, endY);
         gradient.AddColorStop(0, new Color(0.40, 0.02, 0.02, 0.70));
-        // Fall off quickly so only the outer edge carries colour.
         gradient.AddColorStop(0.45, new Color(0.40, 0.02, 0.02, 0.18));
         gradient.AddColorStop(1, new Color(0.40, 0.02, 0.02, 0));
         context.SetSource(gradient);
-        context.Rectangle(x, y, width, height);
+        context.Rectangle(0, 0, width, height);
         context.Fill();
+
+        texture ??= new LoadedTexture(capi);
+        capi.Gui.LoadOrUpdateCairoTexture(
+            surface,
+            true,
+            ref texture
+        );
+        return texture?.TextureId > 0;
+    }
+
+    private void RenderDamageEdges(
+        AtlasViewportBounds viewport,
+        int edgeWidth,
+        float alpha
+    )
+    {
+        Vec4f tint = new(1f, 1f, 1f, alpha);
+        capi.Render.Render2DTexture(
+            damageEdgeTopTexture!.TextureId,
+            viewport.X,
+            viewport.Y,
+            viewport.Width,
+            edgeWidth,
+            60,
+            tint
+        );
+        capi.Render.Render2DTexture(
+            damageEdgeBottomTexture!.TextureId,
+            viewport.X,
+            viewport.Y + viewport.Height - edgeWidth,
+            viewport.Width,
+            edgeWidth,
+            60,
+            tint
+        );
+        capi.Render.Render2DTexture(
+            damageEdgeLeftTexture!.TextureId,
+            viewport.X,
+            viewport.Y,
+            edgeWidth,
+            viewport.Height,
+            60,
+            tint
+        );
+        capi.Render.Render2DTexture(
+            damageEdgeRightTexture!.TextureId,
+            viewport.X + viewport.Width - edgeWidth,
+            viewport.Y,
+            edgeWidth,
+            viewport.Height,
+            60,
+            tint
+        );
     }
 
     private bool EnsureDamageWarningCaption(string caption)
@@ -411,16 +883,31 @@ public sealed partial class ModernAtlasDialog
         try
         {
             double scale = Math.Max(0.5, RuntimeEnv.GUIScale);
-            int width = (int)Math.Ceiling(caption.Length * 12 * scale);
-            int height = (int)Math.Ceiling(34 * scale);
+            int width = (int)Math.Ceiling(caption.Length * 12 * scale + 8 * scale);
+            int height = (int)Math.Ceiling(30 * scale);
             using ImageSurface surface = new(Format.Argb32, width, height);
             using Context context = new(surface);
             AtlasUiStyle.Clear(context);
-            AtlasUiStyle.DrawRaisedPanel(context, 0, 0, width, height, 10);
+            // Keep the caption texture transparent everywhere except for the
+            // glyphs. A subtle offset shadow preserves readability over the
+            // live atlas without creating the old opaque raised-panel strip.
+            using CairoFont shadow = CairoFont.WhiteDetailText()
+                .WithFontSize((float)(13 * scale))
+                .WithWeight(FontWeight.Bold)
+                .WithColor(new[] { 0.05, 0.0, 0.0, 0.72 });
+            AtlasUiStyle.DrawCenteredText(
+                context,
+                shadow,
+                caption,
+                width,
+                height,
+                1.2 * scale,
+                1.2 * scale
+            );
             using CairoFont font = CairoFont.WhiteDetailText()
                 .WithFontSize((float)(13 * scale))
                 .WithWeight(FontWeight.Bold)
-                .WithColor(new[] { 1.0, 0.86, 0.86, 1.0 });
+                .WithColor(new[] { 1.0, 0.78, 0.78, 1.0 });
             AtlasUiStyle.DrawCenteredText(context, font, caption, width, height);
             damageWarningCaptionTexture ??= new LoadedTexture(capi);
             capi.Gui.LoadOrUpdateCairoTexture(
@@ -443,8 +930,14 @@ public sealed partial class ModernAtlasDialog
 
     private void DisposeDamageWarningTextures()
     {
-        damageVignetteTexture?.Dispose();
-        damageVignetteTexture = null;
+        damageEdgeTopTexture?.Dispose();
+        damageEdgeTopTexture = null;
+        damageEdgeBottomTexture?.Dispose();
+        damageEdgeBottomTexture = null;
+        damageEdgeLeftTexture?.Dispose();
+        damageEdgeLeftTexture = null;
+        damageEdgeRightTexture?.Dispose();
+        damageEdgeRightTexture = null;
         damageWarningCaptionTexture?.Dispose();
         damageWarningCaptionTexture = null;
         damageWarningCaptionValue = null;

@@ -3,8 +3,38 @@ set -euo pipefail
 
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 game_path="${VINTAGE_STORY_PATH:-/opt/vintagestory}"
-data_path="${MODERNATLAS_SMOKE_DATA_PATH:-/home/arcylisz/.config/VintagestoryData}"
-smoke_world="${MODERNATLAS_SMOKE_WORLD:-arcyliszs cave world}"
+real_damage_mode=false
+case "${MODERNATLAS_SMOKE_REAL_DAMAGE:-0}" in
+    1|true|yes) real_damage_mode=true ;;
+esac
+if $real_damage_mode; then
+    data_path="${MODERNATLAS_REAL_DAMAGE_DATA_PATH:-}"
+    smoke_world="${MODERNATLAS_SMOKE_WORLD:-MODERNATLAS_REAL_DAMAGE_TEST}"
+    if [[ "$smoke_world" != "MODERNATLAS_REAL_DAMAGE_TEST" ]]; then
+        printf '[ModernAtlas] Real-damage mode requires the exact disposable world MODERNATLAS_REAL_DAMAGE_TEST.\n' >&2
+        exit 1
+    fi
+    if [[ -z "$data_path" ]]; then
+        printf '[ModernAtlas] Real-damage mode requires MODERNATLAS_REAL_DAMAGE_DATA_PATH for a disposable copied data directory.\n' >&2
+        exit 1
+    fi
+    normal_data_path="${MODERNATLAS_SMOKE_DATA_PATH:-/home/arcylisz/.config/VintagestoryData}"
+    if [[ "$(realpath -m "$data_path")" == "$(realpath -m "$normal_data_path")" ]]; then
+        printf '[ModernAtlas] Refusing to run real damage against the normal Vintage Story data path.\n' >&2
+        exit 1
+    fi
+else
+    data_path="${MODERNATLAS_SMOKE_DATA_PATH:-/home/arcylisz/.config/VintagestoryData}"
+    smoke_world="${MODERNATLAS_SMOKE_WORLD:-MODERNATLAS_CREATIVE_TEST}"
+    if [[ "$smoke_world" != "MODERNATLAS_CREATIVE_TEST" ]]; then
+        printf '[ModernAtlas] Standard smoke requires the exact disposable world MODERNATLAS_CREATIVE_TEST; the owner source world is not a smoke target.\n' >&2
+        exit 1
+    fi
+fi
+if [[ ! -d "$data_path" ]]; then
+    printf '[ModernAtlas] Smoke data path does not exist: %s\n' "$data_path" >&2
+    exit 1
+fi
 main_log="$data_path/Logs/client-main.log"
 crash_log="$data_path/Logs/client-crash.log"
 main_mtime_before=0
@@ -45,7 +75,11 @@ if [[ -n "$active_clients" ]]; then
     exit 1
 fi
 
-printf '[ModernAtlas] Starting the automated smoke test in standard world: %s\n' "$smoke_world"
+if $real_damage_mode; then
+    printf '[ModernAtlas] Starting the opt-in real-damage smoke in disposable world: %s\n' "$smoke_world"
+else
+    printf '[ModernAtlas] Starting the automated smoke test in standard world: %s\n' "$smoke_world"
+fi
 status=0
 smoke_mask_prefix="${MODERNATLAS_SMOKE_SCREENSHOT_MASK:-${MODERNATLAS_SMOKE_SCREENSHOT:-}}"
 smoke_sequence="${MODERNATLAS_SMOKE_SCREENSHOT_SEQUENCE:-0}"
@@ -53,12 +87,26 @@ case "${smoke_sequence,,}" in
     1|true|yes) smoke_sequence=1 ;;
     *) smoke_sequence=0 ;;
 esac
-env MODERNATLAS_SMOKE_TEST=1 \
-    MODERNATLAS_SMOKE_SCREENSHOT_SEQUENCE="$smoke_sequence" \
-    MODERNATLAS_SMOKE_SCREENSHOT_MASK="$smoke_mask_prefix" \
-    "$game_path/Vintagestory" \
-    --dataPath "$data_path" \
-    -o "$smoke_world" || status=$?
+if $real_damage_mode; then
+    if [[ -z "${MODERNATLAS_SMOKE_SCREENSHOT:-}" ]]; then
+        printf '[ModernAtlas] Real-damage mode requires MODERNATLAS_SMOKE_SCREENSHOT for the intentional warning capture.\n' >&2
+        exit 1
+    fi
+    env MODERNATLAS_SMOKE_TEST=1 \
+        MODERNATLAS_SMOKE_REAL_DAMAGE=1 \
+        MODERNATLAS_SMOKE_SCREENSHOT_SEQUENCE="$smoke_sequence" \
+        MODERNATLAS_SMOKE_SCREENSHOT_MASK="$smoke_mask_prefix" \
+        "$game_path/Vintagestory" \
+        --dataPath "$data_path" \
+        -o "$smoke_world" || status=$?
+else
+    env MODERNATLAS_SMOKE_TEST=1 \
+        MODERNATLAS_SMOKE_SCREENSHOT_SEQUENCE="$smoke_sequence" \
+        MODERNATLAS_SMOKE_SCREENSHOT_MASK="$smoke_mask_prefix" \
+        "$game_path/Vintagestory" \
+        --dataPath "$data_path" \
+        -o "$smoke_world" || status=$?
+fi
 
 if (( status != 0 )); then
     printf '[ModernAtlas] Smoke process exited with status %d.\n' "$status" >&2
@@ -74,16 +122,34 @@ if (( main_mtime_after <= main_mtime_before )); then
     exit 1
 fi
 
-required_patterns=(
-    'AUTOMATED SMOKE GOD MODE ENABLED'
-    'AUTOMATED SMOKE GOD MODE RESTORED'
-    'AUTOMATED ATLAS TWO-CYCLE CHECK PASSED'
-    'Automated resolved-atlas alpha validation passed'
-    'Atlas close state check passed'
-    'World leave received'
-    'Released world-specific atlas rendering resources'
-    'AUTOMATED WORLD-EXIT CHECK PASSED'
-)
+if $real_damage_mode; then
+    required_patterns=(
+        'AUTOMATED SMOKE HEALTH FIXTURE READY: world=MODERNATLAS_REAL_DAMAGE_TEST; mode=Survival; health=100/100.'
+        'REAL DAMAGE SMOKE START'
+        'REAL DAMAGE SMOKE WORLD GUARD'
+        'REAL DAMAGE APPLIED:.*health=100->99'
+        'REAL DAMAGE OBSERVED'
+        'REAL DAMAGE HEALTH RESTORED:.*health=100'
+        'AUTOMATED ATLAS TWO-CYCLE CHECK PASSED'
+        'Automated resolved-atlas alpha validation passed'
+        'Atlas close state check passed'
+        'World leave received'
+        'Released world-specific atlas rendering resources'
+        'AUTOMATED WORLD-EXIT CHECK PASSED'
+    )
+else
+    required_patterns=(
+        'AUTOMATED SMOKE HEALTH FIXTURE READY: world=MODERNATLAS_CREATIVE_TEST; mode=Creative; health=100/100.'
+        'AUTOMATED SMOKE GOD MODE ENABLED'
+        'AUTOMATED SMOKE GOD MODE RESTORED'
+        'AUTOMATED ATLAS TWO-CYCLE CHECK PASSED'
+        'Automated resolved-atlas alpha validation passed'
+        'Atlas close state check passed'
+        'World leave received'
+        'Released world-specific atlas rendering resources'
+        'AUTOMATED WORLD-EXIT CHECK PASSED'
+    )
+fi
 for pattern in "${required_patterns[@]}"; do
     if ! rg -q "$pattern" "$main_log"; then
         printf '[ModernAtlas] Required smoke marker is missing: %s\n' "$pattern" >&2
@@ -130,6 +196,11 @@ if [[ -n "${MODERNATLAS_SMOKE_SCREENSHOT:-}" ]]; then
             "${screenshot_prefix}-screenshot-tiled.png"
         )
     fi
+    if $real_damage_mode; then
+        required_screenshots+=(
+            "${screenshot_prefix}-damage-warning-real.png"
+        )
+    fi
     for screenshot in "${required_screenshots[@]}"; do
         if [[ ! -s "$screenshot" ]]; then
             printf '[ModernAtlas] Required smoke screenshot is missing or empty: %s\n' "$screenshot" >&2
@@ -160,6 +231,11 @@ if [[ -n "${MODERNATLAS_SMOKE_SCREENSHOT:-}" ]]; then
         exit 1
     fi
     printf '[ModernAtlas] Automated ordinary-world red-border check passed: no continuous red frame on three or more sides in any ordinary-world frame.\n'
+fi
+
+if $real_damage_mode && rg -q 'AUTOMATED SMOKE GOD MODE ENABLED' "$main_log"; then
+    printf '[ModernAtlas] Real-damage smoke unexpectedly installed the god-mode patch.\n' >&2
+    exit 1
 fi
 
 if rg -n \

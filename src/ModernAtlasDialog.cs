@@ -32,7 +32,16 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private const int BottomPanelAnimationMilliseconds = 170;
     private const int AutomatedUiScreenshotPhaseCount = 9;
     private const float DamageWarningDurationSeconds = 3.2f;
-    private const float LowHealthWarningFraction = 0.25f;
+    private const float DamageWarningFadeInSeconds = 0.45f;
+    private const float DamageWarningFadeOutSeconds = 0.95f;
+    private const float DamageWarningBreathPeriodSeconds = 1.45f;
+    private const float DamageWarningRepeatCarryFadeSeconds = 0.90f;
+    private const float AutomatedRealDamagePhaseTimeoutSeconds = 8f;
+    private const float AutomatedRealDamageSmokeHealth = 100f;
+    private const float DamageWarningMaximumPulseAlpha = 0.52f;
+    private const float DamageWarningMaximumEdgeFraction = 0.024f;
+    private const int DamageWarningMaximumEdgePixels = 28;
+    private const int DamageWarningEdgeGradientPixels = 64;
     private const string AllOresFilterValue = "__all__";
     private const string SmokeScreenshotEnvironmentVariable =
         "MODERNATLAS_SMOKE_SCREENSHOT";
@@ -71,6 +80,8 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private readonly Action<string>? performanceTelemetryLogger;
     private readonly Func<bool> requestClose;
     private readonly Func<bool> requestEmergencyClose;
+    private readonly System.Func<ModernAtlasSmokeDamageOperation, float, int, bool>
+        requestRealDamageSmokeAction;
     private readonly Func<IShaderProgram?> stableLiquidShaderProvider;
     private readonly Func<IShaderProgram?> atlasCloudShaderProvider;
     private readonly Func<IShaderProgram?> atlasBoundaryShaderProvider;
@@ -349,15 +360,33 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private float damageWarningBaselineHealth = float.NaN;
     private float damageWarningElapsedSeconds;
     private float damageWarningPulseStrength;
-    private bool damageWarningLowHealth;
+    private float damageWarningRepeatCarryAlpha;
+    private float damageWarningRepeatCarryWidthScale;
     private bool damageWarningAutoCloseRequested;
     private int automatedSmokeTestDamagePhase;
     private bool automatedSmokeTestDamageWarningPassed;
+    private bool automatedRealDamageSmokeRun;
+    private bool automatedRealDamageSmokePhase;
+    private int automatedRealDamageSmokeNextRequestId;
+    private int automatedRealDamageSmokePendingRequestId;
+    private float automatedRealDamageSmokePhaseStartedSeconds;
+    private ModernAtlasSmokeDamageOperation?
+        automatedRealDamageSmokePendingOperation;
+    private float automatedRealDamageSmokeBaselineHealth = float.NaN;
+    private float automatedRealDamageSmokeServerHealth = float.NaN;
+    private bool automatedRealDamageSmokeHitObserved;
+    private bool automatedRealDamageSmokeScreenshotQueued;
+    private bool automatedRealDamageSmokeScreenshotSaved;
+    private bool automatedRealDamageSmokeRestoreConfirmed;
     private bool automatedSmokeTestCloseOnDamageBefore = true;
+    private bool automatedSmokeTestCloseOnDamageCaptured;
     private EnumGameMode? automatedDamageWarningModeOverride;
     private bool damageWarningEmergencyClosePending;
     private bool automatedSmokeTestDamageWasOpenBeforeSignal;
-    private LoadedTexture? damageVignetteTexture;
+    private LoadedTexture? damageEdgeTopTexture;
+    private LoadedTexture? damageEdgeBottomTexture;
+    private LoadedTexture? damageEdgeLeftTexture;
+    private LoadedTexture? damageEdgeRightTexture;
     private LoadedTexture? damageWarningCaptionTexture;
     private string? damageWarningCaptionValue;
     private bool synchronizingMapLayerChoice;
@@ -794,6 +823,8 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         Func<IShaderProgram?> atlasOpacityShaderProvider,
         Func<IShaderProgram?> atlasScrollShaderProvider,
         AtlasSoundController soundController,
+        System.Func<ModernAtlasSmokeDamageOperation, float, int, bool>
+            requestRealDamageSmokeAction,
         Action<string>? performanceTelemetryLogger = null
     ) : base(capi)
     {
@@ -803,6 +834,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         this.performanceTelemetryLogger = performanceTelemetryLogger;
         this.requestClose = requestClose;
         this.requestEmergencyClose = requestEmergencyClose;
+        this.requestRealDamageSmokeAction = requestRealDamageSmokeAction;
         this.stableLiquidShaderProvider = stableLiquidShaderProvider;
         this.atlasCloudShaderProvider = atlasCloudShaderProvider;
         this.atlasBoundaryShaderProvider = atlasBoundaryShaderProvider;

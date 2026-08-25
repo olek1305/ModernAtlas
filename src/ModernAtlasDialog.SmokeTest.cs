@@ -7,6 +7,7 @@ using Cairo;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Config;
+using Vintagestory.API.Datastructures;
 using Vintagestory.API.Common.Entities;
 using Vintagestory.API.MathTools;
 namespace ModernAtlas;
@@ -18,7 +19,11 @@ namespace ModernAtlas;
 /// </summary>
 public sealed partial class ModernAtlasDialog
 {
-    internal void BeginAutomatedSmokeTest(Action<bool> completion)
+    internal void BeginAutomatedSmokeTest(
+        Action<bool> completion,
+        bool realDamageSmokeRun,
+        bool realDamageSmokePhase
+    )
     {
         string? performancePolicyFailure = AtlasPerformanceModeInfo.Validate()
             ?? AtlasDetailModeInfo.Validate()
@@ -342,6 +347,19 @@ public sealed partial class ModernAtlasDialog
         automatedSmokeTestMapLayerPassed = false;
         automatedSmokeTestDamagePhase = 0;
         automatedSmokeTestDamageWarningPassed = false;
+        automatedRealDamageSmokeRun = realDamageSmokeRun;
+        automatedRealDamageSmokePhase = realDamageSmokePhase;
+        automatedRealDamageSmokeNextRequestId = 0;
+        automatedRealDamageSmokePendingRequestId = 0;
+        automatedRealDamageSmokePhaseStartedSeconds = float.NaN;
+        automatedRealDamageSmokePendingOperation = null;
+        automatedRealDamageSmokeBaselineHealth = float.NaN;
+        automatedRealDamageSmokeServerHealth = float.NaN;
+        automatedRealDamageSmokeHitObserved = false;
+        automatedRealDamageSmokeScreenshotQueued = false;
+        automatedRealDamageSmokeScreenshotSaved = false;
+        automatedRealDamageSmokeRestoreConfirmed = false;
+        automatedSmokeTestCloseOnDamageCaptured = false;
         pendingAutomatedMapLayerScreenshotSuffix = null;
         automatedSmokeTestHoldLayerHover = false;
         automatedSmokeTestPerformanceModeSelected = false;
@@ -733,10 +751,49 @@ public sealed partial class ModernAtlasDialog
             );
         }
 
-        if (passed && automatedSmokeTestDamagePhase < 3)
+        bool realDamageSmokeComplete = automatedRealDamageSmokePhase
+            ? automatedSmokeTestDamagePhase >= 4
+            : automatedSmokeTestDamagePhase >= 3;
+        if (passed && !realDamageSmokeComplete)
         {
-            AdvanceAutomatedDamageWarningTest();
-            if (automatedSmokeTestDamagePhase < 3) return;
+            if (automatedRealDamageSmokePhase)
+            {
+                AdvanceAutomatedRealDamageSmokeTest();
+            }
+            else if (automatedRealDamageSmokeRun)
+            {
+                // The first cycle on the disposable world runs the complete
+                // atlas smoke suite but never applies a synthetic or real hit.
+                // The server-authoritative damage phase is reserved for cycle 2.
+                automatedSmokeTestDamageWarningPassed =
+                    ValidateDamageWarningAnimationForAutomatedTest(
+                        out string firstCycleDamageDiagnostic
+                    );
+                if (automatedSmokeTestDamageWarningPassed)
+                {
+                    capi.Logger.Notification(
+                        "[ModernAtlas] REAL DAMAGE SMOKE cycle 1 warning self-check passed: {0}; no hit was requested.",
+                        firstCycleDamageDiagnostic
+                    );
+                }
+                else
+                {
+                    capi.Logger.Error(
+                        "[ModernAtlas] REAL DAMAGE SMOKE FAILED: cycle 1 warning self-check failed: {0}.",
+                        firstCycleDamageDiagnostic
+                    );
+                }
+                automatedSmokeTestDamagePhase = 4;
+            }
+            else
+            {
+                AdvanceAutomatedDamageWarningTest();
+            }
+            int requiredDamagePhase = automatedRealDamageSmokePhase ? 4 : 3;
+            if (automatedSmokeTestDamagePhase < requiredDamagePhase)
+            {
+                return;
+            }
         }
         passed = passed && automatedSmokeTestDamageWarningPassed;
 
@@ -745,6 +802,355 @@ public sealed partial class ModernAtlasDialog
         automatedSmokeTestCompletion = null;
         RestoreAutomatedSmokeTestPreferences();
         completion?.Invoke(passed);
+    }
+
+    private bool TryReadAutomatedCurrentHealth(out float current)
+    {
+        current = float.NaN;
+        try
+        {
+            ITreeAttribute? healthTree = capi.World.Player?.Entity
+                ?.WatchedAttributes.GetTreeAttribute("health");
+            if (healthTree == null) return false;
+            current = healthTree.GetFloat("currenthealth", float.NaN);
+            return float.IsFinite(current);
+        }
+        catch
+        {
+            current = float.NaN;
+            return false;
+        }
+    }
+
+    private bool RequestAutomatedRealDamageSmokeAction(
+        ModernAtlasSmokeDamageOperation operation,
+        float value
+    )
+    {
+        int requestId = ++automatedRealDamageSmokeNextRequestId;
+        if (!requestRealDamageSmokeAction(operation, value, requestId))
+        {
+            return false;
+        }
+        automatedRealDamageSmokePendingRequestId = requestId;
+        automatedRealDamageSmokePendingOperation = operation;
+        return true;
+    }
+
+    private void BeginAutomatedRealDamagePhase(int phase)
+    {
+        automatedSmokeTestDamagePhase = phase;
+        automatedRealDamageSmokePhaseStartedSeconds =
+            automatedSmokeTestElapsedSeconds;
+    }
+
+    private bool FailTimedOutAutomatedRealDamagePhase(string phaseName)
+    {
+        float elapsed = automatedSmokeTestElapsedSeconds
+            - automatedRealDamageSmokePhaseStartedSeconds;
+        if (float.IsFinite(elapsed)
+            && elapsed < AutomatedRealDamagePhaseTimeoutSeconds)
+        {
+            return false;
+        }
+
+        bool restoreQueued = false;
+        if (float.IsFinite(automatedRealDamageSmokeBaselineHealth)
+            && !automatedRealDamageSmokeRestoreConfirmed)
+        {
+            // Queue a restore even if the apply response is late or the
+            // client timed out while waiting for health replication. Network
+            // ordering keeps Apply before Restore; a harmless rejected restore
+            // is preferable to leaving a disposable test player damaged.
+            restoreQueued = RequestAutomatedRealDamageSmokeAction(
+                ModernAtlasSmokeDamageOperation.Restore,
+                AutomatedRealDamageSmokeHealth
+            );
+        }
+
+        automatedSmokeTestDamageWarningPassed = false;
+        automatedSmokeTestDamagePhase = 4;
+        capi.Logger.Error(
+            "[ModernAtlas] REAL DAMAGE SMOKE FAILED: {0} phase exceeded {1:0.0}s; restore queued={2}.",
+            phaseName,
+            AutomatedRealDamagePhaseTimeoutSeconds,
+            restoreQueued
+        );
+        return true;
+    }
+
+    internal void OnRealDamageSmokeResult(
+        int requestId,
+        ModernAtlasSmokeDamageOperation operation,
+        bool accepted,
+        float health,
+        string diagnostic
+    )
+    {
+        if (!automatedRealDamageSmokePhase
+            || automatedRealDamageSmokePendingRequestId != requestId
+            || automatedRealDamageSmokePendingOperation != operation)
+        {
+            return;
+        }
+
+        automatedRealDamageSmokePendingRequestId = 0;
+        automatedRealDamageSmokePendingOperation = null;
+        if (operation == ModernAtlasSmokeDamageOperation.Apply)
+        {
+            if (accepted && float.IsFinite(health))
+            {
+                automatedRealDamageSmokeServerHealth = health;
+                capi.Logger.Notification(
+                    "[ModernAtlas] REAL DAMAGE SMOKE server response accepted: replicated health target={0:0.###}; {1}.",
+                    health,
+                    diagnostic
+                );
+                capi.Logger.Notification(
+                    "[ModernAtlas] REAL DAMAGE APPLIED: client observed health={0:0.###}->{1:0.###} from the server-authoritative hit.",
+                    automatedRealDamageSmokeBaselineHealth,
+                    health
+                );
+            }
+            else
+            {
+                automatedSmokeTestDamageWarningPassed = false;
+                automatedSmokeTestDamagePhase = 4;
+                capi.Logger.Error(
+                    "[ModernAtlas] REAL DAMAGE SMOKE FAILED: server rejected the bounded hit: {0}.",
+                    diagnostic
+                );
+            }
+            return;
+        }
+
+        if (operation == ModernAtlasSmokeDamageOperation.Restore
+            && accepted
+            && float.IsFinite(health)
+            && Math.Abs(health - automatedRealDamageSmokeBaselineHealth) <= 0.01f)
+        {
+            automatedRealDamageSmokeRestoreConfirmed = true;
+            capi.Logger.Notification(
+                "[ModernAtlas] REAL DAMAGE SMOKE restore response accepted: authoritative health={0:0.###}; {1}.",
+                health,
+                diagnostic
+            );
+        }
+        else
+        {
+            automatedSmokeTestDamageWarningPassed = false;
+            automatedSmokeTestDamagePhase = 4;
+            capi.Logger.Error(
+                "[ModernAtlas] REAL DAMAGE SMOKE FAILED: authoritative health restore was rejected: {0}.",
+                diagnostic
+            );
+        }
+    }
+
+    private void AdvanceAutomatedRealDamageSmokeTest()
+    {
+        if (!automatedRealDamageSmokePhase) return;
+
+        switch (automatedSmokeTestDamagePhase)
+        {
+            case 0:
+                if (!float.IsFinite(automatedRealDamageSmokePhaseStartedSeconds))
+                {
+                    automatedRealDamageSmokePhaseStartedSeconds =
+                        automatedSmokeTestElapsedSeconds;
+                }
+                if (FailTimedOutAutomatedRealDamagePhase("baseline/request"))
+                {
+                    return;
+                }
+                if (capi.World.Player?.WorldData.CurrentGameMode
+                        != EnumGameMode.Survival
+                    || capi.World.Player?.Entity is not EntityPlayer player
+                    || !player.Alive
+                    || !TryReadAutomatedCurrentHealth(
+                        out float baselineHealth
+                    )
+                    || Math.Abs(
+                        baselineHealth - AutomatedRealDamageSmokeHealth
+                    ) > 0.01f)
+                {
+                    automatedSmokeTestDamageWarningPassed = false;
+                    BeginAutomatedRealDamagePhase(4);
+                    capi.Logger.Error(
+                        "[ModernAtlas] REAL DAMAGE SMOKE FAILED: cycle 2 did not observe a live Survival player with safe finite health before the hit."
+                    );
+                    return;
+                }
+
+                automatedSmokeTestCloseOnDamageBefore = config.CloseAtlasOnDamage;
+                automatedSmokeTestCloseOnDamageCaptured = true;
+                config.CloseAtlasOnDamage = false;
+                automatedRealDamageSmokeBaselineHealth = baselineHealth;
+                if (!RequestAutomatedRealDamageSmokeAction(
+                        ModernAtlasSmokeDamageOperation.Apply,
+                        1f
+                    ))
+                {
+                    automatedSmokeTestDamageWarningPassed = false;
+                    BeginAutomatedRealDamagePhase(4);
+                    config.CloseAtlasOnDamage =
+                        automatedSmokeTestCloseOnDamageBefore;
+                    automatedSmokeTestCloseOnDamageCaptured = false;
+                    capi.Logger.Error(
+                        "[ModernAtlas] REAL DAMAGE SMOKE FAILED: the server-authoritative hit request could not be queued."
+                    );
+                    return;
+                }
+
+                capi.Logger.Notification(
+                    "[ModernAtlas] REAL DAMAGE SMOKE requested one bounded server-authoritative hit at health={0:0.###}; CloseAtlasOnDamage is false only until restoration.",
+                    baselineHealth
+                );
+                BeginAutomatedRealDamagePhase(1);
+                return;
+
+            case 1:
+                if (FailTimedOutAutomatedRealDamagePhase("health replication/inhale"))
+                {
+                    return;
+                }
+                if (automatedRealDamageSmokePendingOperation != null)
+                {
+                    return;
+                }
+                if (!float.IsFinite(automatedRealDamageSmokeServerHealth))
+                {
+                    automatedSmokeTestDamageWarningPassed = false;
+                    BeginAutomatedRealDamagePhase(4);
+                    return;
+                }
+
+                if (!automatedRealDamageSmokeHitObserved
+                    && TryReadAutomatedCurrentHealth(
+                        out float observedHealth
+                    )
+                    && observedHealth > 0f
+                    && observedHealth
+                        < automatedRealDamageSmokeBaselineHealth - 0.01f)
+                {
+                    automatedRealDamageSmokeHitObserved = true;
+                    capi.Logger.Notification(
+                        "[ModernAtlas] REAL DAMAGE OBSERVED: production health watcher saw {0:0.###}->{1:0.###}; waiting for the smooth warning to become visible.",
+                        automatedRealDamageSmokeBaselineHealth,
+                        observedHealth
+                    );
+                }
+
+                if (!automatedRealDamageSmokeHitObserved
+                    || !DamageWarningMeaningfulInhaleForAutomatedTest)
+                {
+                    return;
+                }
+
+                if (!QueueAutomatedMapLayerScreenshot("damage-warning-real"))
+                {
+                    automatedSmokeTestDamageWarningPassed = false;
+                    automatedSmokeTestDamagePhase = 4;
+                    capi.Logger.Error(
+                        "[ModernAtlas] REAL DAMAGE SMOKE FAILED: MODERNATLAS_SMOKE_SCREENSHOT is required for the intentional warning screenshot."
+                    );
+                    return;
+                }
+                automatedRealDamageSmokeScreenshotQueued = true;
+                BeginAutomatedRealDamagePhase(2);
+                return;
+
+            case 2:
+                if (FailTimedOutAutomatedRealDamagePhase("warning screenshot"))
+                {
+                    return;
+                }
+                if (pendingAutomatedMapLayerScreenshotSuffix != null)
+                {
+                    return;
+                }
+                if (!automatedRealDamageSmokeScreenshotQueued
+                    || !automatedRealDamageSmokeScreenshotSaved)
+                {
+                    automatedSmokeTestDamageWarningPassed = false;
+                    BeginAutomatedRealDamagePhase(4);
+                    capi.Logger.Error(
+                        "[ModernAtlas] REAL DAMAGE SMOKE FAILED: the intentional damage-warning UI screenshot was not saved."
+                    );
+                    return;
+                }
+                if (!RequestAutomatedRealDamageSmokeAction(
+                        ModernAtlasSmokeDamageOperation.Restore,
+                        AutomatedRealDamageSmokeHealth
+                    ))
+                {
+                    automatedSmokeTestDamageWarningPassed = false;
+                    BeginAutomatedRealDamagePhase(4);
+                    capi.Logger.Error(
+                        "[ModernAtlas] REAL DAMAGE SMOKE FAILED: the authoritative health restore request could not be queued."
+                    );
+                    return;
+                }
+                BeginAutomatedRealDamagePhase(3);
+                return;
+
+            case 3:
+                if (FailTimedOutAutomatedRealDamagePhase("health restore"))
+                {
+                    return;
+                }
+                if (automatedRealDamageSmokePendingOperation != null)
+                {
+                    return;
+                }
+                if (!automatedRealDamageSmokeRestoreConfirmed)
+                {
+                    return;
+                }
+
+                // The server response confirms that the authoritative setter
+                // accepted the restore, but the watched tree can still carry
+                // the previous 99 value for a few client frames. Keep this
+                // phase alive until the production health watcher observes
+                // the restored baseline; the existing phase timeout remains
+                // the failure boundary.
+                if (!TryReadAutomatedCurrentHealth(
+                        out float restoredHealth
+                    ))
+                {
+                    return;
+                }
+                if (restoredHealth <= 0f)
+                {
+                    automatedSmokeTestDamageWarningPassed = false;
+                    BeginAutomatedRealDamagePhase(4);
+                    capi.Logger.Error(
+                        "[ModernAtlas] REAL DAMAGE SMOKE FAILED: player became unsafe before replicated health restoration to {0:0.###}.",
+                        automatedRealDamageSmokeBaselineHealth
+                    );
+                    return;
+                }
+                if (Math.Abs(
+                        restoredHealth - automatedRealDamageSmokeBaselineHealth
+                    ) > 0.01f)
+                {
+                    return;
+                }
+
+                config.CloseAtlasOnDamage =
+                    automatedSmokeTestCloseOnDamageBefore;
+                automatedSmokeTestCloseOnDamageCaptured = false;
+                automatedSmokeTestDamageWarningPassed = true;
+                BeginAutomatedRealDamagePhase(4);
+                capi.Logger.Notification(
+                    "[ModernAtlas] REAL DAMAGE HEALTH RESTORED: client confirmed replicated health={0:0.###}; CloseAtlasOnDamage restored in memory.",
+                    restoredHealth
+                );
+                return;
+
+            default:
+                return;
+        }
     }
 
     /// <summary>
@@ -762,10 +1168,12 @@ public sealed partial class ModernAtlasDialog
                 automatedSmokeTestDamagePhase = 3;
                 return;
             }
-            // Leave the steady LOW HEALTH state on and capture the next frame:
-            // the warning is drawn before the screenshot is taken, so the stored
-            // image really shows it.
-            TriggerDamageWarningForAutomatedTest(true);
+            // Capture the next frame after a direct damage signal. The warning
+            // is drawn before the screenshot is taken, so the stored image
+            // really shows it. Seek to an inhale sample so the queued capture
+            // cannot land on the intentionally quiet signal frame.
+            TriggerDamageWarningForAutomatedTest();
+            SetDamageWarningAnimationTimeForAutomatedTest(0.72f);
             QueueAutomatedMapLayerScreenshot("damage-warning");
             automatedSmokeTestDamagePhase = 1;
             return;
@@ -781,7 +1189,7 @@ public sealed partial class ModernAtlasDialog
             // the close itself is deferred to the next frame start.
             config.CloseAtlasOnDamage = true;
             automatedSmokeTestDamageWasOpenBeforeSignal = IsOpened();
-            TriggerDamageWarningForAutomatedTest(false);
+            TriggerDamageWarningForAutomatedTest();
             ScheduleAutomatedEmergencyCloseCheck();
             automatedSmokeTestDamagePhase = 2;
         }
@@ -790,12 +1198,32 @@ public sealed partial class ModernAtlasDialog
     private bool ExerciseAutomatedDamageWarningChecks()
     {
         EnumGameMode mode = LocalGameModeForAutomatedTest;
+        bool animationCurve = ValidateDamageWarningAnimationForAutomatedTest(
+            out string animationDiagnostic
+        );
+        if (!animationCurve)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated damage-warning animation self-check failed: {0}.",
+                animationDiagnostic
+            );
+        }
         // The policy must depend on the actual game mode only. Cheat Mode is a
         // protected feature switch and may never suppress a safety warning.
         bool policyRules =
             DamageWarningPolicyForModeForAutomatedTest(EnumGameMode.Survival)
             && DamageWarningPolicyForModeForAutomatedTest(EnumGameMode.Guest)
             && !DamageWarningPolicyForModeForAutomatedTest(EnumGameMode.Creative);
+        bool deathClosePolicy =
+            !DamageWarningEmergencyCloseRequiredForAutomatedTest(true, 8f)
+            && DamageWarningEmergencyCloseRequiredForAutomatedTest(false, float.NaN)
+            && DamageWarningEmergencyCloseRequiredForAutomatedTest(true, 0f)
+            && DamageWarningEmergencyCloseRequiredForAutomatedTest(true, -1f)
+            && !DamageWarningEmergencyCloseRequiredForAutomatedTest(true, float.NaN)
+            && !DamageWarningEmergencyCloseRequiredForAutomatedTest(
+                true,
+                float.PositiveInfinity
+            );
         bool livePolicy = DamageWarningPolicyActive
             == DamageWarningPolicyForModeForAutomatedTest(mode);
 
@@ -803,7 +1231,7 @@ public sealed partial class ModernAtlasDialog
         // the overlay and the auto-close inert.
         SetDamageWarningModeOverrideForAutomatedTest(EnumGameMode.Creative);
         ResetDamageWarning();
-        TriggerDamageWarningForAutomatedTest(false);
+        TriggerDamageWarningForAutomatedTest();
         bool creativeSuppressed = !DamageWarningWouldRenderForAutomatedTest
             && !AutoCloseOnDamageActiveForAutomatedTest
             && IsOpened();
@@ -815,20 +1243,42 @@ public sealed partial class ModernAtlasDialog
         bool cheatStillWarns = DamageWarningPolicyActive;
 
         automatedSmokeTestCloseOnDamageBefore = config.CloseAtlasOnDamage;
+        automatedSmokeTestCloseOnDamageCaptured = true;
         config.CloseAtlasOnDamage = false;
 
+        // A repeat hit restarts and strengthens the episode, but must carry the
+        // visible alpha across the signal instead of blinking down to zero.
         ResetDamageWarning();
-        TriggerDamageWarningForAutomatedTest(false);
-        bool pulseActive = DamageWarningWouldRenderForAutomatedTest
-            && !DamageWarningLowHealthForAutomatedTest;
+        TriggerDamageWarningForAutomatedTest();
+        SetDamageWarningAnimationTimeForAutomatedTest(0.72f);
+        float repeatVignetteBefore = DamageWarningVignetteAlpha();
+        float repeatCaptionBefore = DamageWarningCaptionAlpha(repeatVignetteBefore);
+        TriggerDamageWarningForAutomatedTest();
+        float repeatVignetteAfter = DamageWarningVignetteAlpha();
+        float repeatCaptionAfter = DamageWarningCaptionAlpha(repeatVignetteAfter);
+        bool repeatHitContinuous = repeatVignetteBefore > 0.01f
+            && repeatVignetteAfter + 0.001f >= repeatVignetteBefore
+            && repeatCaptionAfter + 0.001f >= repeatCaptionBefore;
 
-        TriggerDamageWarningForAutomatedTest(true);
-        bool lowHealthActive = DamageWarningWouldRenderForAutomatedTest
-            && DamageWarningLowHealthForAutomatedTest;
+        ResetDamageWarning();
+        TriggerDamageWarningForAutomatedTest();
+        // The signal frame is intentionally quiet: the real render-time curve
+        // starts at zero and becomes visible only as its smooth attack begins.
+        bool pulseActive = !DamageWarningWouldRenderForAutomatedTest
+            && DamageWarningVignetteAlphaForAutomatedTest(
+                0.24f,
+                0.65f
+            ) > 0.002f
+            && !DamageWarningActiveForAutomatedTest;
 
-        // A capture must never bake the warning into its image.
+        // A capture must never bake the warning into its image. First seek to
+        // an inhale sample so this assertion cannot pass while the curve is
+        // still intentionally quiet on its signal frame.
+        SetDamageWarningAnimationTimeForAutomatedTest(0.72f);
+        bool visibleBeforeCapture = DamageWarningWouldRenderForAutomatedTest;
         pendingScreenshotRequest = true;
-        bool suppressedDuringCapture = !DamageWarningWouldRenderForAutomatedTest;
+        bool suppressedDuringCapture = visibleBeforeCapture
+            && !DamageWarningWouldRenderForAutomatedTest;
         pendingScreenshotRequest = false;
 
         // The overlay must be drawable, not merely flagged active.
@@ -839,40 +1289,46 @@ public sealed partial class ModernAtlasDialog
         bool stillInteractive = IsOpened() && CaptureAllInputs();
 
         bool passed = texturesReady
+            && animationCurve
             && policyRules
+            && deathClosePolicy
             && livePolicy
             && creativeSuppressed
             && cheatStillWarns
             && pulseActive
-            && lowHealthActive
+            && repeatHitContinuous
             && suppressedDuringCapture
             && clearedAfterReset
             && stillInteractive;
         if (!passed)
         {
             config.CloseAtlasOnDamage = automatedSmokeTestCloseOnDamageBefore;
+            automatedSmokeTestCloseOnDamageCaptured = false;
             SetDamageWarningModeOverrideForAutomatedTest(null);
             automatedSmokeTestDamageWarningPassed = false;
             capi.Logger.Error(
-                "[ModernAtlas] Automated damage-warning check failed: texturesReady={10}, mode={0}, rules={1}, live={2}, creativeSuppressed={3}, cheatStillWarns={4}, pulse={5}, lowHealth={6}, suppressedDuringCapture={7}, cleared={8}, interactive={9}.",
+                "[ModernAtlas] Automated damage-warning check failed: mode={0}, rules={1}, deathClosePolicy={2}, live={3}, creativeSuppressed={4}, cheatStillWarns={5}, pulse={6}, repeatHitContinuous={7}, suppressedDuringCapture={8}, cleared={9}, interactive={10}, texturesReady={11}, animation={12}.",
                 mode,
                 policyRules,
+                deathClosePolicy,
                 livePolicy,
                 creativeSuppressed,
                 cheatStillWarns,
                 pulseActive,
-                lowHealthActive,
+                repeatHitContinuous,
                 suppressedDuringCapture,
                 clearedAfterReset,
                 stillInteractive,
-                texturesReady
+                texturesReady,
+                animationCurve
             );
             return false;
         }
 
         capi.Logger.Notification(
-            "[ModernAtlas] Automated damage-warning check passed: actual world mode={0}; resolved Creative suppresses the overlay and auto-close, Survival with accepted Cheat Mode keeps warning, the pulse and LOW HEALTH states render, a capture stays clean and input remains live.",
-            mode
+            "[ModernAtlas] Automated damage-warning check passed: actual world mode={0}; samples {1}; signal and caption reach true transparent breath troughs, dead/zero-health players queue an unconditional deferred close, resolved Creative suppresses normal damage warnings, Survival with accepted Cheat Mode keeps warning, and captures stay clean.",
+            mode,
+            animationDiagnostic
         );
         return true;
     }
@@ -890,6 +1346,7 @@ public sealed partial class ModernAtlasDialog
                 bool closed = !IsOpened();
                 bool reopened = closed && TryOpen();
                 config.CloseAtlasOnDamage = automatedSmokeTestCloseOnDamageBefore;
+                automatedSmokeTestCloseOnDamageCaptured = false;
                 SetDamageWarningModeOverrideForAutomatedTest(null);
                 ResetDamageWarning();
                 automatedSmokeTestDamageWarningPassed = wasOpen && closed && reopened;
@@ -3311,7 +3768,17 @@ public sealed partial class ModernAtlasDialog
                 )
                     ? configuredPath[..^4]
                     : configuredPath;
-                TrySaveAutomatedSmokeScreenshot($"{layerPrefix}-{layerSuffix}.png");
+                bool saved = TrySaveAutomatedSmokeScreenshot(
+                    $"{layerPrefix}-{layerSuffix}.png"
+                );
+                if (string.Equals(
+                    layerSuffix,
+                    "damage-warning-real",
+                    StringComparison.Ordinal
+                ))
+                {
+                    automatedRealDamageSmokeScreenshotSaved = saved;
+                }
             }
             return;
         }
@@ -3884,6 +4351,11 @@ public sealed partial class ModernAtlasDialog
         }
 
         automatedSmokeTestPreferencesCaptured = false;
+        if (automatedSmokeTestCloseOnDamageCaptured)
+        {
+            config.CloseAtlasOnDamage = automatedSmokeTestCloseOnDamageBefore;
+            automatedSmokeTestCloseOnDamageCaptured = false;
+        }
         bool accessChanged = cheatModeEnabled != automatedOriginalCheatModeEnabled;
         cheatModeEnabled = automatedOriginalCheatModeEnabled;
         automatedOriginalScreenshotFilters.Restore(config);
