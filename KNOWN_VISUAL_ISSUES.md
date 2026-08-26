@@ -69,6 +69,38 @@ The exact candidate was captured with terrain visible at yaw 0 and 180, pitch
 at the owner's location is still pending, so this issue remains open until
 that capture confirms the visual result.
 
+## Open: dark water corner from fitting rejected frontier columns
+
+The owner's captures from 2026-08-26 show a dark stepped corner and one
+vertical terrain stub entering the lower atlas viewport as the camera zooms.
+The matching log reports 1,561 completed mesh columns but only 1,049 columns
+inside the atlas frustum and complete-view boundary, with no missing client
+meshes. Camera fitting was measuring `consideredTerrainColumns`, including
+columns the conservative player-anchored complete-view boundary later rejects.
+
+The current test change limits camera-footprint measurement to the same safe
+chunk square used by the renderer. It does not enlarge disclosure, request
+chunks or synthesize water. Owner confirmation from the affected zoom and
+camera angle is still pending.
+
+The same captures also exposed an independent shallow-angle liquid defect:
+real side and underside water faces could pass the stable-liquid color draw but
+were excluded from the depth-only coverage used by the final resolver. The
+current test change admits those existing non-lava mesh faces only inside the
+same loaded-column, complete-view, disclosure-radius and three-block exterior
+guards. The absorption veil remains restricted to top faces. Exact horizontal
+views can still reveal the absence of block geometry below those real faces;
+ModernAtlas does not invent an underwater volume or reuse player-camera fog.
+
+The 5-degree zoom smoke diagnostic also confirmed that liquid admission was
+coupled to the preceding opaque `CullNormal` result even though liquids use
+their own `CullInstant` projection. The current test package removes only that
+coupling: a liquid pool still has to pass its own frustum, complete-view,
+player-disclosure, supported-surface and dependent-material guards and belong
+to a client chunk loaded from the server. The automated captures remain
+centered on land at maximum zoom, so owner confirmation over the affected
+water remains required.
+
 ## 1. Central dark band in the tiled capture
 
 The stitched tiled screenshot shows a hard vertical dark band near the middle

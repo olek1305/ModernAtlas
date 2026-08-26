@@ -335,18 +335,34 @@ public sealed partial class ModernAtlasDialog
 
         int chunkSize = GlobalConstants.ChunkSize;
         int radius = GameViewDistance;
-        int minimumChunkX = (int)Math.Floor(
-            (capi.World.Player.Entity.Pos.X - radius) / chunkSize
+        int playerChunkX = (int)Math.Floor(
+            capi.World.Player.Entity.Pos.X / chunkSize
         );
-        int maximumChunkX = (int)Math.Floor(
-            (capi.World.Player.Entity.Pos.X + radius) / chunkSize
+        int playerChunkZ = (int)Math.Floor(
+            capi.World.Player.Entity.Pos.Z / chunkSize
         );
-        int minimumChunkZ = (int)Math.Floor(
-            (capi.World.Player.Entity.Pos.Z - radius) / chunkSize
-        );
-        int maximumChunkZ = (int)Math.Floor(
-            (capi.World.Player.Entity.Pos.Z + radius) / chunkSize
-        );
+        int completeChunkRadius =
+            ExactChunkRendererAdapter.CalculateCompleteViewChunkRadius(radius);
+        int minimumChunkX = completeChunkRadius > 0
+            ? playerChunkX - completeChunkRadius
+            : (int)Math.Floor(
+                (capi.World.Player.Entity.Pos.X - radius) / chunkSize
+            );
+        int maximumChunkX = completeChunkRadius > 0
+            ? playerChunkX + completeChunkRadius
+            : (int)Math.Floor(
+                (capi.World.Player.Entity.Pos.X + radius) / chunkSize
+            );
+        int minimumChunkZ = completeChunkRadius > 0
+            ? playerChunkZ - completeChunkRadius
+            : (int)Math.Floor(
+                (capi.World.Player.Entity.Pos.Z - radius) / chunkSize
+            );
+        int maximumChunkZ = completeChunkRadius > 0
+            ? playerChunkZ + completeChunkRadius
+            : (int)Math.Floor(
+                (capi.World.Player.Entity.Pos.Z + radius) / chunkSize
+            );
         int verticalChunkCount = Math.Max(
             1,
             (capi.World.BlockAccessor.MapSizeY + chunkSize - 1) / chunkSize
@@ -359,6 +375,11 @@ public sealed partial class ModernAtlasDialog
         float measuredForwardExtent = 0;
         bool found = false;
 
+        // consideredTerrainColumns also contains completed mesh columns that
+        // the conservative complete-view boundary rejects. Fitting the camera
+        // to those columns exposes the rejected corner as dark vertical chunk
+        // walls when the user zooms. Measure only the same player-anchored
+        // safe square that the renderer is allowed to publish.
         IReadOnlyCollection<(int X, int Z)> completedColumns = exactChunkRenderer
             ?.CompletedTerrainColumns ?? Array.Empty<(int X, int Z)>();
         foreach ((int X, int Z) column in completedColumns)

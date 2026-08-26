@@ -3800,14 +3800,35 @@ public sealed partial class ModernAtlasDialog
             }
             automatedSmokeTestZoomBeforeMaximum = targetZoom;
             automatedSmokeTestPitchBeforeMaximum = targetPitchDegrees;
-            targetPitchDegrees = 72;
-            pitchDegrees = 72;
+            // Keep the historical 72-degree border probe by default, while
+            // allowing MODERNATLAS_SMOKE_PITCH to select the same bounded
+            // camera angle for the entire border/zoom sequence.
+            float smokeProbePitch = 72;
+            string? forcedSmokePitch = Environment.GetEnvironmentVariable(
+                SmokePitchEnvironmentVariable
+            );
+            if (float.TryParse(
+                forcedSmokePitch,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out float parsedSmokePitch
+            ))
+            {
+                smokeProbePitch = Math.Clamp(
+                    parsedSmokePitch,
+                    MinimumPitchDegrees,
+                    86
+                );
+            }
+            targetPitchDegrees = smokeProbePitch;
+            pitchDegrees = smokeProbePitch;
             zoom = targetZoom;
             automatedSmokeTestBorderTopDownStartedSeconds =
                 automatedSmokeTestElapsedSeconds;
             automatedSmokeTestBorderTopDownPending = true;
             capi.Logger.Notification(
-                "[ModernAtlas] Automated smoke test is holding a fitted top-down standard-world view for border inspection before layers and Cave Mode."
+                "[ModernAtlas] Automated smoke test is holding the fitted {0:0.0}-degree standard-world view for border inspection before layers and Cave Mode.",
+                smokeProbePitch
             );
             return;
         }
@@ -3838,6 +3859,10 @@ public sealed partial class ModernAtlasDialog
             }
             ApplyZoomWheel(1, false);
             ApplyZoomWheel(1, false);
+            // Coverage diagnostics are intentionally one-shot. Reset them
+            // before the next render so this partial-zoom frame publishes its
+            // own terrain and liquid admission counts.
+            exactChunkRenderer?.ResetTerrainCoverageDiagnostics();
             // The automated check validates a settled zoom level. Snap only
             // its synthetic wheel input to the target so live world frames
             // and newly completed chunk meshes cannot make the two-second
@@ -3880,6 +3905,9 @@ public sealed partial class ModernAtlasDialog
             }
             targetZoom = MaximumZoomIn;
             zoom = MaximumZoomIn;
+            // The maximum-zoom frame must likewise report fresh opaque and
+            // liquid coverage rather than reusing the opening-frame log.
+            exactChunkRenderer?.ResetTerrainCoverageDiagnostics();
             automatedSmokeTestMaximumZoomStartedSeconds =
                 automatedSmokeTestElapsedSeconds;
             automatedSmokeTestMaximumZoomPending = true;

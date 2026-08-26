@@ -5,7 +5,6 @@ using System.Globalization;
 using System.IO;
 using System.Reflection;
 using HarmonyLib;
-using OpenTK.Graphics.OpenGL;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Config;
@@ -263,11 +262,15 @@ internal sealed partial class ExactChunkRendererAdapter
         AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
         try
         {
-        render.CurrentActiveShader?.Stop();
-        render.GLEnableDepthTest();
-        render.GLDepthMask(false);
-        render.GlToggleBlend(true, EnumBlendMode.Standard);
-        render.GlDisableCullFace();
+            render.CurrentActiveShader?.Stop();
+            render.GLEnableDepthTest();
+            // The color pass runs first and samples the original opaque depth
+            // without writing it. The optional depth pass below then adds
+            // verified liquid depth for the final atlas resolver.
+            render.GlColorMask(true, true, true, true);
+            render.GLDepthMask(false);
+            render.GlToggleBlend(true, EnumBlendMode.Standard);
+            render.GlDisableCullFace();
 
         activeLiquidShader.Use();
         activeLiquidShader.UniformMatrix("projectionMatrix", projection);
@@ -308,8 +311,14 @@ internal sealed partial class ExactChunkRendererAdapter
             && !DeveloperDisableCaveFilter
             && surfaceHeightTexture?.Ready == true
             && surfaceHeightTexture.TextureId > 0;
+        bool surfaceCoverageAvailable = surfaceHeightTexture?.Ready == true
+            && surfaceHeightTexture.TextureId > 0;
         activeLiquidShader.Uniform("atlasHideCaves", applySurfaceFilter ? 1 : 0);
-        if (applySurfaceFilter && surfaceHeightTexture != null)
+        activeLiquidShader.Uniform(
+            "atlasSurfaceCoverageEnabled",
+            surfaceCoverageAvailable ? 1 : 0
+        );
+        if (surfaceCoverageAvailable && surfaceHeightTexture != null)
         {
             activeLiquidShader.BindTexture2D(
                 "atlasSurfaceHeightTex",
@@ -398,14 +407,27 @@ internal sealed partial class ExactChunkRendererAdapter
         rejectedLiquidLocationCount = 0;
         atlasLiquidAdapter = this;
         atlasLiquidVisibilityOverride = true;
-        try
+
+        void RenderLiquidManagers(bool collectStats)
         {
-            for (int index = 0; index < managers.Length && index < textureIds.Length; index++)
+            for (int index = 0;
+                index < managers.Length && index < textureIds.Length;
+                index++)
             {
                 if (managers[index] == null) continue;
-                activeManagers++;
-                activeLiquidShader.BindTexture2D("terrainTex", textureIds[index], 0);
-                managers[index].Render(cameraPosition, "origin", EnumFrustumCullMode.CullInstant);
+                if (collectStats) activeManagers++;
+                activeLiquidShader.BindTexture2D(
+                    "terrainTex",
+                    textureIds[index],
+                    0
+                );
+                managers[index].Render(
+                    cameraPosition,
+                    "origin",
+                    EnumFrustumCullMode.CullInstant
+                );
+                if (!collectStats) continue;
+
                 long usedVideoMemory = 0;
                 long managerRenderedTriangles = 0;
                 long managerAllocatedTriangles = 0;
@@ -418,15 +440,53 @@ internal sealed partial class ExactChunkRendererAdapter
                 allocatedTriangles += managerAllocatedTriangles;
             }
         }
-        finally
-        {
-            atlasLiquidVisibilityOverride = false;
-            atlasLiquidAdapter = null;
-        }
-        activeLiquidShader.Stop();
-        render.GLDepthMask(true);
-        render.GlToggleBlend(false, EnumBlendMode.Standard);
-        render.GlEnableCullFace();
+
+            try
+            {
+                // First add a bounded, world-aligned water-depth veil over
+                // the already-composed OIT/terrain result. It uses the real
+                // liquid mesh footprint, while the shader keeps absorption
+                // top-only by rejecting lava, sides and contained liquids.
+                activeLiquidShader.Uniform(
+                    "atlasLiquidDepthAbsorptionPass",
+                    1
+                );
+                activeLiquidShader.Uniform("atlasLiquidDepthCoveragePass", 0);
+                render.GlColorMask(true, true, true, true);
+                render.GLDepthMask(false);
+                render.GlToggleBlend(true, EnumBlendMode.Standard);
+                RenderLiquidManagers(false);
+
+                // The authored registered surface follows the absorption
+                // veil. It still samples native texture frames and keeps its
+                // source alpha unchanged.
+                activeLiquidShader.Uniform(
+                    "atlasLiquidDepthAbsorptionPass",
+                    0
+                );
+                activeLiquidShader.Uniform("atlasLiquidDepthCoveragePass", 0);
+                render.GlColorMask(true, true, true, true);
+                render.GLDepthMask(false);
+                render.GlToggleBlend(true, EnumBlendMode.Standard);
+                RenderLiquidManagers(true);
+
+                // Add resolver-visible depth from the same real liquid mesh.
+                // This is deliberately independent of the color pass: real
+                // non-lava side/underside faces are retained, while lava and
+                // unavailable surface columns stay rejected. The pass never
+                // samples opaqueDepthTex.
+                activeLiquidShader.Uniform("atlasLiquidDepthCoveragePass", 1);
+                render.GlColorMask(false, false, false, false);
+                render.GLDepthMask(true);
+                render.GlToggleBlend(false, EnumBlendMode.Standard);
+                RenderLiquidManagers(false);
+                activeLiquidShader.Uniform("atlasLiquidDepthCoveragePass", 0);
+            }
+            finally
+            {
+                atlasLiquidVisibilityOverride = false;
+                atlasLiquidAdapter = null;
+            }
 
         if (!loggedStableLiquidDiagnostics)
         {
@@ -445,6 +505,17 @@ internal sealed partial class ExactChunkRendererAdapter
         }
         finally
         {
+            try
+            {
+                render.GlColorMask(true, true, true, true);
+                render.GLDepthMask(true);
+                render.GlToggleBlend(false, EnumBlendMode.Standard);
+                render.GlEnableCullFace();
+            }
+            catch
+            {
+                // Preserve teardown if the context has already gone away.
+            }
             renderState.RestoreCapturedState();
         }
     }
@@ -455,13 +526,16 @@ internal sealed partial class ExactChunkRendererAdapter
         (int chunkX, int chunkY, int chunkZ) chunk = GetMeshChunk(location, chunkSize);
         if (liquidChunkCompletion.TryGetValue(chunk, out bool cached)) return cached;
 
-        // Match liquids to a visible, completed terrain column rather than
-        // demanding same-height terrain and a fully loaded 3x3 guard band.
-        // Ocean floors may be several vertical chunks below their surface,
-        // and the old guard band removed valid edge water before terrain.
-        bool completed = visibleTerrainColumns.Contains((chunk.chunkX, chunk.chunkZ))
-            && capi.World.BlockAccessor.GetChunk(chunk.chunkX, chunk.chunkY, chunk.chunkZ)
-                is IClientChunk { LoadedFromServer: true };
+        // The visibility hook has already applied the atlas frustum, complete
+        // boundary, player disclosure, supported-surface and dependent-
+        // material guards. Do not couple liquid visibility to opaque
+        // CullNormal results: zoom/yaw can diverge from the liquid CullInstant
+        // projection even when this loaded liquid mesh is still admissible.
+        bool completed = capi.World.BlockAccessor.GetChunk(
+                chunk.chunkX,
+                chunk.chunkY,
+                chunk.chunkZ
+            ) is IClientChunk { LoadedFromServer: true };
         liquidChunkCompletion[chunk] = completed;
         if (completed) allowedLiquidLocationCount++;
         else rejectedLiquidLocationCount++;
