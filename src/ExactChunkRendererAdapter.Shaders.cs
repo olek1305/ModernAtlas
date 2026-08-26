@@ -311,11 +311,25 @@ internal sealed partial class ExactChunkRendererAdapter
         if (atlasFilterInjectionFailures.Contains(program)) return false;
 
         IShaderProgram shader = capi.Render.GetEngineShader(program);
-        if (shader.Disposed || shader.FragmentShader == null) return false;
+        bool injectDecorationDepth =
+            program == EnumShaderProgram.Chunkopaque
+            || program == EnumShaderProgram.Chunktransparent;
+        if (shader.Disposed
+            || shader.FragmentShader == null
+            || (injectDecorationDepth && shader.VertexShader == null))
+        {
+            return false;
+        }
         string source = shader.FragmentShader.Code ?? "";
+        string vertexSource = shader.VertexShader?.Code ?? "";
         if (atlasFilterShaders.TryGetValue(program, out AtlasFilterShaderState? state)
             && ReferenceEquals(shader, state.Shader)
-            && source.Contains(AtlasFilterMarker, StringComparison.Ordinal))
+            && source.Contains(AtlasFilterMarker, StringComparison.Ordinal)
+            && (!injectDecorationDepth
+                || vertexSource.Contains(
+                    AtlasVertexFilterMarker,
+                    StringComparison.Ordinal
+                )))
         {
             return shader.HasUniform("atlasHideCaves")
                 && shader.HasUniform("atlasBoundaryEnabled")
@@ -334,6 +348,24 @@ internal sealed partial class ExactChunkRendererAdapter
                 && shader.HasUniform("atlasRequireOpaqueDepth");
         }
 
+        // An engine-owned rebuild can restore one shader stage before the
+        // other. Reassemble the pair from the captured native sources before
+        // injecting again; wrapping a still-injected fragment or vertex stage
+        // a second time would leave the normal-world branch ambiguous.
+        if (state != null
+            && ReferenceEquals(shader, state.Shader)
+            && injectDecorationDepth
+            && (source.Contains(AtlasFilterMarker, StringComparison.Ordinal)
+                != vertexSource.Contains(
+                    AtlasVertexFilterMarker,
+                    StringComparison.Ordinal
+                )))
+        {
+            RestoreAtlasFilterSource(program);
+            source = shader.FragmentShader.Code ?? "";
+            vertexSource = shader.VertexShader?.Code ?? "";
+        }
+
         if (state != null && !ReferenceEquals(shader, state.Shader))
         {
             RestoreAtlasFilterSource(program);
@@ -344,11 +376,17 @@ internal sealed partial class ExactChunkRendererAdapter
             supportsBoundaryColor,
             program == EnumShaderProgram.Chunktopsoil
         );
-        if (injected == null)
+        string? injectedVertex = injectDecorationDepth
+            ? InjectAtlasDecorationDepth(
+                vertexSource,
+                program == EnumShaderProgram.Chunktransparent
+            )
+            : null;
+        if (injected == null || (injectDecorationDepth && injectedVertex == null))
         {
             atlasFilterInjectionFailures.Add(program);
             capi.Logger.Error(
-                "[ModernAtlas] Could not locate the main function in engine shader {0}.",
+                "[ModernAtlas] Could not locate the atlas injection point in engine shader {0}.",
                 program
             );
             return false;
@@ -356,9 +394,17 @@ internal sealed partial class ExactChunkRendererAdapter
 
         capi.Render.CurrentActiveShader?.Stop();
         shader.FragmentShader.Code = injected;
+        if (injectDecorationDepth && shader.VertexShader != null)
+        {
+            shader.VertexShader.Code = injectedVertex;
+        }
         if (!shader.Compile())
         {
             shader.FragmentShader.Code = source;
+            if (injectDecorationDepth && shader.VertexShader != null)
+            {
+                shader.VertexShader.Code = vertexSource;
+            }
             shader.Compile();
             atlasFilterInjectionFailures.Add(program);
             capi.Logger.Error(
@@ -368,7 +414,11 @@ internal sealed partial class ExactChunkRendererAdapter
             return false;
         }
 
-        atlasFilterShaders[program] = new AtlasFilterShaderState(shader, source);
+        atlasFilterShaders[program] = new AtlasFilterShaderState(
+            shader,
+            source,
+            vertexSource
+        );
         return shader.HasUniform("atlasHideCaves")
             && shader.HasUniform("atlasBoundaryEnabled")
             && shader.HasUniform("atlasDisclosureCenterXZ")
@@ -504,18 +554,106 @@ internal sealed partial class ExactChunkRendererAdapter
     private void RestoreAtlasFilterSource(EnumShaderProgram program)
     {
         if (!atlasFilterShaders.Remove(program, out AtlasFilterShaderState? state)) return;
-        if (state.Shader.FragmentShader != null
+        bool restoreFragment = state.Shader.FragmentShader != null
             && state.Shader.FragmentShader.Code?.Contains(
                 AtlasFilterMarker,
                 StringComparison.Ordinal
-            ) == true)
+            ) == true;
+        bool restoreVertex = state.Shader.VertexShader != null
+            && state.Shader.VertexShader.Code?.Contains(
+                AtlasVertexFilterMarker,
+                StringComparison.Ordinal
+            ) == true;
+        if (restoreFragment || restoreVertex)
         {
             // The compiled program is safe between atlas passes because its
             // master atlas gate is reset to zero. Restoring the source still
             // ensures a later engine-owned shader rebuild compiles the
             // unmodified game shader.
-            state.Shader.FragmentShader.Code = state.OriginalFragmentCode;
+            if (restoreFragment && state.Shader.FragmentShader != null)
+            {
+                state.Shader.FragmentShader.Code = state.OriginalFragmentCode;
+            }
+            if (restoreVertex && state.Shader.VertexShader != null)
+            {
+                state.Shader.VertexShader.Code = state.OriginalVertexCode;
+            }
         }
+    }
+
+    private static string? InjectAtlasDecorationDepth(
+        string source,
+        bool transparent
+    )
+    {
+        if (source.Contains(AtlasVertexFilterMarker, StringComparison.Ordinal))
+        {
+            return source;
+        }
+
+        string nativeCondition = transparent
+            ? "if (gl_Position.z > 0)"
+            : "if (gl_Position.z > -1)";
+        string nativeExpression = transparent
+            ? "gl_Position.w += zOffset * 0.00025 / max(3, gl_Position.z * 0.05);"
+            : "gl_Position.w += zOffset * 0.00025 / ((gl_Position.z + 3) * 0.05);";
+        int conditionIndex = source.LastIndexOf(
+            nativeCondition,
+            StringComparison.Ordinal
+        );
+        if (conditionIndex < 0) return null;
+
+        int expressionIndex = source.IndexOf(
+            nativeExpression,
+            conditionIndex,
+            StringComparison.Ordinal
+        );
+        if (expressionIndex < 0) return null;
+
+        int blockEnd = source.IndexOf('}', expressionIndex);
+        if (blockEnd < 0) return null;
+        string nativeBlock = source.Substring(
+            conditionIndex,
+            blockEnd - conditionIndex + 1
+        );
+        string bias = AtlasDecorationDepthBiasNdc.ToString(
+            "0.000000",
+            CultureInfo.InvariantCulture
+        );
+        string maximum = AtlasDecorationDepthBiasMaximum.ToString(
+            "0.0",
+            CultureInfo.InvariantCulture
+        );
+        string replacement =
+            "if (atlasRenderingEnabled <= 0)\n"
+            + "{\n"
+            // Keep the exact engine expression in the ordinary-world branch.
+            + nativeBlock
+            + "\n}\n"
+            + "else\n"
+            + "{\n"
+            + "    float modernAtlasDecorationZOffset = min(\n"
+            + "        float((renderFlags & ZOffsetBitMask) >> 8),\n"
+            + "        " + maximum + "\n"
+            + "    );\n"
+            + "    gl_Position.z -= modernAtlasDecorationZOffset\n"
+            + "        * " + bias + " * gl_Position.w;\n"
+            + "}";
+        string injected = source.Remove(
+            conditionIndex,
+            blockEnd - conditionIndex + 1
+        ).Insert(conditionIndex, replacement);
+        int mainIndex = injected.LastIndexOf(
+            "void main",
+            StringComparison.Ordinal
+        );
+        if (mainIndex < 0) return null;
+        return injected.Insert(
+            mainIndex,
+            "uniform int atlasRenderingEnabled;\n"
+                + AtlasVertexFilterMarker
+                + "\n\n"
+        );
     }
 
     private static string? InjectAtlasFilter(
@@ -618,7 +756,6 @@ internal sealed partial class ExactChunkRendererAdapter
                 + "bool modernAtlasIsWindVegetation();\n"
                 + "float modernAtlasAlphaTestThreshold(float alphaValue, float baseThreshold);\n"
                 + "vec4 modernAtlasApplyFogAndDirectionalWithNormal(vec4 targetColor, float fogAmount, vec3 surfaceNormal, float normalShadeIntensity, float minimumNormalShade, vec3 fragmentWorldPosition);\n"
-                + "void modernAtlasClampMinimumBrightness(inout vec4 targetColor);\n"
                 + "vec4 modernAtlasVegetationDebugColor(vec4 color, float alphaValue, float threshold, float lodFadeValue);\n\n"
         );
         const string lod0FadeTerm = "- lod0Fade";
@@ -760,9 +897,14 @@ internal sealed partial class ExactChunkRendererAdapter
                 }
             }
         }
-        string atlasBrightnessCode = supportsBoundaryColor
-            ? "    modernAtlasClampMinimumBrightness(outColor);\n"
-            : "";
+        // Keep the atlas brightness floor in the scalar lighting term above
+        // for shaders that use the native min(b, nb) path.
+        // Scaling a dark final RGB value by luminance amplifies tiny channel
+        // remnants in mod textures into saturated red/green/blue pixels. The
+        // scalar floor avoids an overly dark lighting multiplier without
+        // changing sampled texture hue, so no post-color brightness lift is
+        // emitted here.
+        const string atlasBrightnessCode = "";
         string mapLayerCode = supportsBoundaryColor
             ? """
     modernAtlasApplyMapLayer(outColor, modernAtlasAbsoluteWorldPosition);
@@ -1012,33 +1154,6 @@ uniform sampler2D atlasOreMapTex;
 uniform sampler2D atlasStoneTex;
 uniform int atlasHideVegetation;
 uniform sampler2D atlasVegetationMaskTex;
-
-void modernAtlasClampMinimumBrightness(inout vec4 targetColor)
-{
-    if (atlasFilteringEnabled <= 0) return;
-
-    float minimumBrightness = clamp(
-        atlasMinimumTerrainBrightness,
-        0.0,
-        1.0
-    );
-    float luminance = dot(
-        max(targetColor.rgb, vec3(0.0)),
-        vec3(0.2126, 0.7152, 0.0722)
-    );
-    if (luminance >= minimumBrightness) return;
-    if (luminance > 0.001)
-    {
-        targetColor.rgb *= minimumBrightness / luminance;
-    }
-    else
-    {
-        // A block with no native vertex light is still real loaded geometry.
-        // Use the same subdued atlas floor as the cave occlusion material so
-        // it cannot become a camera-dependent black strip.
-        targetColor.rgb = vec3(minimumBrightness);
-    }
-}
 
 void modernAtlasApplyMapLayer(
     inout vec4 targetColor,
@@ -1414,6 +1529,152 @@ void main()
 """ + atlasBrightnessCode + mapLayerCode + """
 }
 """;
+    }
+
+    internal static string? ValidateAtlasBrightnessPolicy()
+    {
+        // This source fragment is deliberately small: it exercises the same
+        // injection function used by the live chunk shaders and proves that
+        // opaque atlas lighting keeps its scalar floor while emitting no
+        // channel-scaling post-pass.
+        const string source = """
+#version 330 core
+uniform sampler2D terrainTex;
+in vec2 uv;
+in vec4 rgba;
+in vec4 worldPos;
+in float nb;
+layout(location = 0) out vec4 outColor;
+void main()
+{
+    vec4 texColor = texture(terrainTex, uv);
+    float b = getBrightnessFromShadowMap();
+    outColor = applyFogAndShadowFromBrightness(texColor, 0.0, min(b, nb), worldPos.xyz);
+}
+""";
+
+        string? injected = InjectAtlasFilter(source, true, false);
+        if (injected == null)
+        {
+            return "Atlas brightness policy fixture was not injectable.";
+        }
+        if (injected.Contains(
+                "modernAtlasClampMinimumBrightness",
+                StringComparison.Ordinal
+            ))
+        {
+            return "Atlas brightness injection still contains the channel-scaling post-pass.";
+        }
+        if (!injected.Contains(
+                "max(min(b, nb), atlasFilteringEnabled > 0 ? atlasMinimumTerrainBrightness",
+                StringComparison.Ordinal
+            ))
+        {
+            return "Atlas brightness injection lost the scalar lighting floor.";
+        }
+        return null;
+    }
+
+    internal static string? ValidateAtlasDecorationDepthBiasPolicy()
+    {
+        if (!double.IsFinite(AtlasDecorationDepthBiasNdc)
+            || AtlasDecorationDepthBiasNdc <= 0d
+            || AtlasDecorationDepthBiasNdc > 0.00001d
+            || AtlasDecorationDepthBiasMaximum < 1
+            || AtlasDecorationDepthBiasMaximum > 4)
+        {
+            return "Atlas decoration depth bias is outside its bounded range.";
+        }
+
+        const string opaqueFixture = """
+#version 330 core
+flat in int renderFlags;
+void main(void)
+{
+    gl_Position = vec4(0.0);
+    if (gl_Position.z > -1) {
+        int zOffset = (renderFlags & ZOffsetBitMask) >> 8;
+        gl_Position.w += zOffset * 0.00025 / ((gl_Position.z + 3) * 0.05);
+    }
+}
+""";
+        const string transparentFixture = """
+#version 330 core
+flat in int renderFlags;
+void main(void)
+{
+    gl_Position = vec4(0.0);
+    if (gl_Position.z > 0) {
+        int zOffset = (renderFlags & ZOffsetBitMask) >> 8;
+        gl_Position.w += zOffset * 0.00025 / max(3, gl_Position.z * 0.05);
+    }
+}
+""";
+        string? opaque = InjectAtlasDecorationDepth(opaqueFixture, false);
+        string? transparent = InjectAtlasDecorationDepth(
+            transparentFixture,
+            true
+        );
+        if (opaque == null || transparent == null)
+        {
+            return "Atlas decoration depth injection could not find both native zOffset branches.";
+        }
+
+        string bias = AtlasDecorationDepthBiasNdc.ToString(
+            "0.000000",
+            CultureInfo.InvariantCulture
+        );
+        string maximum = AtlasDecorationDepthBiasMaximum.ToString(
+            "0.0",
+            CultureInfo.InvariantCulture
+        );
+        foreach ((string source, string nativeExpression) in new[]
+        {
+            (
+                opaque,
+                "gl_Position.w += zOffset * 0.00025 / ((gl_Position.z + 3) * 0.05);"
+            ),
+            (
+                transparent,
+                "gl_Position.w += zOffset * 0.00025 / max(3, gl_Position.z * 0.05);"
+            )
+        })
+        {
+            int gateIndex = source.IndexOf(
+                "if (atlasRenderingEnabled <= 0)",
+                StringComparison.Ordinal
+            );
+            if (gateIndex < 0)
+            {
+                return "Atlas decoration depth injection lost its atlas gate.";
+            }
+            int elseIndex = source.IndexOf("else", gateIndex, StringComparison.Ordinal);
+            int nativeIndex = source.IndexOf(
+                nativeExpression,
+                gateIndex,
+                StringComparison.Ordinal
+            );
+            if (gateIndex < 0
+                || elseIndex < 0
+                || nativeIndex < gateIndex
+                || nativeIndex > elseIndex
+                || !source.Contains(
+                    "gl_Position.z -= modernAtlasDecorationZOffset",
+                    StringComparison.Ordinal
+                )
+                || !source.Contains(
+                    "* " + bias + " * gl_Position.w",
+                    StringComparison.Ordinal
+                )
+                || !source.Contains(
+                    "        " + maximum,
+                    StringComparison.Ordinal
+                ))
+            {
+                return "Atlas decoration depth injection lost its gated native expression or bounded NDC bias.";
+            }
+        }
+        return null;
     }
 
 }

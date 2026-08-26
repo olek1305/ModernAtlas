@@ -42,7 +42,6 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     private const string SmokeScreenshotEnvironmentVariable =
         "MODERNATLAS_SMOKE_SCREENSHOT";
     private const float AutomatedFinalScreenshotMarginSeconds = 0.05f;
-    private const long OrdinaryWorldSnapshotIntervalMilliseconds = 500;
     private const int OrdinaryWorldSnapshotDownsampleFactor = 4;
 
     private readonly Func<bool> prepareAtlasResources;
@@ -51,12 +50,11 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     private readonly AtlasSoundController soundController;
     private LoadedTexture solidTexture;
     // The transition never samples the live world while it is visible. It
-    // presents this atlas-owned, throttled readback instead. Two textures make
+    // presents this atlas-owned opening-time readback instead. Two textures make
     // a refresh transactional: a failed upload leaves the previous complete
     // snapshot available for the next opening or closing frame.
     private LoadedTexture? ordinaryWorldSnapshotTexture;
     private LoadedTexture? ordinaryWorldSnapshotStagingTexture;
-    private long lastOrdinaryWorldSnapshotMilliseconds = long.MinValue;
     private bool loggedOrdinaryWorldSnapshot;
     // The last complete ordinary-world image stays locked from the opening
     // hotkey through the atlas GUI and the complete closing animation. An
@@ -129,6 +127,17 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     private bool cameraRestored;
     private bool disposed;
     private float[]? localPerspectiveProjection;
+    private readonly Func<AtlasPerformanceMode>? performanceModeProvider;
+    private long ordinaryWorldSnapshotAttemptCount;
+    private long ordinaryWorldSnapshotSuccessCount;
+    private long ordinaryWorldSnapshotFailureCount;
+    private long ordinaryWorldSnapshotSkippedByModeCount;
+    private double ordinaryWorldSnapshotTotalMilliseconds;
+    private double ordinaryWorldSnapshotMaximumMilliseconds;
+    private int ordinaryWorldSnapshotLastSourceWidth;
+    private int ordinaryWorldSnapshotLastSourceHeight;
+    private int ordinaryWorldSnapshotLastTargetWidth;
+    private int ordinaryWorldSnapshotLastTargetHeight;
 
     public override string ToggleKeyCombinationCode => "";
     public override EnumDialogType DialogType => EnumDialogType.HUD;
@@ -141,6 +150,8 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     public double RenderOrder => 0.39;
     public int RenderRange => int.MaxValue;
     public bool IsClosing => closing;
+    internal long OrdinaryWorldSnapshotAttemptCount =>
+        ordinaryWorldSnapshotAttemptCount;
 
     public void SetRemoteAnimation(string playerUid, AtlasScrollPhase phase)
     {
@@ -164,7 +175,8 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         Func<bool> prepareAtlasResources,
         Func<IShaderProgram?> getScrollShader,
         Action<AtlasScrollPhase> publishAnimationPhase,
-        AtlasSoundController soundController
+        AtlasSoundController soundController,
+        Func<AtlasPerformanceMode>? performanceModeProvider = null
     ) : base(capi)
     {
         this.captureNormalWorldBackground = captureNormalWorldBackground;
@@ -172,46 +184,21 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         this.getScrollShader = getScrollShader;
         this.publishAnimationPhase = publishAnimationPhase;
         this.soundController = soundController;
+        this.performanceModeProvider = performanceModeProvider;
         solidTexture = new LoadedTexture(capi);
         seraphForearms = new SeraphForearmRenderer(capi);
     }
 
-    /// <summary>
-    /// The ordinary-world AfterBlit renderer calls this while no atlas dialog
-    /// or transition owns the screen. The snapshot is deliberately refreshed
-    /// only every half second so the readback cannot become a per-frame cost.
-    /// </summary>
-    internal bool ShouldRefreshOrdinaryWorldSnapshot()
-    {
-        if (disposed || IsOpened() || ordinaryWorldSnapshotLocked) return false;
-        if (capi.Render.FrameWidth <= 0 || capi.Render.FrameHeight <= 0)
-        {
-            return false;
-        }
-
-        try
-        {
-            if (capi.World?.Player?.Entity == null) return false;
-        }
-        catch
-        {
-            return false;
-        }
-
-        long now = capi.ElapsedMilliseconds;
-        return lastOrdinaryWorldSnapshotMilliseconds == long.MinValue
-            || now - lastOrdinaryWorldSnapshotMilliseconds
-                >= OrdinaryWorldSnapshotIntervalMilliseconds;
-    }
-
-    internal bool TryRefreshOrdinaryWorldSnapshot()
-    {
-        if (!ShouldRefreshOrdinaryWorldSnapshot()) return true;
-        return CaptureOrdinaryWorldSnapshot();
-    }
-
     private bool CaptureOrdinaryWorldSnapshot(bool allowWhileTransition = false)
     {
+        if (!UsesCapturedTransitionBackground())
+        {
+            if (ordinaryWorldSnapshotSkippedByModeCount < long.MaxValue)
+            {
+                ordinaryWorldSnapshotSkippedByModeCount++;
+            }
+            return true;
+        }
         if (disposed
             || (!allowWhileTransition
                 && (IsOpened() || ordinaryWorldSnapshotLocked)))
@@ -219,17 +206,23 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             return false;
         }
 
-        // Throttle failed readbacks as well as successful ones. A broken or
-        // temporarily unavailable framebuffer must not turn the AfterBlit
-        // renderer into a per-frame retry loop.
-        lastOrdinaryWorldSnapshotMilliseconds = capi.ElapsedMilliseconds;
+        if (ordinaryWorldSnapshotAttemptCount < long.MaxValue)
+        {
+            ordinaryWorldSnapshotAttemptCount++;
+        }
 
         IRenderAPI render = capi.Render;
         AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
+        long started = Stopwatch.GetTimestamp();
+        bool succeeded = false;
+        int sourceWidth = 0;
+        int sourceHeight = 0;
+        int targetWidth = 0;
+        int targetHeight = 0;
         try
         {
-            int sourceWidth = Math.Max(1, render.FrameWidth);
-            int sourceHeight = Math.Max(1, render.FrameHeight);
+            sourceWidth = Math.Max(1, render.FrameWidth);
+            sourceHeight = Math.Max(1, render.FrameHeight);
             using BitmapRef screenshot = render.GrabScreenshot(
                 sourceWidth,
                 sourceHeight,
@@ -251,8 +244,8 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             }
 
             int factor = OrdinaryWorldSnapshotDownsampleFactor;
-            int targetWidth = Math.Max(1, (sourceWidth + factor - 1) / factor);
-            int targetHeight = Math.Max(1, (sourceHeight + factor - 1) / factor);
+            targetWidth = Math.Max(1, (sourceWidth + factor - 1) / factor);
+            targetHeight = Math.Max(1, (sourceHeight + factor - 1) / factor);
             int[] blurredPixels = CreateBlurredSnapshotPixels(
                 sourcePixels,
                 sourceWidth,
@@ -284,13 +277,13 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             LoadedTexture? previous = ordinaryWorldSnapshotTexture;
             ordinaryWorldSnapshotTexture = staging;
             ordinaryWorldSnapshotStagingTexture = previous;
-            lastOrdinaryWorldSnapshotMilliseconds = capi.ElapsedMilliseconds;
+            succeeded = true;
             if (!loggedOrdinaryWorldSnapshot)
             {
                 loggedOrdinaryWorldSnapshot = true;
                 capi.Logger.Notification(
-                    "[ModernAtlas] Atlas transition background now uses a blurred ordinary-world snapshot refreshed every {0} ms ({1}x{2}).",
-                    OrdinaryWorldSnapshotIntervalMilliseconds,
+                    "[ModernAtlas] Captured one blurred ordinary-world transition background after atlas opening started in {0} mode ({1}x{2}).",
+                    AtlasPerformanceModeInfo.Label(CurrentPerformanceMode),
                     targetWidth,
                     targetHeight
                 );
@@ -300,7 +293,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         catch (Exception exception)
         {
             capi.Logger.Warning(
-                "[ModernAtlas] Could not refresh the ordinary-world transition snapshot; retaining the previous image: {0}",
+                "[ModernAtlas] Could not capture the ordinary-world transition snapshot; retaining the previous image: {0}",
                 exception.Message
             );
             return false;
@@ -311,12 +304,62 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             // touch their own temporary target. Restore the observed program
             // and framebuffer even when a readback or upload throws.
             renderState.RestoreCapturedState();
+            double elapsedMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            ordinaryWorldSnapshotTotalMilliseconds += elapsedMilliseconds;
+            ordinaryWorldSnapshotMaximumMilliseconds = Math.Max(
+                ordinaryWorldSnapshotMaximumMilliseconds,
+                elapsedMilliseconds
+            );
+            ordinaryWorldSnapshotLastSourceWidth = sourceWidth;
+            ordinaryWorldSnapshotLastSourceHeight = sourceHeight;
+            ordinaryWorldSnapshotLastTargetWidth = targetWidth;
+            ordinaryWorldSnapshotLastTargetHeight = targetHeight;
+            if (succeeded)
+            {
+                if (ordinaryWorldSnapshotSuccessCount < long.MaxValue)
+                {
+                    ordinaryWorldSnapshotSuccessCount++;
+                }
+            }
+            else if (ordinaryWorldSnapshotFailureCount < long.MaxValue)
+            {
+                ordinaryWorldSnapshotFailureCount++;
+            }
         }
     }
 
     private void CaptureOrdinaryWorldSnapshotWhileTransitionStarts()
     {
+        if (!UsesCapturedTransitionBackground()) return;
         _ = CaptureOrdinaryWorldSnapshot(allowWhileTransition: true);
+    }
+
+    private AtlasPerformanceMode CurrentPerformanceMode =>
+        performanceModeProvider?.Invoke() ?? AtlasPerformanceMode.OnDemand;
+
+    private bool UsesCapturedTransitionBackground() =>
+        AtlasPerformanceModeInfo.UsesCapturedTransitionBackground(
+            CurrentPerformanceMode
+        );
+
+    private bool PreparesAtlasDuringOpening() =>
+        AtlasPerformanceModeInfo.PreparesAtlasDuringOpening(
+            CurrentPerformanceMode
+        );
+
+    private bool CanUseOrdinaryWorldSnapshot() =>
+        AtlasPerformanceModeInfo.CanUseOrdinaryWorldSnapshot(
+            CurrentPerformanceMode,
+            ordinaryWorldSnapshotTexture?.TextureId > 0
+        );
+
+    internal void LogSnapshotTelemetry(string reason)
+    {
+        capi.Logger.Notification(
+            FormattableString.Invariant(
+                $"[ModernAtlas] Ordinary-world snapshot telemetry: reason={reason}; mode={AtlasPerformanceModeInfo.Label(CurrentPerformanceMode)}; attempts={ordinaryWorldSnapshotAttemptCount}; successes={ordinaryWorldSnapshotSuccessCount}; failures={ordinaryWorldSnapshotFailureCount}; skippedByMode={ordinaryWorldSnapshotSkippedByModeCount}; totalMs={ordinaryWorldSnapshotTotalMilliseconds:0.##}; maxMs={ordinaryWorldSnapshotMaximumMilliseconds:0.##}; source={ordinaryWorldSnapshotLastSourceWidth}x{ordinaryWorldSnapshotLastSourceHeight}; target={ordinaryWorldSnapshotLastTargetWidth}x{ordinaryWorldSnapshotLastTargetHeight}."
+            )
+        );
     }
 
     private static int[] CreateBlurredSnapshotPixels(
@@ -586,14 +629,12 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         if (!closing && !normalWorldBackgroundCaptured)
         {
             normalWorldBackgroundCaptured = captureNormalWorldBackground();
-            // The periodic AfterBlit owner normally has a fresh image already.
-            // If the hotkey arrived before that first half-second refresh, take
-            // one readback from this still-complete ordinary frame before the
-            // backdrop covers it. This is an atlas-owned texture operation;
-            // ordinary chunk shaders are never changed.
+            // Both profiles capture one transition background only after the
+            // player starts opening the atlas. No profile performs this
+            // readback while the atlas is closed; preparation budgets remain
+            // the only performance-mode difference.
             if (normalWorldBackgroundCaptured
-                && (ordinaryWorldSnapshotTexture == null
-                    || ordinaryWorldSnapshotTexture.TextureId <= 0))
+                && UsesCapturedTransitionBackground())
             {
                 CaptureOrdinaryWorldSnapshotWhileTransitionStarts();
             }
@@ -602,7 +643,11 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         }
 
         float elapsed = TransitionElapsedSeconds(startedTimestamp);
-        if (!closing) resourcesReady = prepareAtlasResources();
+        if (!closing)
+        {
+            resourcesReady = !PreparesAtlasDuringOpening()
+                || prepareAtlasResources();
+        }
         MaintainHeldItemSuppression();
         UpdatePlayerPresentation(elapsed);
         if (closing) AdvanceClosingAnimationAndSound(elapsed);
@@ -708,6 +753,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     {
         if (disposed) return;
         disposed = true;
+        LogSnapshotTelemetry("dispose");
         CancelWithoutOpening();
         scrollSheetMesh?.Dispose();
         scrollSheetMesh = null;
@@ -1615,8 +1661,9 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
     {
         if (!EnsureRenderResources()) return;
 
-        int backdropTextureId = ordinaryWorldSnapshotTexture?.TextureId > 0
-            ? ordinaryWorldSnapshotTexture.TextureId
+        bool useOrdinaryWorldSnapshot = CanUseOrdinaryWorldSnapshot();
+        int backdropTextureId = useOrdinaryWorldSnapshot
+            ? ordinaryWorldSnapshotTexture!.TextureId
             : solidTexture.TextureId;
         if (backdropTextureId <= 0) return;
 
@@ -1633,11 +1680,11 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             render.GLDisableDepthTest();
             render.GlDisableCullFace();
             // This is the transition's complete opaque base. It is a frozen,
-            // blurred ordinary-world photo when one is available, otherwise
-            // the neutral atlas fallback. It is drawn before the physical
-            // scroll and never blends with the ordinary world framebuffer, so
-            // no terrain, OIT, cloud or stale depth fragment can remain visible
-            // around the scroll.
+            // blurred ordinary-world photo when the opening-time capture
+            // produced a valid texture; otherwise it is the neutral atlas
+            // fallback. It is drawn before the physical scroll and never
+            // blends with the ordinary world framebuffer, so no terrain, OIT,
+            // cloud or stale depth fragment can remain visible around the scroll.
             render.GlToggleBlend(false, EnumBlendMode.Standard);
             render.Render2DTexture(
                 backdropTextureId,
@@ -1646,7 +1693,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
                 render.FrameWidth,
                 render.FrameHeight,
                 99,
-                ordinaryWorldSnapshotTexture?.TextureId > 0
+                useOrdinaryWorldSnapshot
                     // Preserve the captured ordinary-world exposure. The
                     // blur is the transition treatment; a tint here would
                     // erase lanterns and make closing look like a void fade.
@@ -2170,11 +2217,21 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
         bool screenshotRequired = !string.IsNullOrWhiteSpace(
             Environment.GetEnvironmentVariable(SmokeScreenshotEnvironmentVariable)
         );
-        bool snapshotReady = ordinaryWorldSnapshotTexture?.TextureId > 0;
-        if (screenshotRequired && !snapshotReady)
+        bool snapshotReady = CanUseOrdinaryWorldSnapshot();
+        bool requiresSnapshot = screenshotRequired
+            && UsesCapturedTransitionBackground();
+        if (requiresSnapshot && !snapshotReady)
         {
             capi.Logger.Error(
-                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: the transition used the neutral fallback because no blurred ordinary-world snapshot was available."
+                "[ModernAtlas] AUTOMATED SMOKE TEST FAILED: {0} screenshot validation requires a blurred ordinary-world snapshot captured after opening started.",
+                AtlasPerformanceModeInfo.Label(CurrentPerformanceMode)
+            );
+        }
+        else if (screenshotRequired && !UsesCapturedTransitionBackground())
+        {
+            capi.Logger.Notification(
+                "[ModernAtlas] {0} screenshot validation is using the opaque neutral transition fallback because its opening-time snapshot policy is disabled.",
+                AtlasPerformanceModeInfo.Label(CurrentPerformanceMode)
             );
         }
         return resourcesReady
@@ -2193,7 +2250,7 @@ internal sealed class AtlasOpeningTransitionDialog : GuiDialog, IRenderer
             && unrollSoundPlayed
             && swooshSoundPlayed
             && (!screenshotRequired
-                || (snapshotReady
+                || ((!requiresSnapshot || snapshotReady)
                     && automatedImmediateScreenshotPassed
                     && automatedPocketScreenshotPassed
                     && automatedHandoffScreenshotPassed

@@ -27,6 +27,80 @@ boundary resolve, but no longer requires an unrelated opaque screen pixel
 behind a leaf. The owner confirmed the corrected crowns from the same location
 at opposite camera yaws.
 
+## Resolved: saturated colors on dark modded blocks
+
+The atlas applied its minimum-brightness floor by scaling the final material
+color to a target luminance. On very dark block faces, a tiny surviving color
+channel could therefore be multiplied into a saturated red, green or blue
+pixel. This was most visible on loaded structures from Primitive Survival and
+Butchering, even though their ordinary-world textures were correct.
+
+Resolved in the current `0.6.8` test package by removing the final-color
+luminance lift while preserving the opaque shader's scalar lighting floor.
+The source texture hue is no longer changed by the visibility safeguard. The
+owner confirmed the corrected modded structures in the live atlas from the
+same test world.
+
+## Resolved: camera-moving procedural sky veil/noise
+
+The atlas background contained a subtle world-anchored procedural sky
+veil/noise. As the camera moved, the pattern could be perceived as dirt or
+floating eye debris rather than atmosphere.
+
+Removed from the test shader while retaining the smooth celestial and horizon
+gradient plus the pitch-driven neutral-charcoal empty-background gradient.
+Real captures at 35 and 72 degrees from test package SHA-256
+`eb247444…ead8b0` show a clean background. The owner also confirmed a clean
+background in the live atlas from the installed package, so owner verification
+is complete.
+
+## Open: blue vertical gaps on wind-moving leaves at the chunk frontier
+
+Some live atlas captures show thin blue vertical gaps through wind-moving leaf
+crowns, concentrated where the last loaded/completed chunk meets the opaque
+atlas background. The final boundary resolve now applies a bounded,
+color-only enclosed-gap shadow to background or rejected pixels: it checks
+opposing horizontal/vertical occupied-depth neighbours at radius one, then two,
+and mixes only those narrow gaps toward neutral charcoal. It does not change
+leaf geometry, authored alpha, depth, validity or the large blue background.
+
+The exact candidate was captured with terrain visible at yaw 0 and 180, pitch
+20, while the large blue background remained unchanged. Close-up confirmation
+at the owner's location is still pending, so this issue remains open until
+that capture confirms the visual result.
+
+## Open: dark water corner from fitting rejected frontier columns
+
+The owner's captures from 2026-08-26 show a dark stepped corner and one
+vertical terrain stub entering the lower atlas viewport as the camera zooms.
+The matching log reports 1,561 completed mesh columns but only 1,049 columns
+inside the atlas frustum and complete-view boundary, with no missing client
+meshes. Camera fitting was measuring `consideredTerrainColumns`, including
+columns the conservative player-anchored complete-view boundary later rejects.
+
+The current test change limits camera-footprint measurement to the same safe
+chunk square used by the renderer. It does not enlarge disclosure, request
+chunks or synthesize water. Owner confirmation from the affected zoom and
+camera angle is still pending.
+
+The same captures also exposed an independent shallow-angle liquid defect:
+real side and underside water faces could pass the stable-liquid color draw but
+were excluded from the depth-only coverage used by the final resolver. The
+current test change admits those existing non-lava mesh faces only inside the
+same loaded-column, complete-view, disclosure-radius and three-block exterior
+guards. The absorption veil remains restricted to top faces. Exact horizontal
+views can still reveal the absence of block geometry below those real faces;
+ModernAtlas does not invent an underwater volume or reuse player-camera fog.
+
+The 5-degree zoom smoke diagnostic also confirmed that liquid admission was
+coupled to the preceding opaque `CullNormal` result even though liquids use
+their own `CullInstant` projection. The current test package removes only that
+coupling: a liquid pool still has to pass its own frustum, complete-view,
+player-disclosure, supported-surface and dependent-material guards and belong
+to a client chunk loaded from the server. The automated captures remain
+centered on land at maximum zoom, so owner confirmation over the affected
+water remains required.
+
 ## 1. Central dark band in the tiled capture
 
 The stitched tiled screenshot shows a hard vertical dark band near the middle

@@ -32,6 +32,17 @@ public sealed class ModernAtlasConfig
     public bool ScrollRealtimeWeatherEnabled { get; set; } = true;
     public bool SkipOpeningAnimation { get; set; }
     public bool CloudsEnabled { get; set; }
+    /// <summary>
+    /// Canonical values are "on-demand" and "high-throughput". Keep this as
+    /// a string so config files remain stable if enum ordering changes.
+    /// </summary>
+    public string PerformanceMode { get; set; } = AtlasPerformanceModeInfo.OnDemandValue;
+    /// <summary>
+    /// Canonical values are "reduced" and "full". This affects only the
+    /// ModernAtlas framebuffer and defaults to Full to preserve the current
+    /// atlas appearance.
+    /// </summary>
+    public string AtlasDetail { get; set; } = AtlasDetailModeInfo.FullValue;
     public bool PerformanceLightingEnabled { get; set; } = true;
     public bool HideVegetation { get; set; }
     public bool LiveLightingEnabled { get; set; } = true;
@@ -46,7 +57,11 @@ public sealed class ModernAtlasConfig
     public bool SearchModeEnabled { get; set; }
     public bool CameraAngleLocked { get; set; }
     public bool CloseAtlasOnDamage { get; set; } = true;
-    public int AtlasExposurePercent { get; set; } = 150;
+    /// <summary>
+    /// User-facing atlas-only exposure control. 100% is the neutral/default
+    /// point; see <see cref="AtlasExposureCalibration"/> for its multiplier.
+    /// </summary>
+    public int AtlasExposurePercent { get; set; } = AtlasExposureCalibration.DefaultPercent;
     public int MapLayerOpacityPercent { get; set; } = 75;
     public int CaveMaskBrightnessPercent { get; set; } = 100;
 
@@ -164,5 +179,62 @@ public sealed class ModernAtlasConfig
     {
         get => cheatModeByWorld;
         set => cheatModeByWorld = value ?? new Dictionary<string, bool>();
+    }
+
+    internal AtlasPerformanceMode GetPerformanceMode() =>
+        AtlasPerformanceModeInfo.Parse(PerformanceMode);
+
+    /// <summary>
+    /// Normalizes missing, old or malformed values before the config is saved.
+    /// Returns true when the serialized value changed.
+    /// </summary>
+    internal bool NormalizePerformanceMode()
+    {
+        string canonical = AtlasPerformanceModeInfo.CanonicalValue(
+            GetPerformanceMode()
+        );
+        if (string.Equals(PerformanceMode, canonical, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        PerformanceMode = canonical;
+        return true;
+    }
+
+    internal AtlasDetailMode GetAtlasDetail() =>
+        AtlasDetailModeInfo.Parse(AtlasDetail);
+
+    /// <summary>
+    /// Normalizes missing or malformed Atlas detail values before saving.
+    /// Returns true when the serialized value changed.
+    /// </summary>
+    internal bool NormalizeAtlasDetail()
+    {
+        string canonical = AtlasDetailModeInfo.CanonicalValue(GetAtlasDetail());
+        if (string.Equals(AtlasDetail, canonical, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        AtlasDetail = canonical;
+        return true;
+    }
+
+    /// <summary>
+    /// Clamps malformed serialized exposure values without rescaling existing
+    /// preferences. The calibration is semantic: a persisted 100% must keep
+    /// meaning the new neutral point.
+    /// </summary>
+    internal bool NormalizeAtlasExposure()
+    {
+        int normalized = AtlasExposureCalibration.ClampPercent(AtlasExposurePercent);
+        if (AtlasExposurePercent == normalized)
+        {
+            return false;
+        }
+
+        AtlasExposurePercent = normalized;
+        return true;
     }
 }

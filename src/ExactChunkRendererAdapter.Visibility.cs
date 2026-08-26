@@ -275,10 +275,7 @@ internal sealed partial class ExactChunkRendererAdapter
         int playerChunkZ = FloorDiv(
             (int)Math.Floor(capi.World.Player.Entity.Pos.Z), chunkSize
         );
-        int safeRadius = Math.Max(
-            0,
-            (int)Math.Floor(viewDistanceBlocks / (Math.Sqrt(2d) * chunkSize)) - 1
-        );
+        int safeRadius = CalculateCompleteViewChunkRadius(viewDistanceBlocks);
         if (safeRadius < 1) return;
 
         atlasCompleteMinimumChunkX = playerChunkX - safeRadius;
@@ -296,6 +293,17 @@ internal sealed partial class ExactChunkRendererAdapter
                 viewDistanceBlocks
             );
         }
+    }
+
+    internal static int CalculateCompleteViewChunkRadius(int viewDistanceBlocks)
+    {
+        return Math.Max(
+            0,
+            (int)Math.Floor(
+                viewDistanceBlocks
+                    / (Math.Sqrt(2d) * GlobalConstants.ChunkSize)
+            ) - 1
+        );
     }
 
     private void LogTerrainCoverage(int viewDistanceBlocks)

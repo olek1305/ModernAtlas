@@ -64,14 +64,14 @@ internal sealed class AtlasOreTextureReplacement : IDisposable
         emptyMappingTexture = new LoadedTexture(capi);
     }
 
-    public bool Advance()
+    public bool Advance(double workBudgetMilliseconds = WorkBudgetMilliseconds)
     {
         if (disposed || Ready || Failed) return Ready;
 
         long started = Stopwatch.GetTimestamp();
         try
         {
-            while (WithinBudget(started) && !Ready && !Failed)
+            while (WithinBudget(started, workBudgetMilliseconds) && !Ready && !Failed)
             {
                 switch (stage)
                 {
@@ -611,9 +611,12 @@ internal sealed class AtlasOreTextureReplacement : IDisposable
         return result;
     }
 
-    private static bool WithinBudget(long started) =>
+    private static bool WithinBudget(
+        long started,
+        double workBudgetMilliseconds
+    ) =>
         Stopwatch.GetElapsedTime(started).TotalMilliseconds
-            < WorkBudgetMilliseconds;
+            < Math.Max(0.1, workBudgetMilliseconds);
 
     private readonly record struct OreTextureDescriptor(
         TextureAtlasPosition Position,

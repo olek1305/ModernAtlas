@@ -330,6 +330,24 @@ empty while the automated exact-terrain check still reported success.
 
 ## Performance and compatibility
 
+- ModernAtlas must never write, override, clamp, normalize, cache and restore,
+  or otherwise manipulate Vintage Story's global frame-rate and frame-pacing
+  controls. This includes the foreground or background FPS limit, VSync,
+  engine render-loop cadence, frame timers, sleep/yield behavior, driver caps
+  and equivalent settings. Atlas performance profiles may control only
+  atlas-owned work and atlas-framebuffer redraws after atlas opening begins;
+  they must never throttle or accelerate ordinary world rendering or govern
+  work owned by Vintage Story or another mod.
+- With the atlas and its opening or closing transition inactive, every
+  performance profile, including High, must remain dormant. Do not perform
+  periodic atlas screenshots, framebuffer readbacks, blur or texture uploads,
+  renderer prewarming, background scans or scheduled atlas rendering. A
+  one-time transition capture may begin only after the player requests the
+  atlas to open. Changing a ModernAtlas profile while the atlas is closed may
+  persist its own configuration, but must not change the game's frame behavior.
+  Treat this as a compatibility requirement for clients with any number of
+  other mods, and keep an automated check that High queues no atlas capture or
+  rendering work before the opening input.
 - Apply strict per-frame and per-tick budgets. Opening the atlas must not cause
   a large synchronous scan or visible gameplay freeze.
 - Keep the focused Vintage Story atlas on its smooth refresh cadence even when
@@ -391,8 +409,8 @@ empty while the automated exact-terrain check still reported success.
 
 ## Current verified baseline
 
-- The working public version is `0.6.7`, matching `modinfo.json` and
-  `Releases/modernatlas_0.6.7.zip`. Do not change the version number unless the
+- The current working version is `0.6.8`, matching `modinfo.json` and
+  `Releases/modernatlas_0.6.8.zip`. Do not change the version number unless the
   project owner explicitly requests it. Package-content changes may continue
   under this version during the current test cycle.
 - The verified liquid implementation uses completed liquid chunk meshes and a
@@ -559,25 +577,36 @@ empty while the automated exact-terrain check still reported success.
 
 ## Atlas damage warning
 
-- Losing health while the atlas is open draws a dark red edge vignette plus a
-  short caption over the atlas framebuffer: `TAKING DAMAGE — CLOSE THE ATLAS`
-  while the pulse runs, `LOW HEALTH` below 25 percent health. The pulse lasts
-  about 1.2 seconds, is driven by real render time so it animates while
-  singleplayer is paused, and a further hit restarts and slightly strengthens it.
+- A detected health drop while the atlas is open draws a dark red edge vignette
+  plus the caption `TAKING DAMAGE — CLOSE THE ATLAS` over the atlas framebuffer.
+  Every health-loss source counts, including fire, falling and hunger; the
+  warning never identifies or points toward an attacker. The pulse lasts about
+  3.2 seconds, is driven by real render time so it animates while singleplayer
+  is paused, and a further hit restarts and slightly strengthens it.
+  The first frame of a damage signal is intentionally quiet: the vignette and
+  caption share one zero-starting smooth attack, a slow breathing pulse and a
+  smooth release to zero. The four edge quads use reusable tiny gradient
+  textures, a small animated width (zero pixels at each breath trough), and a
+  fully transparent centre; never rebuild or upload a viewport-sized texture
+  during the pulse. The caption texture contains only text plus a subtle
+  transparent shadow, never a raised panel or background strip. Neither layer
+  may use a fixed alpha floor that makes the warning appear instantly. A repeat
+  hit carries the current visible alpha into its restarted and strengthened
+  episode instead of blinking down.
 - It is a GUI overlay only. No shader, no world rendering and no engine state is
   involved, it adds no composer element, and it never captures mouse or keyboard
   input: `G`, `Escape` and `Exit` keep closing the atlas immediately. Do not turn
   it into a full-screen red layer; that would hide the map and resemble the old
   red-border defect.
-- Every source of health loss counts, including fire, falling and hunger. Never
-  show a direction or any hint of the attacker: that could disclose an entity the
-  atlas was not allowed to draw and would break the multiplayer disclosure
-  policy.
-- The warning and the optional emergency close are decided by the local player's
-  actual game mode only. Survival, Survival with accepted Cheat Mode, and
-  multiplayer all keep the warning; real Creative suppresses both. Never gate
-  this on `CreativeCheatSettingsAvailable` or `UnitInspectionEnabled`: Cheat Mode
-  is a protected feature switch and must not disable a safety warning.
+- The normal warning and its optional damage-triggered emergency close are
+  decided by the local player's actual game mode only. Survival, Survival with
+  accepted Cheat Mode, and multiplayer all keep the warning; real Creative
+  suppresses both. A separate confirmed death guard closes the atlas in every
+  mode when the local player is no longer alive or observed `currenthealth <= 0`,
+  regardless of `CloseAtlasOnDamage`; it is still deferred to the next safe
+  frame before an atlas framebuffer is bound. Never gate this on
+  `CreativeCheatSettingsAvailable` or `UnitInspectionEnabled`: Cheat Mode is a
+  protected feature switch and must not disable a safety warning.
 - `CloseAtlasOnDamage` is one persisted preference defaulting to true. Its
   effective value is `actual game mode != Creative && config.CloseAtlasOnDamage`,
   and the switch stays visible in every mode so the stored value still applies
@@ -588,22 +617,48 @@ empty while the automated exact-terrain check still reported success.
   must never block the safety close.
 - The warning is never drawn while a tiled capture or the screenshot preview owns
   the frame, so it cannot be baked into a saved PNG or the BEFORE/AFTER preview.
-- The automated test drives the warning through its direct signal, never by
-  hurting the player or writing to the save, changes `CloseAtlasOnDamage` in
-  memory only, and verifies the emergency close between frames so the atlas
-  dialog is never closed from inside its own render pass.
-- The standard smoke world runs in actual Creative, where the warning is
-  correctly suppressed. The test therefore resolves the policy mode through an
-  in-memory override so both branches are exercised by behavior: resolved
-  Creative must leave the overlay and the auto-close inert, and resolved
-  Survival with accepted Cheat Mode must still warn. The override never changes
-  the player, the game mode or anything on disk, and production code always
-  resolves the real mode.
+  The opt-in `damage-warning` smoke UI screenshot is an intentional exception:
+  it seeks a visible inhale sample and captures the GUI warning for visual
+  inspection without using the tiled-capture path.
+- The standard warning animation subtest drives its warning through a direct
+  signal and never hurts the player; its surrounding smoke fixture is allowed
+  to prepare only the named disposable Creative copy at authoritative 100/100.
+  It changes `CloseAtlasOnDamage` in memory only and verifies the emergency
+  close between frames so the atlas dialog is never closed from inside its own
+  render pass.
+- The only supported real-damage variant requires
+  `MODERNATLAS_SMOKE_REAL_DAMAGE=1`, an operator-provided disposable copied
+  data directory, and the exact world name `MODERNATLAS_REAL_DAMAGE_TEST`. The
+  two allowed fixture copies are `MODERNATLAS_CREATIVE_TEST` for the standard
+  Creative/god-mode run and `MODERNATLAS_REAL_DAMAGE_TEST` for the Survival
+  run; no other world may receive fixture mutations. On the Survival copy only,
+  the server prepares authoritative 100/100 health, applies one bounded
+  nonlethal `ReceiveDamage` request (100 -> 99), observes the replicated health
+  drop through the production warning watcher, captures the intentional warning
+  screenshot and restores 100 authoritatively. It must log
+  `AUTOMATED SMOKE HEALTH FIXTURE READY`, `REAL DAMAGE APPLIED`,
+  `REAL DAMAGE OBSERVED` and `REAL DAMAGE HEALTH RESTORED`, and must never
+  install the standard smoke god-mode patch. A timeout or teardown also attempts
+  restoration. `scripts/run-smoke-test.sh` remains canonical: without the flag
+  it performs the Creative first flow and requires god-mode plus fixture
+  markers; with the flag it performs the Survival second flow and requires the
+  real-damage markers plus the `damage-warning-real` screenshot. The separate
+  `scripts/run-real-damage-smoke-test.sh` wrapper supplies the same strict
+  disposable-world guard for operators who prefer an explicit command. The
+  fixture guard derives that exact name from the process `-o` launch argument;
+  Vintage Story's `SavegameIdentifier` is a globally unique UUID, not the save
+  filename, and is retained only for world-session identity and per-world
+  configuration keys. Server-side `WorldData.CurrentGameMode` changes call
+  the public `IServerPlayer.BroadcastPlayerData(false)` API so the client can
+  observe the authoritative mode during the bounded readiness wait.
+- Creative is correctly suppressed for the real warning, while the in-memory
+  Survival policy override still exercises warning behavior and accepted Cheat
+  Mode without changing production mode resolution.
 
 ## Build and in-game test workflow
 
 - For every rendering change, build `ModernAtlas.csproj` in Release mode,
-  create `Releases/modernatlas_0.6.7.zip`, validate the ZIP, and copy that exact
+  create `Releases/modernatlas_0.6.8.zip`, validate the ZIP, and copy that exact
   archive to the active Vintage Story `Mods` directory. Compare SHA-256 hashes
   so the release and active archives are demonstrably identical.
 - Close the running game cleanly before replacing or retesting the active mod.
@@ -613,19 +668,22 @@ empty while the automated exact-terrain check still reported success.
 - Maintain an opt-in automated atlas smoke-test path that can launch the client,
   join a named test world, open and close the atlas through ModernAtlas code,
   capture diagnostics and exit cleanly without X11/Wayland key injection. It
-  must be disabled during normal play and must never modify a save, generate
-  terrain or bypass multiplayer disclosure policy.
-- Run the automated game-control test with the normal data directory and an
-  explicitly named singleplayer test world, for example:
+  must be disabled during normal play, must never generate terrain or bypass
+  multiplayer disclosure policy, and may mutate health/mode only in the two
+  explicitly disposable fixture copies `MODERNATLAS_CREATIVE_TEST` and
+  `MODERNATLAS_REAL_DAMAGE_TEST`.
+- Run the automated game-control test with a disposable singleplayer data
+  directory and the exact standard fixture world, for example:
 
   ```sh
   env MODERNATLAS_SMOKE_TEST=1 /opt/vintagestory/Vintagestory \
-    --dataPath /home/arcylisz/.config/VintagestoryData -o 'arcyliszs cave world'
+    --dataPath /path/to/disposable/VintagestoryData -o 'MODERNATLAS_CREATIVE_TEST'
   ```
 
-  The default smoke target must be an existing standard generated world, not
+  The default smoke target must be the existing standard-generated disposable
+  `MODERNATLAS_CREATIVE_TEST` world, never the owner's source world and never
   the superflat `TESTCREATIVE` fixture. `bash scripts/run-smoke-test.sh` is the
-  canonical runner: it defaults to `arcyliszs cave world`, records the
+  canonical runner: it defaults to `MODERNATLAS_CREATIVE_TEST`, records the
   pre-launch log and crash-log timestamps, requires exit code zero, checks
   every required log marker, verifies the captured screenshots and runs the
   ordinary-world red-border check. That check tests for the defect's shape —
@@ -680,10 +738,14 @@ empty while the automated exact-terrain check still reported success.
   invoking `ExitOrRedirect` from inside the atlas render or pre-setting
   `exitToMainMenu` can invalidate or bypass game-session teardown.
 - Record the pre-launch modification time of `client-crash.log`, wait for the
-  game process to exit and require exit code zero. The fresh `client-main.log`
-  must contain `AUTOMATED SMOKE GOD MODE ENABLED`,
+  game process to exit and require exit code zero. A standard run's fresh
+  `client-main.log` must contain `AUTOMATED SMOKE GOD MODE ENABLED`,
   `AUTOMATED SMOKE GOD MODE RESTORED`, `AUTOMATED ATLAS CHECKS PASSED` once per
-  atlas cycle, `AUTOMATED ATLAS TWO-CYCLE CHECK PASSED`,
+  atlas cycle, `AUTOMATED ATLAS TWO-CYCLE CHECK PASSED`; a real-damage run must
+  contain `REAL DAMAGE SMOKE START`, `REAL DAMAGE SMOKE WORLD GUARD`,
+  `REAL DAMAGE APPLIED`, `REAL DAMAGE OBSERVED` and `REAL DAMAGE HEALTH
+  RESTORED` instead and must contain no god-mode marker. Both modes also require
+  `AUTOMATED ATLAS TWO-CYCLE CHECK PASSED`,
   `Automated resolved-atlas alpha validation passed`,
   `Atlas close state check passed`, `World leave received`,
   `Released world-specific atlas rendering resources` and

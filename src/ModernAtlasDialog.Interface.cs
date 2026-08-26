@@ -187,7 +187,7 @@ public sealed partial class ModernAtlasDialog
                 ElementBounds.Fixed(toolbarX + 10, toolbarY + 10, toolbarWidth - 20, 18)
             )
             .AddStaticText(
-                "v0.6.7",
+                "v0.6.8",
                 AtlasUiStyle.DetailFont(14),
                 ElementBounds.Fixed(toolbarX + 10, toolbarY + 27, toolbarWidth - 20, 18)
             )
@@ -395,6 +395,7 @@ public sealed partial class ModernAtlasDialog
         if (overlay == null) return;
         RefreshToolbarLayerIndicator();
 
+        bool atlasFrameReady = HasCompleteAtlasFrame;
         bool settingsActive = SettingsHierarchyOpen;
         overlay.GetAtlasButton("settings-button")?.SetActive(settingsActive);
         overlay.GetAtlasButton("screenshot-options-button")?.SetActive(
@@ -403,11 +404,18 @@ public sealed partial class ModernAtlasDialog
         overlay.GetAtlasButton("map-options-button")?.SetActive(MapPanelOpen);
         overlay.GetAtlasButton("search-button")?.SetActive(SearchPanelOpen);
         overlay.GetAtlasButton("instrument-button")?.SetActive(InstrumentPanelOpen);
+        overlay.GetAtlasButton("settings-button")!.Enabled = atlasFrameReady;
+        overlay.GetAtlasButton("screenshot-options-button")!.Enabled =
+            atlasFrameReady;
         overlay.GetAtlasButton("map-options-button")!.Enabled =
-            MapLayerControlsVisible;
-        overlay.GetAtlasButton("search-button")!.Enabled = SearchModeActive;
+            atlasFrameReady && MapLayerControlsVisible;
+        overlay.GetAtlasButton("search-button")!.Enabled =
+            atlasFrameReady && SearchModeActive;
+        overlay.GetAtlasButton("instrument-button")!.Enabled = atlasFrameReady;
         overlay.GetAtlasButton("quick-screenshot-button")!.Enabled =
-            !tileScreenshot.Busy;
+            atlasFrameReady && !tileScreenshot.Busy;
+        overlay.GetAtlasButton("hide-ui-button")!.Enabled = atlasFrameReady;
+        overlay.GetAtlasButton("exit-button")!.Enabled = true;
     }
 
     private void UpdateToolbarTooltip(int mouseX, int mouseY)
@@ -458,7 +466,7 @@ public sealed partial class ModernAtlasDialog
             AtlasPanelSection.MapOptions => MapOptionsPanelHeightGui(compact),
             AtlasPanelSection.Search => compact ? 168 : 148,
             AtlasPanelSection.Instrument => 118,
-            AtlasPanelSection.Performance => 152,
+            AtlasPanelSection.Performance => 252,
             AtlasPanelSection.Creative => 132,
             AtlasPanelSection.VisualLab => 158,
             AtlasPanelSection.Unit => compact ? 200 : 190,
@@ -1460,10 +1468,40 @@ public sealed partial class ModernAtlasDialog
         composer
             .AddStaticText("PERFORMANCE", AtlasUiStyle.TitleFont(15), ElementBounds.Fixed(44, 9, 180, 24))
             .AddAtlasButton("‹", ClosePerformanceModal, ElementBounds.Fixed(10, 7, 32, 28), "performance-back", AtlasButtonStyle.Icon)
-            .AddStaticText("Atlas lighting", AtlasUiStyle.DetailFont(11), ElementBounds.Fixed(16, 45, width - 84, 22))
-            .AddAtlasSwitch(OnPerformanceLightingToggled, ElementBounds.Fixed(width - 62, 40, 50, 28), "performance-lighting")
-            .AddStaticText("Hide vegetation", AtlasUiStyle.DetailFont(11), ElementBounds.Fixed(16, 78, width - 84, 22))
-            .AddAtlasSwitch(OnHideVegetationToggled, ElementBounds.Fixed(width - 62, 73, 50, 28), "hide-vegetation")
+            .AddStaticText("Atlas performance", AtlasUiStyle.DetailFont(11), ElementBounds.Fixed(16, 42, 120, 22))
+            .AddAtlasChoice(
+                new[] { AtlasPerformanceModeInfo.OnDemandValue, AtlasPerformanceModeInfo.HighThroughputValue },
+                new[] { AtlasPerformanceModeInfo.OnDemandLabel, AtlasPerformanceModeInfo.HighThroughputLabel },
+                PerformanceModeChoiceIndex,
+                OnPerformanceModeChanged,
+                ElementBounds.Fixed(138, 36, Math.Max(120, width - 154), 32),
+                "performance-mode"
+            )
+            .AddDynamicText(
+                AtlasPerformanceModeInfo.Description(PerformanceMode),
+                AtlasUiStyle.DetailFont(8.5f),
+                ElementBounds.Fixed(16, 70, Math.Max(120, width - 32), 18),
+                "performance-description"
+            )
+            .AddStaticText("Atlas detail", AtlasUiStyle.DetailFont(11), ElementBounds.Fixed(16, 101, 120, 22))
+            .AddAtlasChoice(
+                new[] { AtlasDetailModeInfo.ReducedValue, AtlasDetailModeInfo.FullValue },
+                new[] { AtlasDetailModeInfo.ReducedLabel, AtlasDetailModeInfo.FullLabel },
+                AtlasDetailChoiceIndex,
+                OnAtlasDetailChanged,
+                ElementBounds.Fixed(138, 95, Math.Max(120, width - 154), 32),
+                "atlas-detail"
+            )
+            .AddDynamicText(
+                AtlasDetailModeInfo.Description(CurrentAtlasDetailMode),
+                AtlasUiStyle.DetailFont(8.5f),
+                ElementBounds.Fixed(16, 130, Math.Max(120, width - 32), 30),
+                "atlas-detail-description"
+            )
+            .AddStaticText("Atlas lighting", AtlasUiStyle.DetailFont(11), ElementBounds.Fixed(16, 167, width - 84, 22))
+            .AddAtlasSwitch(OnPerformanceLightingToggled, ElementBounds.Fixed(width - 62, 162, 50, 28), "performance-lighting")
+            .AddStaticText("Hide vegetation", AtlasUiStyle.DetailFont(11), ElementBounds.Fixed(16, 200, width - 84, 22))
+            .AddAtlasSwitch(OnHideVegetationToggled, ElementBounds.Fixed(width - 62, 195, 50, 28), "hide-vegetation")
             .AddStaticText("Developer visual controls only affect the atlas framebuffer.", AtlasUiStyle.DetailFont(9), ElementBounds.Fixed(16, height - 25, Math.Max(120, width - 32), 18), "performance-note");
     }
 
@@ -1618,7 +1656,7 @@ public sealed partial class ModernAtlasDialog
                 )
             )
             .AddStaticText(
-                "v0.6.7",
+                "v0.6.8",
                 AtlasUiStyle.DetailFont(9),
                 ElementBounds.Fixed(contentX + versionX, contentY + versionY, 52, 18)
             )
@@ -2158,7 +2196,7 @@ public sealed partial class ModernAtlasDialog
                 AtlasUiStyle.DrawSeparator
             )
             .AddStaticText(
-                "Exposure",
+                $"Exposure (neutral {DefaultAtlasExposurePercent}%)",
                 AtlasUiStyle.DetailFont(13),
                 ElementBounds.Fixed(28, 108, 170, 26)
             )

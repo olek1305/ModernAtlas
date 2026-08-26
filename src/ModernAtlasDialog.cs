@@ -31,8 +31,17 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private const int PresentationChangeDebounceMilliseconds = 125;
     private const int BottomPanelAnimationMilliseconds = 170;
     private const int AutomatedUiScreenshotPhaseCount = 9;
-    private const float DamageWarningDurationSeconds = 1.2f;
-    private const float LowHealthWarningFraction = 0.25f;
+    private const float DamageWarningDurationSeconds = 3.2f;
+    private const float DamageWarningFadeInSeconds = 0.45f;
+    private const float DamageWarningFadeOutSeconds = 0.95f;
+    private const float DamageWarningBreathPeriodSeconds = 1.45f;
+    private const float DamageWarningRepeatCarryFadeSeconds = 0.90f;
+    private const float AutomatedRealDamagePhaseTimeoutSeconds = 8f;
+    private const float AutomatedRealDamageSmokeHealth = 100f;
+    private const float DamageWarningMaximumPulseAlpha = 0.52f;
+    private const float DamageWarningMaximumEdgeFraction = 0.024f;
+    private const int DamageWarningMaximumEdgePixels = 28;
+    private const int DamageWarningEdgeGradientPixels = 64;
     private const string AllOresFilterValue = "__all__";
     private const string SmokeScreenshotEnvironmentVariable =
         "MODERNATLAS_SMOKE_SCREENSHOT";
@@ -68,8 +77,11 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private readonly ModernAtlasServerPolicy serverPolicy;
     private readonly ModernAtlasServerPolicy visibleEntityPolicy = new();
     private readonly Action saveConfig;
+    private readonly Action<string>? performanceTelemetryLogger;
     private readonly Func<bool> requestClose;
     private readonly Func<bool> requestEmergencyClose;
+    private readonly System.Func<ModernAtlasSmokeDamageOperation, float, int, bool>
+        requestRealDamageSmokeAction;
     private readonly Func<IShaderProgram?> stableLiquidShaderProvider;
     private readonly Func<IShaderProgram?> atlasCloudShaderProvider;
     private readonly Func<IShaderProgram?> atlasBoundaryShaderProvider;
@@ -123,6 +135,9 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private MeshRef? opacityQuad;
     private bool leftDragging;
     private bool rightDragging;
+    // Native Settings scrollbar gestures keep the composer alive until the
+    // release event so GuiElementScrollbar retains mouse capture.
+    private bool settingsScrollbarPointerDown;
     private double leftDragDistance;
     private long? selectedEntityId;
     private double centerX;
@@ -230,6 +245,9 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private string? pendingAutomatedMapLayerScreenshotSuffix;
     private bool automatedSmokeTestPerformanceModeSelected;
     private bool automatedSmokeTestPerformanceModeRendered;
+    private bool automatedSmokeTestAtlasDetailSelected;
+    private bool automatedSmokeTestAtlasDetailRendered;
+    private int automatedSmokeTestAtlasDetailRenderPhase;
     private bool automatedSmokeTestPresentationPassed;
     private bool automatedSmokeTestResolvedAtlasAlphaChecked;
     private bool automatedSmokeTestResolvedAtlasAlphaPassed;
@@ -256,6 +274,8 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private string automatedOriginalHandheldInstrumentMode = "compass";
     private bool automatedOriginalPerformanceLightingEnabled;
     private bool automatedOriginalHideVegetation;
+    private string automatedOriginalPerformanceMode = AtlasPerformanceModeInfo.OnDemandValue;
+    private string automatedOriginalAtlasDetail = AtlasDetailModeInfo.FullValue;
     private bool automatedOriginalCheatModeEnabled;
     private int automatedOriginalScreenshotScale = 2;
     private int automatedOriginalScreenshotCaptureAreaPercent = 100;
@@ -340,15 +360,33 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private float damageWarningBaselineHealth = float.NaN;
     private float damageWarningElapsedSeconds;
     private float damageWarningPulseStrength;
-    private bool damageWarningLowHealth;
+    private float damageWarningRepeatCarryAlpha;
+    private float damageWarningRepeatCarryWidthScale;
     private bool damageWarningAutoCloseRequested;
     private int automatedSmokeTestDamagePhase;
     private bool automatedSmokeTestDamageWarningPassed;
+    private bool automatedRealDamageSmokeRun;
+    private bool automatedRealDamageSmokePhase;
+    private int automatedRealDamageSmokeNextRequestId;
+    private int automatedRealDamageSmokePendingRequestId;
+    private float automatedRealDamageSmokePhaseStartedSeconds;
+    private ModernAtlasSmokeDamageOperation?
+        automatedRealDamageSmokePendingOperation;
+    private float automatedRealDamageSmokeBaselineHealth = float.NaN;
+    private float automatedRealDamageSmokeServerHealth = float.NaN;
+    private bool automatedRealDamageSmokeHitObserved;
+    private bool automatedRealDamageSmokeScreenshotQueued;
+    private bool automatedRealDamageSmokeScreenshotSaved;
+    private bool automatedRealDamageSmokeRestoreConfirmed;
     private bool automatedSmokeTestCloseOnDamageBefore = true;
+    private bool automatedSmokeTestCloseOnDamageCaptured;
     private EnumGameMode? automatedDamageWarningModeOverride;
     private bool damageWarningEmergencyClosePending;
     private bool automatedSmokeTestDamageWasOpenBeforeSignal;
-    private LoadedTexture? damageVignetteTexture;
+    private LoadedTexture? damageEdgeTopTexture;
+    private LoadedTexture? damageEdgeBottomTexture;
+    private LoadedTexture? damageEdgeLeftTexture;
+    private LoadedTexture? damageEdgeRightTexture;
     private LoadedTexture? damageWarningCaptionTexture;
     private string? damageWarningCaptionValue;
     private bool synchronizingMapLayerChoice;
@@ -559,6 +597,16 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         : HandheldInstrumentMode == "time"
             ? 2
             : 1;
+
+    private AtlasPerformanceMode PerformanceMode => config.GetPerformanceMode();
+
+    private int PerformanceModeChoiceIndex =>
+        PerformanceMode == AtlasPerformanceMode.HighThroughput ? 1 : 0;
+
+    private AtlasDetailMode CurrentAtlasDetailMode => config.GetAtlasDetail();
+
+    private int AtlasDetailChoiceIndex =>
+        CurrentAtlasDetailMode == AtlasDetailMode.Reduced ? 0 : 1;
 
     private float HandheldInstrumentHour
     {
@@ -774,14 +822,19 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         Func<IShaderProgram?> atlasScreenshotFilterShaderProvider,
         Func<IShaderProgram?> atlasOpacityShaderProvider,
         Func<IShaderProgram?> atlasScrollShaderProvider,
-        AtlasSoundController soundController
+        AtlasSoundController soundController,
+        System.Func<ModernAtlasSmokeDamageOperation, float, int, bool>
+            requestRealDamageSmokeAction,
+        Action<string>? performanceTelemetryLogger = null
     ) : base(capi)
     {
         this.config = config;
         this.serverPolicy = serverPolicy;
         this.saveConfig = saveConfig;
+        this.performanceTelemetryLogger = performanceTelemetryLogger;
         this.requestClose = requestClose;
         this.requestEmergencyClose = requestEmergencyClose;
+        this.requestRealDamageSmokeAction = requestRealDamageSmokeAction;
         this.stableLiquidShaderProvider = stableLiquidShaderProvider;
         this.atlasCloudShaderProvider = atlasCloudShaderProvider;
         this.atlasBoundaryShaderProvider = atlasBoundaryShaderProvider;
@@ -850,6 +903,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         lastAtlasFrameMilliseconds = capi.ElapsedMilliseconds;
         lastAtlasWorldRenderMilliseconds = 0;
         ReleaseAtlasFrameCache();
+        BeginAtlasPreparationSession();
         EnsureExactChunkRenderer();
         centerX = capi.World.Player.Entity.Pos.X;
         centerZ = capi.World.Player.Entity.Pos.Z;
@@ -1043,7 +1097,8 @@ public sealed partial class ModernAtlasDialog : GuiDialog
             lastAtlasWorldRenderMilliseconds = capi.ElapsedMilliseconds;
             if (automatedSmokeTestActive
                 && !automatedSmokeTestResolvedAtlasAlphaChecked
-                && exactChunkRenderer?.BoundaryResolvedLastFrame == true)
+                && exactChunkRenderer?.BoundaryResolvedLastFrame == true
+                && HasCompleteAtlasFrame)
             {
                 automatedSmokeTestResolvedAtlasAlphaChecked = true;
                 automatedSmokeTestResolvedAtlasAlphaPassed =
@@ -1074,7 +1129,10 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         {
             AdvanceSearch();
         }
-        if (freshAtlasFrame && rendered && automatedSmokeTestActive)
+        if (freshAtlasFrame
+            && rendered
+            && HasCompleteAtlasFrame
+            && automatedSmokeTestActive)
         {
             bool safeSurfaceFrameWasAlreadyRendered =
                 automatedSmokeTestSafeSurfaceFrameRendered;
@@ -1155,7 +1213,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         {
             if (freshAtlasFrame && rendered)
             {
-                CaptureAtlasFrameCache();
+                _ = CaptureAtlasFrameCache();
             }
             capi.Render.CurrentFrameBuffer = null;
             scrollViewportRenderer.Render(
@@ -1203,7 +1261,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         {
             if (freshAtlasFrame && rendered)
             {
-                CaptureAtlasFrameCache();
+                _ = CaptureAtlasFrameCache();
             }
             // Even before the first complete cache frame exists, cover the
             // window with the atlas renderer's opaque neutral placeholder.
@@ -1227,6 +1285,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         capi.Render.GLDisableDepthTest();
         capi.Render.GlDisableCullFace();
         capi.Render.GlToggleBlend(true, EnumBlendMode.Standard);
+        RenderAtlasPreparationStatus();
         if (!interfaceHidden && !screenshotPreviewOpen && SearchModeActive)
         {
             RenderSearchMarkers();
@@ -1347,6 +1406,8 @@ public sealed partial class ModernAtlasDialog : GuiDialog
             UnfocusSearchOutsideInput(args);
             overlay?.OnMouseDown(args);
             if (args.Handled) return;
+            settingsScrollbarPointerDown = args.Button == EnumMouseButton.Left
+                && IsSettingsScrollbarPoint(args.X, args.Y);
             if (PanelCoversPoint(args.X, args.Y))
             {
                 bottomPanel?.OnMouseDown(args);
@@ -1405,6 +1466,17 @@ public sealed partial class ModernAtlasDialog : GuiDialog
             args.Handled = true;
             return;
         }
+        if (args.Button == EnumMouseButton.Left && settingsScrollbarPointerDown)
+        {
+            // Let the native element finish its press/release bookkeeping,
+            // then rebuild once so the content catches up with the thumb's
+            // final position. Rebuilding during MouseMove would lose capture.
+            bottomPanel?.OnMouseUp(args);
+            settingsScrollbarPointerDown = false;
+            pendingInterfaceRecompose = true;
+            args.Handled = true;
+            return;
+        }
         // Once a map drag begins, keep ownership of the gesture even if the
         // pointer crosses the settings panel. Letting the overlay consume the
         // release leaves the drag latched and the next move jumps the camera.
@@ -1452,6 +1524,14 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         {
             ClearOreHover();
             screenshotProgressModal.OnMouseMove(args);
+            args.Handled = true;
+            return;
+        }
+        if (settingsScrollbarPointerDown)
+        {
+            // Preserve native scrollbar capture even when the pointer leaves
+            // the panel bounds. The content is rebuilt on MouseUp only.
+            bottomPanel?.OnMouseMove(args);
             args.Handled = true;
             return;
         }
@@ -1545,11 +1625,29 @@ public sealed partial class ModernAtlasDialog : GuiDialog
             if (args.IsHandled) return;
             if (PanelCoversPoint(capi.Input.MouseX, capi.Input.MouseY))
             {
+                if (bottomPanelSection == AtlasPanelSection.Settings)
+                {
+                    // GuiElementScrollbar only consumes deltaPrecise. Handle
+                    // the whole Settings panel here so coarse wheel events
+                    // still move the content and never reach a slider.
+                    float wheel = args.deltaPrecise != 0
+                        ? args.deltaPrecise
+                        : args.delta;
+                    double width = bottomPanelBounds?.fixedWidth ?? 0;
+                    double height = bottomPanelBounds?.fixedHeight ?? 0;
+                    double maximum = SettingsScrollMaximum(width, height);
+                    settingsScrollOffset = Math.Clamp(
+                        settingsScrollOffset - wheel * 18,
+                        0,
+                        maximum
+                    );
+                    pendingInterfaceRecompose = true;
+                    args.SetHandled();
+                    return;
+                }
                 bottomPanel?.OnMouseWheel(args);
                 if (!args.IsHandled
-                    && (bottomPanelSection == AtlasPanelSection.Settings
-                        || bottomPanelSection
-                            == AtlasPanelSection.ScreenshotOptions
+                    && (bottomPanelSection == AtlasPanelSection.ScreenshotOptions
                         || bottomPanelSection
                             == AtlasPanelSection.ScreenshotFilterTuning))
                 {
@@ -1736,6 +1834,8 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         searchController.Clear();
         mapLayerTexture.Reset();
         preparingSurfaceFilter = false;
+        preparingOreConcealment = false;
+        preparingVegetationMask = false;
         // Keep the small transient surface-safety samples for this world.
         // Changing graphics view distance happens while G is closed; retaining
         // the overlap prevents already known exact mesh columns from becoming
@@ -1743,6 +1843,8 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         // leave still releases all of this non-persistent data.
         ResetPointerDrag();
         compassRenderer.Dispose();
+        // The published frame belongs only to this open-atlas session. Do not
+        // let the next G reuse an image from the previous session.
         ReleaseAtlasFrameCache();
         if (!worldTeardownStarted)
         {
@@ -1845,6 +1947,9 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     {
         if (atlasFrameCacheTexture is not { TextureId: > 0 }) return true;
 
+        // This throttles only redraws of ModernAtlas's own off-screen atlas
+        // framebuffer while this dialog is open. It never reads or writes
+        // Vintage Story's Max FPS, VSync or background-window frame limit.
         // Releasing a camera button must not reduce visible atlas motion to
         // the idle cadence. Keep every foreground atlas frame smooth and save
         // the lower cadence exclusively for an unfocused/background game.
@@ -1854,14 +1959,26 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         return capi.ElapsedMilliseconds - lastAtlasWorldRenderMilliseconds >= interval;
     }
 
-    private void CaptureAtlasFrameCache()
+    private bool CaptureAtlasFrameCache()
     {
         int textureId = exactChunkRenderer?.ResolvedColorTextureId ?? 0;
-        if (textureId <= 0) return;
+        if (textureId <= 0)
+        {
+            LogAtlasPreparationReason(
+                "the resolved atlas color texture is not available yet"
+            );
+            return false;
+        }
 
         IRenderAPI render = capi.Render;
         FrameBufferRef? resolved = exactChunkRenderer?.ResolvedFramebuffer;
-        if (resolved == null) return;
+        if (resolved == null)
+        {
+            LogAtlasPreparationReason(
+                "the resolved atlas framebuffer is not available yet"
+            );
+            return false;
+        }
         int width = Math.Max(1, resolved.Width);
         int height = Math.Max(1, resolved.Height);
         try
@@ -1928,6 +2045,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
             LoadedTexture? previousCompleteFrame = atlasFrameCacheTexture;
             atlasFrameCacheTexture = stagingTexture;
             atlasFrameStagingTexture = previousCompleteFrame;
+            MarkAtlasFramePublished();
             if (!loggedAtlasRefreshThrottle)
             {
                 loggedAtlasRefreshThrottle = true;
@@ -1935,13 +2053,14 @@ public sealed partial class ModernAtlasDialog : GuiDialog
                     "[ModernAtlas] Atlas refresh runs at up to 60 FPS while the Vintage Story window is focused and 12 FPS while it is in the background; world ticks and client chunk streaming remain active."
                 );
             }
+            return true;
         }
         catch (Exception exception)
         {
-            capi.Logger.Warning(
-                "[ModernAtlas] Could not publish a complete throttled atlas frame; the previous complete frame remains active: {0}",
-                exception.Message
+            MarkAtlasRenderingFailure(
+                $"The complete atlas frame could not be copied to cache: {exception.Message}"
             );
+            return false;
         }
     }
 
@@ -1964,6 +2083,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         primaryAtlasSourceTexture = null;
         primaryAtlasSourceTextureId = 0;
         lastAtlasWorldRenderMilliseconds = 0;
+        ResetAtlasPreparationState();
     }
 
     public void ScheduleNormalWorldShaderRestore()
@@ -2062,7 +2182,18 @@ public sealed partial class ModernAtlasDialog : GuiDialog
             exactChunkRenderer = null;
         }
 
-        if (exactChunkRenderer != null) return false;
+        if (exactChunkRenderer != null)
+        {
+            if (exactChunkRenderer.RenderingFailed)
+            {
+                MarkAtlasRenderingFailure(
+                    "The exact atlas renderer was disabled after a rendering exception."
+                );
+            }
+            return false;
+        }
+
+        if (atlasRenderingFailure) return false;
 
         exactChunkRenderer = ExactChunkRendererAdapter.TryCreate(
             capi,
@@ -2070,6 +2201,12 @@ public sealed partial class ModernAtlasDialog : GuiDialog
             atlasCloudShaderProvider,
             atlasBoundaryShaderProvider
         );
+        if (exactChunkRenderer == null)
+        {
+            MarkAtlasRenderingFailure(
+                "The exact atlas renderer is unavailable."
+            );
+        }
         return exactChunkRenderer != null;
     }
 
@@ -2148,6 +2285,9 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         automatedSmokeTestMapLayerPhase = 0;
         automatedSmokeTestMapLayerPassed = false;
         pendingAutomatedMapLayerScreenshotSuffix = null;
+        automatedSmokeTestAtlasDetailSelected = false;
+        automatedSmokeTestAtlasDetailRendered = false;
+        automatedSmokeTestAtlasDetailRenderPhase = 0;
         automatedSmokeTestPresentationPassed = false;
         automatedSmokeTestResolvedAtlasAlphaChecked = false;
         automatedSmokeTestResolvedAtlasAlphaPassed = false;
@@ -2257,6 +2397,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         DisposeDamageWarningTextures();
         compassRenderer.Dispose();
         ReleaseAtlasFrameCache();
+        DisposeAtlasPreparationStatusTexture();
         opacityQuad?.Dispose();
         opacityQuad = null;
         scrollViewportRenderer.Dispose();

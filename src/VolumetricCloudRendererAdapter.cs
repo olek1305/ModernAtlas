@@ -235,7 +235,11 @@ internal sealed class VolumetricCloudRendererAdapter : IDisposable
             );
             shader.Uniform(
                 "atlasCloudExposure",
-                Math.Clamp(atlasExposure, 0.04f, 1.5f)
+                Math.Clamp(
+                    atlasExposure,
+                    0.04f,
+                    AtlasExposureCalibration.MaximumMultiplier
+                )
             );
             shader.Uniform(
                 "depthScale",

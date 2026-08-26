@@ -27,6 +27,9 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
     private const string MinimumSupportedVersion = "1.22.3";
     private const string VisibilityPatchId = "modernatlas.exactchunkvisibility";
     private const string AtlasFilterMarker = "// MODERNATLAS_SURFACE_AND_BOUNDARY_FILTER";
+    private const string AtlasVertexFilterMarker = "// MODERNATLAS_DECORATION_DEPTH_FILTER";
+    private const double AtlasDecorationDepthBiasNdc = 0.000001d;
+    private const int AtlasDecorationDepthBiasMaximum = 4;
     private const int CaveFilterTextureUnit = 12;
     private const int MapLayerTextureUnit = 13;
     private const int OreMappingTextureUnit = 14;
@@ -165,6 +168,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
     private readonly VolumetricCloudRendererAdapter? cloudRenderer;
     private readonly AtlasEntityModelRendererAdapter entityModelRenderer;
     private readonly AtlasMechanicalRendererAdapter mechanicalRenderer;
+    private readonly AtlasAnimatedDoorRendererAdapter animatedDoorRenderer;
     private readonly AtlasOreTextureReplacement oreTextureReplacement;
     private readonly AtlasVegetationTextureMask vegetationTextureMask;
     private readonly AtlasBoundaryResolver boundaryResolver;
@@ -222,6 +226,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
     private bool loggedCaveFilterReady;
     private bool loggedUndergroundSafetyFailure;
     private bool loggedOreTextureBindingFailure;
+    private bool loggedVegetationFallback;
     private bool loggedPreparationClearFailure;
     private bool loggedNormalWorldShaderRestore;
     private bool loggedTerrainCoverage;
@@ -236,6 +241,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
 
     public int LastRenderedEntityCount { get; private set; }
     public int LastRenderedMechanicalDeviceCount { get; private set; }
+    public int LastRenderedAnimatedDoorCount { get; private set; }
     public int LastLoadedMechanicalDeviceCount =>
         mechanicalRenderer.LastLoadedDeviceCount;
     public bool ScreenshotAnimationFreezeActive =>
@@ -257,10 +263,13 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
     public float LastRenderedVegetationPixelsPerBlock { get; private set; }
     public bool LastRenderedVegetationHidden { get; private set; }
     public bool LastRenderedPerformanceLightingEnabled { get; private set; } = true;
+    public bool LastRenderedCloudOverlayRequested { get; private set; }
+    public bool RenderingFailed => disabled;
 
     public bool AtlasStateIsClear =>
         !atlasUniformsActive
         && mechanicalRenderer.NativeCollectionsRestored
+        && animatedDoorRenderer.RenderStateRestored
         && !atlasVisibilityOverride
         && !atlasTerrainCollectionOverride
         && !atlasTransparentVisibilityOverride
@@ -282,11 +291,17 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
     {
         public IShaderProgram Shader { get; }
         public string OriginalFragmentCode { get; }
+        public string OriginalVertexCode { get; }
 
-        public AtlasFilterShaderState(IShaderProgram shader, string originalFragmentCode)
+        public AtlasFilterShaderState(
+            IShaderProgram shader,
+            string originalFragmentCode,
+            string originalVertexCode
+        )
         {
             Shader = shader;
             OriginalFragmentCode = originalFragmentCode;
+            OriginalVertexCode = originalVertexCode;
         }
     }
 
@@ -487,6 +502,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
             capi,
             visibilityHarmony
         );
+        animatedDoorRenderer = new AtlasAnimatedDoorRendererAdapter(capi);
         oreTextureReplacement = new AtlasOreTextureReplacement(capi);
         vegetationTextureMask = new AtlasVegetationTextureMask(capi);
         boundaryResolver = new AtlasBoundaryResolver(
@@ -821,13 +837,34 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
         float pausedCloudAnimationDeltaTime,
         Vec3f? frozenCloudOffset,
         ModernAtlasServerPolicy entityPolicy,
-        bool blitToDefault
+        bool blitToDefault,
+        double oreWorkBudgetMilliseconds = 4,
+        double vegetationWorkBudgetMilliseconds = 4
     )
     {
         if (disabled) return false;
-        if (concealSurvivalOres && !oreTextureReplacement.Advance()) return false;
-        bool vegetationMaskReady = vegetationTextureMask.Advance();
-        if (hideVegetation && !vegetationMaskReady) return false;
+        LastRenderedCloudOverlayRequested = cloudsEnabled;
+        if (concealSurvivalOres
+            && !oreTextureReplacement.Advance(oreWorkBudgetMilliseconds))
+        {
+            return false;
+        }
+        // The mask is only needed when the caller requests vegetation hiding.
+        // Keep the binding flag false for the normal-vegetation path: it must
+        // not bind an optional mask merely because no preparation was needed.
+        bool vegetationMaskReady = hideVegetation
+            && vegetationTextureMask.Advance(vegetationWorkBudgetMilliseconds);
+        if (hideVegetation && !vegetationMaskReady)
+        {
+            if (!loggedVegetationFallback)
+            {
+                loggedVegetationFallback = true;
+                capi.Logger.Warning(
+                    "[ModernAtlas] Optional vegetation hiding is not ready; rendering normal vegetation until its atlas mask becomes available."
+                );
+            }
+            hideVegetation = false;
+        }
 
         IRenderAPI render = capi.Render;
         AtlasRenderStateScope renderState = AtlasRenderStateScope.Capture(render);
@@ -1225,6 +1262,14 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
                 hideUndergroundCaves ? surfaceHeightTexture : null,
                 animationsEnabled
             );
+            LastRenderedAnimatedDoorCount = animatedDoorRenderer.Render(
+                view,
+                visibleTerrainColumns,
+                capi.World.Player.Entity.Pos.X,
+                capi.World.Player.Entity.Pos.Z,
+                viewDistanceBlocks,
+                hideUndergroundCaves ? surfaceHeightTexture : null
+            );
             LastRenderedEntityCount = entityModelRenderer.Render(
                 deltaTime,
                 view,
@@ -1266,7 +1311,11 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
                 atlasCompleteMinimumChunkX * (float)GlobalConstants.ChunkSize,
                 atlasCompleteMinimumChunkZ * (float)GlobalConstants.ChunkSize,
                 (atlasCompleteMaximumChunkX + 1) * (float)GlobalConstants.ChunkSize,
-                (atlasCompleteMaximumChunkZ + 1) * (float)GlobalConstants.ChunkSize
+                (atlasCompleteMaximumChunkZ + 1) * (float)GlobalConstants.ChunkSize,
+                atlasSunDirection,
+                atlasSunColor,
+                atlasSkyDaylight,
+                atlasExposure
             ))
             {
                 throw new InvalidOperationException(
@@ -1282,7 +1331,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
                     "[ModernAtlas] Rendering the atlas from the game's completed chunk meshes and materials."
                 );
                 capi.Logger.Notification(
-                    "[ModernAtlas] Disabled the normal camera sky-horizon tint only inside the atlas terrain shader."
+                    "[ModernAtlas] Atlas background: procedural celestial gradient and restrained horizon haze are resolved after exact geometry, only inside the atlas framebuffer."
                 );
                 capi.Logger.Notification(
                     "[ModernAtlas] First atlas render timing: setup {0} ms, opaque terrain {1} ms, living entities {2} ms, transparent/liquids/clouds {3} ms, total {4} ms.",
@@ -1396,6 +1445,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
         disposed = true;
         lastAtlasCameraReady = false;
         mechanicalRenderer.ClearAnimationFreezes();
+        animatedDoorRenderer.Clear();
 
         // LeaveWorld is raised after the engine has started clearing its
         // DefaultShaderUniforms arrays. Activating an engine chunk shader at
@@ -1499,14 +1549,16 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
         }
     }
 
-    public bool AdvanceSurvivalOreConcealment() =>
-        !disabled && oreTextureReplacement.Advance();
+    public bool AdvanceSurvivalOreConcealment(
+        double workBudgetMilliseconds = 4
+    ) => !disabled && oreTextureReplacement.Advance(workBudgetMilliseconds);
 
     public bool ValidateSurvivalOreConcealment(out string diagnostic) =>
         oreTextureReplacement.Validate(out diagnostic);
 
-    public bool AdvanceVegetationMask() =>
-        !disabled && vegetationTextureMask.Advance();
+    public bool AdvanceVegetationMask(
+        double workBudgetMilliseconds = 4
+    ) => !disabled && vegetationTextureMask.Advance(workBudgetMilliseconds);
 
     public bool ValidateVegetationMask(out string diagnostic) =>
         vegetationTextureMask.Validate(out diagnostic);
@@ -1607,6 +1659,18 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
                 true
             );
 
+            // The procedural sky is intentionally opaque and no longer has a
+            // single clear-color signature. Use the resolver's independent
+            // validity attachment for the smoke coverage proof whenever the
+            // optional MRT is available. Procedural sky pixels are opaque by
+            // design, so a color-only fallback cannot prove terrain coverage
+            // and must fail closed for this diagnostic rather than report a
+            // false green. This does not disable normal atlas rendering.
+            bool hasValidityMask = boundaryResolver.TryReadValidityMask(
+                out _,
+                out AtlasValidityMaskDiagnostics validityDiagnostics
+            );
+
             int minimumAlpha = 255;
             int belowOpaque = 0;
             int backgroundPixels = 0;
@@ -1634,11 +1698,8 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
                 else nonBackgroundPixels++;
             }
 
-            bool sensibleCoverage = nonBackgroundPixels >= 64
-                && (nonBackgroundPixels >= 512
-                    || (screenshot.Pixels.Length > 0
-                        && (double)nonBackgroundPixels / screenshot.Pixels.Length
-                            >= 0.00025d));
+            bool sensibleCoverage = hasValidityMask
+                && validityDiagnostics.HasSensibleCoverage;
             bool valid = screenshot.Pixels.Length > 0
                 && minimumAlpha == 255
                 && belowOpaque == 0
@@ -1668,7 +1729,7 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
                 ? screenshot.Pixels[0]
                 : 0;
             diagnostic = string.Format(
-                "size={0}x{1}, minAlpha={2}, belowOpaque={3}, backgroundPixels={4}, nonBackgroundPixels={5}, nonBackgroundRatio={6:0.####}, sensibleCoverage={7}, drawBuffersChecked={8}, drawBuffersStable={9}, drawBuffers={10}, firstPacked=0x{11:X8}",
+                "size={0}x{1}, minAlpha={2}, belowOpaque={3}, backgroundPixels={4}, nonBackgroundPixels={5}, nonBackgroundRatio={6:0.####}, validityMask={7}, validPixels={8}, validRatio={9:0.####}, sensibleCoverage={10}, drawBuffersChecked={11}, drawBuffersStable={12}, drawBuffers={13}, firstPacked=0x{14:X8}",
                 resolved.Width,
                 resolved.Height,
                 minimumAlpha,
@@ -1678,6 +1739,9 @@ internal sealed partial class ExactChunkRendererAdapter : IDisposable
                 screenshot.Pixels.Length > 0
                     ? (double)nonBackgroundPixels / screenshot.Pixels.Length
                     : 0d,
+                hasValidityMask,
+                validityDiagnostics.ValidPixelCount,
+                validityDiagnostics.ValidRatio,
                 sensibleCoverage,
                 BoundaryDrawBufferStateCheckPerformed,
                 BoundaryDrawBufferStateCheckPassed,

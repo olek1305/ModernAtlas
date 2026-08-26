@@ -20,10 +20,10 @@ public sealed partial class ModernAtlasDialog
     private void ConfigureVisualLabSliders()
     {
         visualLabModal.GetAtlasSlider("atlas-exposure")?.SetValues(
-            Math.Clamp(config.AtlasExposurePercent, 50, 150),
-            50,
-            150,
-            5,
+            AtlasExposureCalibration.ClampPercent(config.AtlasExposurePercent),
+            AtlasExposureCalibration.MinimumPercent,
+            AtlasExposureCalibration.MaximumPercent,
+            AtlasExposureCalibration.SliderStepPercent,
             "%"
         );
         visualLabModal.GetAtlasSlider("cave-mask-brightness")?.SetValues(
@@ -42,7 +42,7 @@ public sealed partial class ModernAtlasDialog
         // next to them so "neutral" is a number, not a guess.
         visualLabModal?.GetDynamicText("visual-lab-exposure-default")?.SetNewText(
             FormattableString.Invariant(
-                $"now {Math.Clamp(config.AtlasExposurePercent, 50, 150)}% · default {DefaultAtlasExposurePercent}%"
+                $"now {AtlasExposureCalibration.ClampPercent(config.AtlasExposurePercent)}% · neutral {DefaultAtlasExposurePercent}%"
             )
         );
         visualLabModal?.GetDynamicText("visual-lab-cave-default")?.SetNewText(
@@ -52,13 +52,13 @@ public sealed partial class ModernAtlasDialog
         );
     }
 
-    internal const int DefaultAtlasExposurePercent = 150;
+    internal const int DefaultAtlasExposurePercent = AtlasExposureCalibration.DefaultPercent;
     internal const int DefaultCaveMaskBrightnessPercent = 100;
     internal const int DefaultMapLayerOpacityPercent = 75;
 
     private bool OnAtlasExposureChanged(int value)
     {
-        config.AtlasExposurePercent = Math.Clamp(value, 50, 150);
+        config.AtlasExposurePercent = AtlasExposureCalibration.ClampPercent(value);
         saveConfig();
         return true;
     }
@@ -228,6 +228,56 @@ public sealed partial class ModernAtlasDialog
         SyncPerformanceControls();
     }
 
+    private void OnPerformanceModeChanged(string value, bool selected)
+    {
+        if (!selected || synchronizingPerformanceControls) return;
+
+        AtlasPerformanceMode mode = AtlasPerformanceModeInfo.Parse(value);
+        string canonical = AtlasPerformanceModeInfo.CanonicalValue(mode);
+        if (string.Equals(config.PerformanceMode, canonical, StringComparison.Ordinal))
+        {
+            SyncPerformanceControls();
+            return;
+        }
+
+        config.PerformanceMode = canonical;
+        saveConfig();
+        SyncPerformanceControls();
+        capi.Logger.Notification(
+            "[ModernAtlas] Atlas performance mode changed to {0}; closed-atlas work remains disabled; opening preparation: {1}.",
+            AtlasPerformanceModeInfo.Label(mode),
+            AtlasPerformanceModeInfo.PreparesAtlasDuringOpening(mode)
+                ? "enhanced"
+                : "on-demand"
+        );
+        performanceTelemetryLogger?.Invoke("performance mode changed");
+    }
+
+    private void OnAtlasDetailChanged(string value, bool selected)
+    {
+        if (!selected || synchronizingPerformanceControls) return;
+
+        AtlasDetailMode mode = AtlasDetailModeInfo.Parse(value);
+        string canonical = AtlasDetailModeInfo.CanonicalValue(mode);
+        if (string.Equals(config.AtlasDetail, canonical, StringComparison.Ordinal))
+        {
+            SyncPerformanceControls();
+            return;
+        }
+
+        config.AtlasDetail = canonical;
+        saveConfig();
+        SyncPerformanceControls();
+        capi.Logger.Notification(
+            "[ModernAtlas] Atlas detail changed to {0}; texture reduction={1}; atlas clouds are {2}.",
+            AtlasDetailModeInfo.Label(mode),
+            AtlasDetailModeInfo.EffectiveTextureDetailReduction(mode),
+            AtlasDetailModeInfo.EffectiveCloudsEnabled(mode, config.CloudsEnabled)
+                ? "enabled"
+                : "suppressed"
+        );
+    }
+
     private void OnHideVegetationToggled(bool enabled)
     {
         if (synchronizingPerformanceControls) return;
@@ -392,6 +442,18 @@ public sealed partial class ModernAtlasDialog
         synchronizingPerformanceControls = true;
         try
         {
+            performanceModal.GetAtlasChoice("performance-mode")?.SetSelectedIndex(
+                PerformanceModeChoiceIndex
+            );
+            performanceModal.GetDynamicText("performance-description")?.SetNewText(
+                AtlasPerformanceModeInfo.Description(PerformanceMode)
+            );
+            performanceModal.GetAtlasChoice("atlas-detail")?.SetSelectedIndex(
+                AtlasDetailChoiceIndex
+            );
+            performanceModal.GetDynamicText("atlas-detail-description")?.SetNewText(
+                AtlasDetailModeInfo.Description(CurrentAtlasDetailMode)
+            );
             performanceModal.GetAtlasSwitch("performance-lighting")?.SetValue(
                 config.PerformanceLightingEnabled
             );

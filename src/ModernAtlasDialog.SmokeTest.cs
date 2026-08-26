@@ -7,6 +7,7 @@ using Cairo;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Config;
+using Vintagestory.API.Datastructures;
 using Vintagestory.API.Common.Entities;
 using Vintagestory.API.MathTools;
 namespace ModernAtlas;
@@ -18,8 +19,29 @@ namespace ModernAtlas;
 /// </summary>
 public sealed partial class ModernAtlasDialog
 {
-    internal void BeginAutomatedSmokeTest(Action<bool> completion)
+    internal void BeginAutomatedSmokeTest(
+        Action<bool> completion,
+        bool realDamageSmokeRun,
+        bool realDamageSmokePhase
+    )
     {
+        string? performancePolicyFailure = AtlasPerformanceModeInfo.Validate()
+            ?? AtlasDetailModeInfo.Validate()
+            ?? AtlasPresetProfile.Validate()
+            ?? AtlasExposureCalibration.Validate()
+            ?? ExactChunkRendererAdapter.ValidateAtlasBrightnessPolicy()
+            ?? ExactChunkRendererAdapter.ValidateAtlasDecorationDepthBiasPolicy()
+            ?? AtlasOrdinaryWorldScreenshotRenderer.ValidatePerformancePolicy();
+        if (performancePolicyFailure != null)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated performance-policy self-check failed: {0}.",
+                performancePolicyFailure
+            );
+            completion(false);
+            return;
+        }
+
         presentationChangeCoordinator.Reset(config.RenderOnScroll);
         automatedOriginalMapLayersEnabled = config.MapLayersEnabled;
         automatedOriginalCaveModeEnabled = config.CaveModeEnabled;
@@ -34,6 +56,8 @@ public sealed partial class ModernAtlasDialog
         automatedOriginalPerformanceLightingEnabled =
             config.PerformanceLightingEnabled;
         automatedOriginalHideVegetation = config.HideVegetation;
+        automatedOriginalPerformanceMode = config.PerformanceMode;
+        automatedOriginalAtlasDetail = config.AtlasDetail;
         automatedOriginalCheatModeEnabled = cheatModeEnabled;
         automatedOriginalScreenshotScale = config.ScreenshotScale;
         automatedOriginalScreenshotCaptureAreaPercent =
@@ -324,10 +348,26 @@ public sealed partial class ModernAtlasDialog
         automatedSmokeTestMapLayerPassed = false;
         automatedSmokeTestDamagePhase = 0;
         automatedSmokeTestDamageWarningPassed = false;
+        automatedRealDamageSmokeRun = realDamageSmokeRun;
+        automatedRealDamageSmokePhase = realDamageSmokePhase;
+        automatedRealDamageSmokeNextRequestId = 0;
+        automatedRealDamageSmokePendingRequestId = 0;
+        automatedRealDamageSmokePhaseStartedSeconds = float.NaN;
+        automatedRealDamageSmokePendingOperation = null;
+        automatedRealDamageSmokeBaselineHealth = float.NaN;
+        automatedRealDamageSmokeServerHealth = float.NaN;
+        automatedRealDamageSmokeHitObserved = false;
+        automatedRealDamageSmokeScreenshotQueued = false;
+        automatedRealDamageSmokeScreenshotSaved = false;
+        automatedRealDamageSmokeRestoreConfirmed = false;
+        automatedSmokeTestCloseOnDamageCaptured = false;
         pendingAutomatedMapLayerScreenshotSuffix = null;
         automatedSmokeTestHoldLayerHover = false;
         automatedSmokeTestPerformanceModeSelected = false;
         automatedSmokeTestPerformanceModeRendered = false;
+        automatedSmokeTestAtlasDetailSelected = false;
+        automatedSmokeTestAtlasDetailRendered = false;
+        automatedSmokeTestAtlasDetailRenderPhase = 0;
         automatedSmokeTestPresentationPassed = false;
         automatedSmokeTestResolvedAtlasAlphaChecked = false;
         automatedSmokeTestResolvedAtlasAlphaPassed = false;
@@ -554,6 +594,7 @@ public sealed partial class ModernAtlasDialog
             && automatedSmokeTestSearchPassed
             && automatedSmokeTestMapLayerPassed
             && automatedSmokeTestPerformanceModeRendered
+            && automatedSmokeTestAtlasDetailRendered
             && automatedSmokeTestPresentationPassed
             && automatedSmokeTestResolvedAtlasAlphaPassed
             && automatedSmokeTestViewDistancePassed
@@ -670,7 +711,7 @@ public sealed partial class ModernAtlasDialog
         if (!passed)
         {
             capi.Logger.Error(
-                "[ModernAtlas] Automated smoke summary: exact={0}, boundary={1}, resolvedAlpha={2}(checked={3}), viewDistance={4}(unchanged={5}, initial={6}), safeSurface={7}, pitch={8}/{9}, interface={10}, unit={11}/{12}, searchInput={13}, bilingual={14}, ore={15}, creativeOre={16}, partialZoom={17}, maximumZoom={18}, search={19}(phase={20}), layers={21}(phase={22}), performance={23}(selected={24}, renderedVegetationHidden={25}, flatLighting={26}), presentation={27}, screenshotPreview={34}, screenshotCapture={28}(requested={29}, sequenceStep={30}, outputs={31}, cancel={32}/{33}).",
+                "[ModernAtlas] Automated smoke summary: exact={0}, boundary={1}, resolvedAlpha={2}(checked={3}), viewDistance={4}(unchanged={5}, initial={6}), safeSurface={7}, pitch={8}/{9}, interface={10}, unit={11}/{12}, searchInput={13}, bilingual={14}, ore={15}, creativeOre={16}, partialZoom={17}, maximumZoom={18}, search={19}(phase={20}), layers={21}(phase={22}), performance={23}(selected={24}, renderedVegetationHidden={25}, flatLighting={26}), atlasDetail(selected={35}, rendered={36}), presentation={27}, screenshotPreview={34}, screenshotCapture={28}(requested={29}, sequenceStep={30}, outputs={31}, cancel={32}/{33}).",
                 AutomatedSmokeTestRenderedExactWorld,
                 exactChunkRenderer?.BoundaryResolvedLastFrame == true,
                 automatedSmokeTestResolvedAtlasAlphaPassed,
@@ -705,14 +746,55 @@ public sealed partial class ModernAtlasDialog
                 automatedScreenshotOutputValidationPassed,
                 automatedScreenshotCancelPassed,
                 automatedScreenshotCancelMode,
-                automatedSmokeScreenshotPreviewPassed
+                automatedSmokeScreenshotPreviewPassed,
+                automatedSmokeTestAtlasDetailSelected,
+                automatedSmokeTestAtlasDetailRendered
             );
         }
 
-        if (passed && automatedSmokeTestDamagePhase < 3)
+        bool realDamageSmokeComplete = automatedRealDamageSmokePhase
+            ? automatedSmokeTestDamagePhase >= 4
+            : automatedSmokeTestDamagePhase >= 3;
+        if (passed && !realDamageSmokeComplete)
         {
-            AdvanceAutomatedDamageWarningTest();
-            if (automatedSmokeTestDamagePhase < 3) return;
+            if (automatedRealDamageSmokePhase)
+            {
+                AdvanceAutomatedRealDamageSmokeTest();
+            }
+            else if (automatedRealDamageSmokeRun)
+            {
+                // The first cycle on the disposable world runs the complete
+                // atlas smoke suite but never applies a synthetic or real hit.
+                // The server-authoritative damage phase is reserved for cycle 2.
+                automatedSmokeTestDamageWarningPassed =
+                    ValidateDamageWarningAnimationForAutomatedTest(
+                        out string firstCycleDamageDiagnostic
+                    );
+                if (automatedSmokeTestDamageWarningPassed)
+                {
+                    capi.Logger.Notification(
+                        "[ModernAtlas] REAL DAMAGE SMOKE cycle 1 warning self-check passed: {0}; no hit was requested.",
+                        firstCycleDamageDiagnostic
+                    );
+                }
+                else
+                {
+                    capi.Logger.Error(
+                        "[ModernAtlas] REAL DAMAGE SMOKE FAILED: cycle 1 warning self-check failed: {0}.",
+                        firstCycleDamageDiagnostic
+                    );
+                }
+                automatedSmokeTestDamagePhase = 4;
+            }
+            else
+            {
+                AdvanceAutomatedDamageWarningTest();
+            }
+            int requiredDamagePhase = automatedRealDamageSmokePhase ? 4 : 3;
+            if (automatedSmokeTestDamagePhase < requiredDamagePhase)
+            {
+                return;
+            }
         }
         passed = passed && automatedSmokeTestDamageWarningPassed;
 
@@ -721,6 +803,355 @@ public sealed partial class ModernAtlasDialog
         automatedSmokeTestCompletion = null;
         RestoreAutomatedSmokeTestPreferences();
         completion?.Invoke(passed);
+    }
+
+    private bool TryReadAutomatedCurrentHealth(out float current)
+    {
+        current = float.NaN;
+        try
+        {
+            ITreeAttribute? healthTree = capi.World.Player?.Entity
+                ?.WatchedAttributes.GetTreeAttribute("health");
+            if (healthTree == null) return false;
+            current = healthTree.GetFloat("currenthealth", float.NaN);
+            return float.IsFinite(current);
+        }
+        catch
+        {
+            current = float.NaN;
+            return false;
+        }
+    }
+
+    private bool RequestAutomatedRealDamageSmokeAction(
+        ModernAtlasSmokeDamageOperation operation,
+        float value
+    )
+    {
+        int requestId = ++automatedRealDamageSmokeNextRequestId;
+        if (!requestRealDamageSmokeAction(operation, value, requestId))
+        {
+            return false;
+        }
+        automatedRealDamageSmokePendingRequestId = requestId;
+        automatedRealDamageSmokePendingOperation = operation;
+        return true;
+    }
+
+    private void BeginAutomatedRealDamagePhase(int phase)
+    {
+        automatedSmokeTestDamagePhase = phase;
+        automatedRealDamageSmokePhaseStartedSeconds =
+            automatedSmokeTestElapsedSeconds;
+    }
+
+    private bool FailTimedOutAutomatedRealDamagePhase(string phaseName)
+    {
+        float elapsed = automatedSmokeTestElapsedSeconds
+            - automatedRealDamageSmokePhaseStartedSeconds;
+        if (float.IsFinite(elapsed)
+            && elapsed < AutomatedRealDamagePhaseTimeoutSeconds)
+        {
+            return false;
+        }
+
+        bool restoreQueued = false;
+        if (float.IsFinite(automatedRealDamageSmokeBaselineHealth)
+            && !automatedRealDamageSmokeRestoreConfirmed)
+        {
+            // Queue a restore even if the apply response is late or the
+            // client timed out while waiting for health replication. Network
+            // ordering keeps Apply before Restore; a harmless rejected restore
+            // is preferable to leaving a disposable test player damaged.
+            restoreQueued = RequestAutomatedRealDamageSmokeAction(
+                ModernAtlasSmokeDamageOperation.Restore,
+                AutomatedRealDamageSmokeHealth
+            );
+        }
+
+        automatedSmokeTestDamageWarningPassed = false;
+        automatedSmokeTestDamagePhase = 4;
+        capi.Logger.Error(
+            "[ModernAtlas] REAL DAMAGE SMOKE FAILED: {0} phase exceeded {1:0.0}s; restore queued={2}.",
+            phaseName,
+            AutomatedRealDamagePhaseTimeoutSeconds,
+            restoreQueued
+        );
+        return true;
+    }
+
+    internal void OnRealDamageSmokeResult(
+        int requestId,
+        ModernAtlasSmokeDamageOperation operation,
+        bool accepted,
+        float health,
+        string diagnostic
+    )
+    {
+        if (!automatedRealDamageSmokePhase
+            || automatedRealDamageSmokePendingRequestId != requestId
+            || automatedRealDamageSmokePendingOperation != operation)
+        {
+            return;
+        }
+
+        automatedRealDamageSmokePendingRequestId = 0;
+        automatedRealDamageSmokePendingOperation = null;
+        if (operation == ModernAtlasSmokeDamageOperation.Apply)
+        {
+            if (accepted && float.IsFinite(health))
+            {
+                automatedRealDamageSmokeServerHealth = health;
+                capi.Logger.Notification(
+                    "[ModernAtlas] REAL DAMAGE SMOKE server response accepted: replicated health target={0:0.###}; {1}.",
+                    health,
+                    diagnostic
+                );
+                capi.Logger.Notification(
+                    "[ModernAtlas] REAL DAMAGE APPLIED: client observed health={0:0.###}->{1:0.###} from the server-authoritative hit.",
+                    automatedRealDamageSmokeBaselineHealth,
+                    health
+                );
+            }
+            else
+            {
+                automatedSmokeTestDamageWarningPassed = false;
+                automatedSmokeTestDamagePhase = 4;
+                capi.Logger.Error(
+                    "[ModernAtlas] REAL DAMAGE SMOKE FAILED: server rejected the bounded hit: {0}.",
+                    diagnostic
+                );
+            }
+            return;
+        }
+
+        if (operation == ModernAtlasSmokeDamageOperation.Restore
+            && accepted
+            && float.IsFinite(health)
+            && Math.Abs(health - automatedRealDamageSmokeBaselineHealth) <= 0.01f)
+        {
+            automatedRealDamageSmokeRestoreConfirmed = true;
+            capi.Logger.Notification(
+                "[ModernAtlas] REAL DAMAGE SMOKE restore response accepted: authoritative health={0:0.###}; {1}.",
+                health,
+                diagnostic
+            );
+        }
+        else
+        {
+            automatedSmokeTestDamageWarningPassed = false;
+            automatedSmokeTestDamagePhase = 4;
+            capi.Logger.Error(
+                "[ModernAtlas] REAL DAMAGE SMOKE FAILED: authoritative health restore was rejected: {0}.",
+                diagnostic
+            );
+        }
+    }
+
+    private void AdvanceAutomatedRealDamageSmokeTest()
+    {
+        if (!automatedRealDamageSmokePhase) return;
+
+        switch (automatedSmokeTestDamagePhase)
+        {
+            case 0:
+                if (!float.IsFinite(automatedRealDamageSmokePhaseStartedSeconds))
+                {
+                    automatedRealDamageSmokePhaseStartedSeconds =
+                        automatedSmokeTestElapsedSeconds;
+                }
+                if (FailTimedOutAutomatedRealDamagePhase("baseline/request"))
+                {
+                    return;
+                }
+                if (capi.World.Player?.WorldData.CurrentGameMode
+                        != EnumGameMode.Survival
+                    || capi.World.Player?.Entity is not EntityPlayer player
+                    || !player.Alive
+                    || !TryReadAutomatedCurrentHealth(
+                        out float baselineHealth
+                    )
+                    || Math.Abs(
+                        baselineHealth - AutomatedRealDamageSmokeHealth
+                    ) > 0.01f)
+                {
+                    automatedSmokeTestDamageWarningPassed = false;
+                    BeginAutomatedRealDamagePhase(4);
+                    capi.Logger.Error(
+                        "[ModernAtlas] REAL DAMAGE SMOKE FAILED: cycle 2 did not observe a live Survival player with safe finite health before the hit."
+                    );
+                    return;
+                }
+
+                automatedSmokeTestCloseOnDamageBefore = config.CloseAtlasOnDamage;
+                automatedSmokeTestCloseOnDamageCaptured = true;
+                config.CloseAtlasOnDamage = false;
+                automatedRealDamageSmokeBaselineHealth = baselineHealth;
+                if (!RequestAutomatedRealDamageSmokeAction(
+                        ModernAtlasSmokeDamageOperation.Apply,
+                        1f
+                    ))
+                {
+                    automatedSmokeTestDamageWarningPassed = false;
+                    BeginAutomatedRealDamagePhase(4);
+                    config.CloseAtlasOnDamage =
+                        automatedSmokeTestCloseOnDamageBefore;
+                    automatedSmokeTestCloseOnDamageCaptured = false;
+                    capi.Logger.Error(
+                        "[ModernAtlas] REAL DAMAGE SMOKE FAILED: the server-authoritative hit request could not be queued."
+                    );
+                    return;
+                }
+
+                capi.Logger.Notification(
+                    "[ModernAtlas] REAL DAMAGE SMOKE requested one bounded server-authoritative hit at health={0:0.###}; CloseAtlasOnDamage is false only until restoration.",
+                    baselineHealth
+                );
+                BeginAutomatedRealDamagePhase(1);
+                return;
+
+            case 1:
+                if (FailTimedOutAutomatedRealDamagePhase("health replication/inhale"))
+                {
+                    return;
+                }
+                if (automatedRealDamageSmokePendingOperation != null)
+                {
+                    return;
+                }
+                if (!float.IsFinite(automatedRealDamageSmokeServerHealth))
+                {
+                    automatedSmokeTestDamageWarningPassed = false;
+                    BeginAutomatedRealDamagePhase(4);
+                    return;
+                }
+
+                if (!automatedRealDamageSmokeHitObserved
+                    && TryReadAutomatedCurrentHealth(
+                        out float observedHealth
+                    )
+                    && observedHealth > 0f
+                    && observedHealth
+                        < automatedRealDamageSmokeBaselineHealth - 0.01f)
+                {
+                    automatedRealDamageSmokeHitObserved = true;
+                    capi.Logger.Notification(
+                        "[ModernAtlas] REAL DAMAGE OBSERVED: production health watcher saw {0:0.###}->{1:0.###}; waiting for the smooth warning to become visible.",
+                        automatedRealDamageSmokeBaselineHealth,
+                        observedHealth
+                    );
+                }
+
+                if (!automatedRealDamageSmokeHitObserved
+                    || !DamageWarningMeaningfulInhaleForAutomatedTest)
+                {
+                    return;
+                }
+
+                if (!QueueAutomatedMapLayerScreenshot("damage-warning-real"))
+                {
+                    automatedSmokeTestDamageWarningPassed = false;
+                    automatedSmokeTestDamagePhase = 4;
+                    capi.Logger.Error(
+                        "[ModernAtlas] REAL DAMAGE SMOKE FAILED: MODERNATLAS_SMOKE_SCREENSHOT is required for the intentional warning screenshot."
+                    );
+                    return;
+                }
+                automatedRealDamageSmokeScreenshotQueued = true;
+                BeginAutomatedRealDamagePhase(2);
+                return;
+
+            case 2:
+                if (FailTimedOutAutomatedRealDamagePhase("warning screenshot"))
+                {
+                    return;
+                }
+                if (pendingAutomatedMapLayerScreenshotSuffix != null)
+                {
+                    return;
+                }
+                if (!automatedRealDamageSmokeScreenshotQueued
+                    || !automatedRealDamageSmokeScreenshotSaved)
+                {
+                    automatedSmokeTestDamageWarningPassed = false;
+                    BeginAutomatedRealDamagePhase(4);
+                    capi.Logger.Error(
+                        "[ModernAtlas] REAL DAMAGE SMOKE FAILED: the intentional damage-warning UI screenshot was not saved."
+                    );
+                    return;
+                }
+                if (!RequestAutomatedRealDamageSmokeAction(
+                        ModernAtlasSmokeDamageOperation.Restore,
+                        AutomatedRealDamageSmokeHealth
+                    ))
+                {
+                    automatedSmokeTestDamageWarningPassed = false;
+                    BeginAutomatedRealDamagePhase(4);
+                    capi.Logger.Error(
+                        "[ModernAtlas] REAL DAMAGE SMOKE FAILED: the authoritative health restore request could not be queued."
+                    );
+                    return;
+                }
+                BeginAutomatedRealDamagePhase(3);
+                return;
+
+            case 3:
+                if (FailTimedOutAutomatedRealDamagePhase("health restore"))
+                {
+                    return;
+                }
+                if (automatedRealDamageSmokePendingOperation != null)
+                {
+                    return;
+                }
+                if (!automatedRealDamageSmokeRestoreConfirmed)
+                {
+                    return;
+                }
+
+                // The server response confirms that the authoritative setter
+                // accepted the restore, but the watched tree can still carry
+                // the previous 99 value for a few client frames. Keep this
+                // phase alive until the production health watcher observes
+                // the restored baseline; the existing phase timeout remains
+                // the failure boundary.
+                if (!TryReadAutomatedCurrentHealth(
+                        out float restoredHealth
+                    ))
+                {
+                    return;
+                }
+                if (restoredHealth <= 0f)
+                {
+                    automatedSmokeTestDamageWarningPassed = false;
+                    BeginAutomatedRealDamagePhase(4);
+                    capi.Logger.Error(
+                        "[ModernAtlas] REAL DAMAGE SMOKE FAILED: player became unsafe before replicated health restoration to {0:0.###}.",
+                        automatedRealDamageSmokeBaselineHealth
+                    );
+                    return;
+                }
+                if (Math.Abs(
+                        restoredHealth - automatedRealDamageSmokeBaselineHealth
+                    ) > 0.01f)
+                {
+                    return;
+                }
+
+                config.CloseAtlasOnDamage =
+                    automatedSmokeTestCloseOnDamageBefore;
+                automatedSmokeTestCloseOnDamageCaptured = false;
+                automatedSmokeTestDamageWarningPassed = true;
+                BeginAutomatedRealDamagePhase(4);
+                capi.Logger.Notification(
+                    "[ModernAtlas] REAL DAMAGE HEALTH RESTORED: client confirmed replicated health={0:0.###}; CloseAtlasOnDamage restored in memory.",
+                    restoredHealth
+                );
+                return;
+
+            default:
+                return;
+        }
     }
 
     /// <summary>
@@ -738,10 +1169,12 @@ public sealed partial class ModernAtlasDialog
                 automatedSmokeTestDamagePhase = 3;
                 return;
             }
-            // Leave the steady LOW HEALTH state on and capture the next frame:
-            // the warning is drawn before the screenshot is taken, so the stored
-            // image really shows it.
-            TriggerDamageWarningForAutomatedTest(true);
+            // Capture the next frame after a direct damage signal. The warning
+            // is drawn before the screenshot is taken, so the stored image
+            // really shows it. Seek to an inhale sample so the queued capture
+            // cannot land on the intentionally quiet signal frame.
+            TriggerDamageWarningForAutomatedTest();
+            SetDamageWarningAnimationTimeForAutomatedTest(0.72f);
             QueueAutomatedMapLayerScreenshot("damage-warning");
             automatedSmokeTestDamagePhase = 1;
             return;
@@ -757,7 +1190,7 @@ public sealed partial class ModernAtlasDialog
             // the close itself is deferred to the next frame start.
             config.CloseAtlasOnDamage = true;
             automatedSmokeTestDamageWasOpenBeforeSignal = IsOpened();
-            TriggerDamageWarningForAutomatedTest(false);
+            TriggerDamageWarningForAutomatedTest();
             ScheduleAutomatedEmergencyCloseCheck();
             automatedSmokeTestDamagePhase = 2;
         }
@@ -766,12 +1199,32 @@ public sealed partial class ModernAtlasDialog
     private bool ExerciseAutomatedDamageWarningChecks()
     {
         EnumGameMode mode = LocalGameModeForAutomatedTest;
+        bool animationCurve = ValidateDamageWarningAnimationForAutomatedTest(
+            out string animationDiagnostic
+        );
+        if (!animationCurve)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated damage-warning animation self-check failed: {0}.",
+                animationDiagnostic
+            );
+        }
         // The policy must depend on the actual game mode only. Cheat Mode is a
         // protected feature switch and may never suppress a safety warning.
         bool policyRules =
             DamageWarningPolicyForModeForAutomatedTest(EnumGameMode.Survival)
             && DamageWarningPolicyForModeForAutomatedTest(EnumGameMode.Guest)
             && !DamageWarningPolicyForModeForAutomatedTest(EnumGameMode.Creative);
+        bool deathClosePolicy =
+            !DamageWarningEmergencyCloseRequiredForAutomatedTest(true, 8f)
+            && DamageWarningEmergencyCloseRequiredForAutomatedTest(false, float.NaN)
+            && DamageWarningEmergencyCloseRequiredForAutomatedTest(true, 0f)
+            && DamageWarningEmergencyCloseRequiredForAutomatedTest(true, -1f)
+            && !DamageWarningEmergencyCloseRequiredForAutomatedTest(true, float.NaN)
+            && !DamageWarningEmergencyCloseRequiredForAutomatedTest(
+                true,
+                float.PositiveInfinity
+            );
         bool livePolicy = DamageWarningPolicyActive
             == DamageWarningPolicyForModeForAutomatedTest(mode);
 
@@ -779,7 +1232,7 @@ public sealed partial class ModernAtlasDialog
         // the overlay and the auto-close inert.
         SetDamageWarningModeOverrideForAutomatedTest(EnumGameMode.Creative);
         ResetDamageWarning();
-        TriggerDamageWarningForAutomatedTest(false);
+        TriggerDamageWarningForAutomatedTest();
         bool creativeSuppressed = !DamageWarningWouldRenderForAutomatedTest
             && !AutoCloseOnDamageActiveForAutomatedTest
             && IsOpened();
@@ -791,20 +1244,42 @@ public sealed partial class ModernAtlasDialog
         bool cheatStillWarns = DamageWarningPolicyActive;
 
         automatedSmokeTestCloseOnDamageBefore = config.CloseAtlasOnDamage;
+        automatedSmokeTestCloseOnDamageCaptured = true;
         config.CloseAtlasOnDamage = false;
 
+        // A repeat hit restarts and strengthens the episode, but must carry the
+        // visible alpha across the signal instead of blinking down to zero.
         ResetDamageWarning();
-        TriggerDamageWarningForAutomatedTest(false);
-        bool pulseActive = DamageWarningWouldRenderForAutomatedTest
-            && !DamageWarningLowHealthForAutomatedTest;
+        TriggerDamageWarningForAutomatedTest();
+        SetDamageWarningAnimationTimeForAutomatedTest(0.72f);
+        float repeatVignetteBefore = DamageWarningVignetteAlpha();
+        float repeatCaptionBefore = DamageWarningCaptionAlpha(repeatVignetteBefore);
+        TriggerDamageWarningForAutomatedTest();
+        float repeatVignetteAfter = DamageWarningVignetteAlpha();
+        float repeatCaptionAfter = DamageWarningCaptionAlpha(repeatVignetteAfter);
+        bool repeatHitContinuous = repeatVignetteBefore > 0.01f
+            && repeatVignetteAfter + 0.001f >= repeatVignetteBefore
+            && repeatCaptionAfter + 0.001f >= repeatCaptionBefore;
 
-        TriggerDamageWarningForAutomatedTest(true);
-        bool lowHealthActive = DamageWarningWouldRenderForAutomatedTest
-            && DamageWarningLowHealthForAutomatedTest;
+        ResetDamageWarning();
+        TriggerDamageWarningForAutomatedTest();
+        // The signal frame is intentionally quiet: the real render-time curve
+        // starts at zero and becomes visible only as its smooth attack begins.
+        bool pulseActive = !DamageWarningWouldRenderForAutomatedTest
+            && DamageWarningVignetteAlphaForAutomatedTest(
+                0.24f,
+                0.65f
+            ) > 0.002f
+            && !DamageWarningActiveForAutomatedTest;
 
-        // A capture must never bake the warning into its image.
+        // A capture must never bake the warning into its image. First seek to
+        // an inhale sample so this assertion cannot pass while the curve is
+        // still intentionally quiet on its signal frame.
+        SetDamageWarningAnimationTimeForAutomatedTest(0.72f);
+        bool visibleBeforeCapture = DamageWarningWouldRenderForAutomatedTest;
         pendingScreenshotRequest = true;
-        bool suppressedDuringCapture = !DamageWarningWouldRenderForAutomatedTest;
+        bool suppressedDuringCapture = visibleBeforeCapture
+            && !DamageWarningWouldRenderForAutomatedTest;
         pendingScreenshotRequest = false;
 
         // The overlay must be drawable, not merely flagged active.
@@ -815,40 +1290,46 @@ public sealed partial class ModernAtlasDialog
         bool stillInteractive = IsOpened() && CaptureAllInputs();
 
         bool passed = texturesReady
+            && animationCurve
             && policyRules
+            && deathClosePolicy
             && livePolicy
             && creativeSuppressed
             && cheatStillWarns
             && pulseActive
-            && lowHealthActive
+            && repeatHitContinuous
             && suppressedDuringCapture
             && clearedAfterReset
             && stillInteractive;
         if (!passed)
         {
             config.CloseAtlasOnDamage = automatedSmokeTestCloseOnDamageBefore;
+            automatedSmokeTestCloseOnDamageCaptured = false;
             SetDamageWarningModeOverrideForAutomatedTest(null);
             automatedSmokeTestDamageWarningPassed = false;
             capi.Logger.Error(
-                "[ModernAtlas] Automated damage-warning check failed: texturesReady={10}, mode={0}, rules={1}, live={2}, creativeSuppressed={3}, cheatStillWarns={4}, pulse={5}, lowHealth={6}, suppressedDuringCapture={7}, cleared={8}, interactive={9}.",
+                "[ModernAtlas] Automated damage-warning check failed: mode={0}, rules={1}, deathClosePolicy={2}, live={3}, creativeSuppressed={4}, cheatStillWarns={5}, pulse={6}, repeatHitContinuous={7}, suppressedDuringCapture={8}, cleared={9}, interactive={10}, texturesReady={11}, animation={12}.",
                 mode,
                 policyRules,
+                deathClosePolicy,
                 livePolicy,
                 creativeSuppressed,
                 cheatStillWarns,
                 pulseActive,
-                lowHealthActive,
+                repeatHitContinuous,
                 suppressedDuringCapture,
                 clearedAfterReset,
                 stillInteractive,
-                texturesReady
+                texturesReady,
+                animationCurve
             );
             return false;
         }
 
         capi.Logger.Notification(
-            "[ModernAtlas] Automated damage-warning check passed: actual world mode={0}; resolved Creative suppresses the overlay and auto-close, Survival with accepted Cheat Mode keeps warning, the pulse and LOW HEALTH states render, a capture stays clean and input remains live.",
-            mode
+            "[ModernAtlas] Automated damage-warning check passed: actual world mode={0}; samples {1}; signal and caption reach true transparent breath troughs, dead/zero-health players queue an unconditional deferred close, resolved Creative suppresses normal damage warnings, Survival with accepted Cheat Mode keeps warning, and captures stay clean.",
+            mode,
+            animationDiagnostic
         );
         return true;
     }
@@ -866,6 +1347,7 @@ public sealed partial class ModernAtlasDialog
                 bool closed = !IsOpened();
                 bool reopened = closed && TryOpen();
                 config.CloseAtlasOnDamage = automatedSmokeTestCloseOnDamageBefore;
+                automatedSmokeTestCloseOnDamageCaptured = false;
                 SetDamageWarningModeOverrideForAutomatedTest(null);
                 ResetDamageWarning();
                 automatedSmokeTestDamageWarningPassed = wasOpen && closed && reopened;
@@ -960,6 +1442,92 @@ public sealed partial class ModernAtlasDialog
             && queuedBottomPanelSection == AtlasPanelSection.Performance;
         OpenBottomPanelImmediately(AtlasPanelSection.Performance);
         bool performanceOpened = performanceQueued && performanceModalOpen;
+        bool performanceModeControlPresent = performanceOpened
+            && performanceModal?.GetAtlasChoice("performance-mode") != null;
+        bool performanceModeHighSelected = false;
+        bool performanceModeOnDemandSelected = false;
+        if (performanceModeControlPresent)
+        {
+            bool startedOnDemand = PerformanceMode == AtlasPerformanceMode.OnDemand;
+            if (startedOnDemand)
+            {
+                performanceModeHighSelected =
+                    ClickAtlasControlForAutomatedTest(performanceModal, "performance-mode")
+                    && PerformanceMode == AtlasPerformanceMode.HighThroughput;
+                performanceModeOnDemandSelected = performanceModeHighSelected
+                    && ClickAtlasControlForAutomatedTest(performanceModal, "performance-mode", 0.1)
+                    && PerformanceMode == AtlasPerformanceMode.OnDemand;
+            }
+            else
+            {
+                performanceModeOnDemandSelected =
+                    ClickAtlasControlForAutomatedTest(performanceModal, "performance-mode", 0.1)
+                    && PerformanceMode == AtlasPerformanceMode.OnDemand;
+                performanceModeHighSelected = performanceModeOnDemandSelected
+                    && ClickAtlasControlForAutomatedTest(performanceModal, "performance-mode")
+                    && PerformanceMode == AtlasPerformanceMode.HighThroughput;
+                if (performanceModeHighSelected)
+                {
+                    performanceModeOnDemandSelected =
+                        ClickAtlasControlForAutomatedTest(performanceModal, "performance-mode", 0.1)
+                        && PerformanceMode == AtlasPerformanceMode.OnDemand;
+                }
+            }
+        }
+        bool atlasDetailControlPresent = performanceOpened
+            && performanceModal?.GetAtlasChoice("atlas-detail") != null;
+        bool atlasDetailReducedSelected = false;
+        bool atlasDetailFullSelected = false;
+        if (atlasDetailControlPresent)
+        {
+            bool startedFull = CurrentAtlasDetailMode == AtlasDetailMode.Full;
+            if (startedFull)
+            {
+                atlasDetailReducedSelected =
+                    ClickAtlasControlForAutomatedTest(
+                        performanceModal,
+                        "atlas-detail",
+                        0.1
+                    )
+                    && CurrentAtlasDetailMode == AtlasDetailMode.Reduced;
+                atlasDetailFullSelected = atlasDetailReducedSelected
+                    && ClickAtlasControlForAutomatedTest(
+                        performanceModal,
+                        "atlas-detail"
+                    )
+                    && CurrentAtlasDetailMode == AtlasDetailMode.Full;
+            }
+            else
+            {
+                atlasDetailFullSelected =
+                    ClickAtlasControlForAutomatedTest(
+                        performanceModal,
+                        "atlas-detail"
+                    )
+                    && CurrentAtlasDetailMode == AtlasDetailMode.Full;
+                atlasDetailReducedSelected = atlasDetailFullSelected
+                    && ClickAtlasControlForAutomatedTest(
+                        performanceModal,
+                        "atlas-detail",
+                        0.1
+                    )
+                    && CurrentAtlasDetailMode == AtlasDetailMode.Reduced;
+            }
+        }
+        automatedSmokeTestAtlasDetailSelected = atlasDetailControlPresent
+            && atlasDetailReducedSelected
+            && atlasDetailFullSelected;
+        if (automatedSmokeTestAtlasDetailSelected)
+        {
+            // Render both visual profiles after the UI clicks. The preference
+            // is restored by AdvanceAutomatedAtlasDetailRenderCheck after the
+            // two effective atlas-frame diagnostics have passed.
+            config.AtlasDetail = AtlasDetailModeInfo.ReducedValue;
+            saveConfig();
+            SyncPerformanceControls();
+            automatedSmokeTestAtlasDetailRenderPhase = 1;
+            lastAtlasWorldRenderMilliseconds = 0;
+        }
         bool flatLightingSelected = performanceOpened
             && ClickAtlasControlForAutomatedTest(
                 performanceModal,
@@ -972,9 +1540,21 @@ public sealed partial class ModernAtlasDialog
             );
         automatedSmokeTestPerformanceModeSelected = performanceOpened
             && flatLightingSelected
-            && vegetationSelected;
+            && vegetationSelected
+            && performanceModeControlPresent
+            && performanceModeHighSelected
+            && performanceModeOnDemandSelected
+            && automatedSmokeTestAtlasDetailSelected;
         if (automatedSmokeTestPerformanceModeSelected)
         {
+            // The broad visual smoke suite already exercises every expensive
+            // atlas filter. Keep that suite deterministic by running its
+            // rendering phase with the existing high-throughput budgets after
+            // the two profile choices and the On-demand scheduler self-check
+            // have passed. The original preference is restored at world exit.
+            config.PerformanceMode = AtlasPerformanceModeInfo.HighThroughputValue;
+            saveConfig();
+            SyncPerformanceControls();
             OnPerformanceLightingToggled(false);
             OnHideVegetationToggled(true);
             lastAtlasWorldRenderMilliseconds = 0;
@@ -1823,7 +2403,63 @@ public sealed partial class ModernAtlasDialog
             );
         }
     }
+
 #endif
+    }
+
+    private void AdvanceAutomatedAtlasDetailRenderCheck()
+    {
+        if (!automatedSmokeTestActive
+            || !automatedSmokeTestAtlasDetailSelected
+            || automatedSmokeTestAtlasDetailRendered
+            || exactChunkRenderer == null)
+        {
+            return;
+        }
+
+        if (automatedSmokeTestAtlasDetailRenderPhase == 1)
+        {
+            bool reducedPassed = CurrentAtlasDetailMode == AtlasDetailMode.Reduced
+                && exactChunkRenderer.LastRenderedTextureDetailReduction == 2
+                && !exactChunkRenderer.LastRenderedCloudOverlayRequested;
+            if (!reducedPassed) return;
+
+            capi.Logger.Notification(
+                "[ModernAtlas] Automated Atlas detail check passed for Reduced: texture reduction=2, atlas clouds requested=False; world cloud preference remains {0}.",
+                config.CloudsEnabled
+            );
+            config.AtlasDetail = AtlasDetailModeInfo.FullValue;
+            saveConfig();
+            SyncPerformanceControls();
+            automatedSmokeTestAtlasDetailRenderPhase = 2;
+            lastAtlasWorldRenderMilliseconds = 0;
+            return;
+        }
+
+        if (automatedSmokeTestAtlasDetailRenderPhase != 2) return;
+
+        bool fullPassed = CurrentAtlasDetailMode == AtlasDetailMode.Full
+            && exactChunkRenderer.LastRenderedTextureDetailReduction == 0
+            && exactChunkRenderer.LastRenderedCloudOverlayRequested
+                == config.CloudsEnabled;
+        if (!fullPassed) return;
+
+        capi.Logger.Notification(
+            "[ModernAtlas] Automated Atlas detail check passed for Full: texture reduction=0, atlas clouds requested={0}; selected cloud preference was preserved.",
+            config.CloudsEnabled
+        );
+        config.AtlasDetail = AtlasDetailModeInfo.CanonicalValue(
+            AtlasDetailModeInfo.Parse(automatedOriginalAtlasDetail)
+        );
+        saveConfig();
+        SyncPerformanceControls();
+        automatedSmokeTestAtlasDetailRenderPhase = 3;
+        automatedSmokeTestAtlasDetailRendered = true;
+        lastAtlasWorldRenderMilliseconds = 0;
+        capi.Logger.Notification(
+            "[ModernAtlas] Automated Atlas detail profile check passed; restored the original Atlas detail preference to {0}.",
+            AtlasDetailModeInfo.Label(CurrentAtlasDetailMode)
+        );
     }
 
     private bool ValidateScreenshotPreviewRange()
@@ -3133,7 +3769,17 @@ public sealed partial class ModernAtlasDialog
                 )
                     ? configuredPath[..^4]
                     : configuredPath;
-                TrySaveAutomatedSmokeScreenshot($"{layerPrefix}-{layerSuffix}.png");
+                bool saved = TrySaveAutomatedSmokeScreenshot(
+                    $"{layerPrefix}-{layerSuffix}.png"
+                );
+                if (string.Equals(
+                    layerSuffix,
+                    "damage-warning-real",
+                    StringComparison.Ordinal
+                ))
+                {
+                    automatedRealDamageSmokeScreenshotSaved = saved;
+                }
             }
             return;
         }
@@ -3154,14 +3800,35 @@ public sealed partial class ModernAtlasDialog
             }
             automatedSmokeTestZoomBeforeMaximum = targetZoom;
             automatedSmokeTestPitchBeforeMaximum = targetPitchDegrees;
-            targetPitchDegrees = 72;
-            pitchDegrees = 72;
+            // Keep the historical 72-degree border probe by default, while
+            // allowing MODERNATLAS_SMOKE_PITCH to select the same bounded
+            // camera angle for the entire border/zoom sequence.
+            float smokeProbePitch = 72;
+            string? forcedSmokePitch = Environment.GetEnvironmentVariable(
+                SmokePitchEnvironmentVariable
+            );
+            if (float.TryParse(
+                forcedSmokePitch,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out float parsedSmokePitch
+            ))
+            {
+                smokeProbePitch = Math.Clamp(
+                    parsedSmokePitch,
+                    MinimumPitchDegrees,
+                    86
+                );
+            }
+            targetPitchDegrees = smokeProbePitch;
+            pitchDegrees = smokeProbePitch;
             zoom = targetZoom;
             automatedSmokeTestBorderTopDownStartedSeconds =
                 automatedSmokeTestElapsedSeconds;
             automatedSmokeTestBorderTopDownPending = true;
             capi.Logger.Notification(
-                "[ModernAtlas] Automated smoke test is holding a fitted top-down standard-world view for border inspection before layers and Cave Mode."
+                "[ModernAtlas] Automated smoke test is holding the fitted {0:0.0}-degree standard-world view for border inspection before layers and Cave Mode.",
+                smokeProbePitch
             );
             return;
         }
@@ -3192,6 +3859,10 @@ public sealed partial class ModernAtlasDialog
             }
             ApplyZoomWheel(1, false);
             ApplyZoomWheel(1, false);
+            // Coverage diagnostics are intentionally one-shot. Reset them
+            // before the next render so this partial-zoom frame publishes its
+            // own terrain and liquid admission counts.
+            exactChunkRenderer?.ResetTerrainCoverageDiagnostics();
             // The automated check validates a settled zoom level. Snap only
             // its synthetic wheel input to the target so live world frames
             // and newly completed chunk meshes cannot make the two-second
@@ -3234,6 +3905,9 @@ public sealed partial class ModernAtlasDialog
             }
             targetZoom = MaximumZoomIn;
             zoom = MaximumZoomIn;
+            // The maximum-zoom frame must likewise report fresh opaque and
+            // liquid coverage rather than reusing the opening-frame log.
+            exactChunkRenderer?.ResetTerrainCoverageDiagnostics();
             automatedSmokeTestMaximumZoomStartedSeconds =
                 automatedSmokeTestElapsedSeconds;
             automatedSmokeTestMaximumZoomPending = true;
@@ -3706,6 +4380,11 @@ public sealed partial class ModernAtlasDialog
         }
 
         automatedSmokeTestPreferencesCaptured = false;
+        if (automatedSmokeTestCloseOnDamageCaptured)
+        {
+            config.CloseAtlasOnDamage = automatedSmokeTestCloseOnDamageBefore;
+            automatedSmokeTestCloseOnDamageCaptured = false;
+        }
         bool accessChanged = cheatModeEnabled != automatedOriginalCheatModeEnabled;
         cheatModeEnabled = automatedOriginalCheatModeEnabled;
         automatedOriginalScreenshotFilters.Restore(config);
@@ -3723,6 +4402,12 @@ public sealed partial class ModernAtlasDialog
         config.ShowPlayerCompass = automatedOriginalShowPlayerCompass;
         config.HandheldInstrumentMode = automatedOriginalHandheldInstrumentMode;
         config.PerformanceLightingEnabled = automatedOriginalPerformanceLightingEnabled;
+        config.PerformanceMode = AtlasPerformanceModeInfo.CanonicalValue(
+            AtlasPerformanceModeInfo.Parse(automatedOriginalPerformanceMode)
+        );
+        config.AtlasDetail = AtlasDetailModeInfo.CanonicalValue(
+            AtlasDetailModeInfo.Parse(automatedOriginalAtlasDetail)
+        );
         if (accessChanged)
         {
             ClampPitchToAccessLevel(immediate: true);
@@ -5089,6 +5774,8 @@ public sealed partial class ModernAtlasDialog
             "creative-settings-button"
         };
 
+        bool deterministicScrollbarGeometry = true;
+
         foreach ((double width, double height, int columns, string name) in layouts)
         {
             if (SettingsColumnCount(width) != columns)
@@ -5099,6 +5786,42 @@ public sealed partial class ModernAtlasDialog
                     width,
                     SettingsColumnCount(width),
                     columns
+                );
+                return false;
+            }
+
+            MeasureSettingsLayout(
+                width,
+                height,
+                out List<AtlasSettingsSection>[] measuredColumns,
+                out double measuredColumnWidth,
+                out double measuredColumnStride,
+                out double measuredContentHeight,
+                out double measuredVisibleHeight
+            );
+            double measuredMaximum = Math.Max(
+                0,
+                measuredContentHeight - measuredVisibleHeight
+            );
+            double contentRight = SettingsSidePadding
+                + Math.Max(0, measuredColumns.Length - 1) * measuredColumnStride
+                + measuredColumnWidth;
+            double scrollbarX = width
+                - SettingsSidePadding
+                - SettingsScrollbarWidth;
+            bool geometryFits = measuredMaximum > 0.01
+                && contentRight <= scrollbarX - SettingsScrollbarGap + 0.5
+                && scrollbarX + SettingsScrollbarWidth <= width - SettingsSidePadding + 0.5;
+            if (!geometryFits)
+            {
+                deterministicScrollbarGeometry = false;
+                capi.Logger.Error(
+                    "[ModernAtlas] Automated settings-layout test: {0} scrollbar geometry is invalid (overflow={1}, contentRight={2:0.0}, track={3:0.0}-{4:0.0}).",
+                    name,
+                    measuredMaximum > 0.01,
+                    contentRight,
+                    scrollbarX,
+                    scrollbarX + SettingsScrollbarWidth
                 );
                 return false;
             }
@@ -5145,11 +5868,52 @@ public sealed partial class ModernAtlasDialog
             );
         }
         double liveMaximum = SettingsScrollMaximum(liveWidth, liveHeight);
+        GuiElementScrollbar? liveScrollbar = settingsModal?.GetScrollbar(
+            SettingsScrollbarKey
+        );
+        bool scrollbarComposed = liveMaximum > 0.01 && liveScrollbar != null;
+        if (liveScrollbar != null)
+        {
+            MeasureSettingsLayout(
+                liveWidth,
+                liveHeight,
+                out List<AtlasSettingsSection>[] liveColumns,
+                out double liveColumnWidth,
+                out double liveColumnStride,
+                out _,
+                out _
+            );
+            double liveContentRight = SettingsSidePadding
+                + Math.Max(0, liveColumns.Length - 1) * liveColumnStride
+                + liveColumnWidth;
+            double liveScrollbarX = liveWidth
+                - SettingsSidePadding
+                - SettingsScrollbarWidth;
+            scrollbarComposed = scrollbarComposed
+                && Math.Abs(liveScrollbar.Bounds.fixedX - liveScrollbarX) < 0.51
+                && Math.Abs(liveScrollbar.Bounds.fixedY - SettingsBodyTop) < 0.51
+                && Math.Abs(liveScrollbar.Bounds.fixedHeight - Math.Max(24, liveHeight - SettingsBodyTop - SettingsFooterHeight)) < 0.51
+                && liveContentRight <= liveScrollbarX - SettingsScrollbarGap + 0.5
+                && liveScrollbar.Bounds.fixedX + liveScrollbar.Bounds.fixedWidth
+                    <= liveWidth - SettingsSidePadding + 0.5;
+        }
+        if (!scrollbarComposed)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated settings-layout test: live overflow panel has no valid {0} track/thumb.",
+                SettingsScrollbarKey
+            );
+        }
         double restoreScroll = settingsScrollOffset;
         settingsScrollOffset = liveMaximum;
         OpenBottomPanelImmediately(AtlasPanelSection.Settings);
         bool bottomComposed = settingsModal?.GetElement("creative-settings-button") != null
             && settingsModal?.GetElement("map-layers") != null;
+        GuiElementScrollbar? bottomScrollbar = settingsModal?.GetScrollbar(
+            SettingsScrollbarKey
+        );
+        bool scrollbarAtBottom = bottomScrollbar != null
+            && Math.Abs(bottomScrollbar.CurrentYPosition - liveMaximum) < 0.51;
         settingsScrollOffset = restoreScroll;
         OpenBottomPanelImmediately(AtlasPanelSection.Settings);
 
@@ -5164,21 +5928,30 @@ public sealed partial class ModernAtlasDialog
         settingsSectionScrollOffset = 0;
         ResetBottomPanelState();
 
-        if (controlsComposed && bottomComposed && scrollPreserved)
+        if (controlsComposed
+            && bottomComposed
+            && scrollPreserved
+            && deterministicScrollbarGeometry
+            && scrollbarComposed
+            && scrollbarAtBottom)
         {
             capi.Logger.Notification(
-                "[ModernAtlas] Automated settings-layout test passed: 3/2/1 columns by width, all 18 control keys present in every layout, every control reachable by scrolling, and the scroll position survived a Visual Lab round trip (live panel {0:0}x{1:0}, scroll range {2:0}).",
+                "[ModernAtlas] Automated settings-layout test passed: 3/2/1 columns by width, all 18 control keys present in every layout, every control reachable by scrolling, proportional {3} track/thumb geometry verified, bottom position represented, and the scroll position survived a Visual Lab round trip (live panel {0:0}x{1:0}, scroll range {2:0}).",
                 liveWidth,
                 liveHeight,
-                liveMaximum
+                liveMaximum,
+                SettingsScrollbarKey
             );
             return true;
         }
         capi.Logger.Error(
-            "[ModernAtlas] Automated settings-layout test failed: controlsComposed={0}, bottomComposed={1}, scrollPreserved={2}.",
+            "[ModernAtlas] Automated settings-layout test failed: controlsComposed={0}, bottomComposed={1}, scrollPreserved={2}, deterministicScrollbarGeometry={3}, scrollbarComposed={4}, scrollbarAtBottom={5}.",
             controlsComposed,
             bottomComposed,
-            scrollPreserved
+            scrollPreserved,
+            deterministicScrollbarGeometry,
+            scrollbarComposed,
+            scrollbarAtBottom
         );
         return false;
     }

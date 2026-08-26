@@ -25,19 +25,53 @@ public sealed partial class ModernAtlasDialog
         {
         render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
 
-        preparingSurfaceFilter = !surfaceHeightTexture.Advance();
-        preparingOreConcealment = SurvivalOreConcealmentEnabled
-            && exactChunkRenderer != null
-            && !exactChunkRenderer.AdvanceSurvivalOreConcealment();
-        preparingVegetationMask = config.HideVegetation
-            && exactChunkRenderer != null
-            && !exactChunkRenderer.AdvanceVegetationMask();
-        if (preparingSurfaceFilter
-            || preparingOreConcealment
-            || preparingVegetationMask)
+        if (exactChunkRenderer == null)
         {
+            MarkAtlasRenderingFailure("The exact atlas renderer is unavailable.");
+            return false;
+        }
+        if (exactChunkRenderer.RenderingFailed)
+        {
+            MarkAtlasRenderingFailure(
+                "The exact atlas renderer was disabled after a rendering exception."
+            );
+            return false;
+        }
+
+        AtlasPerformanceBudget performanceBudget = AtlasPerformanceModeInfo.Budget(
+            PerformanceMode
+        );
+        AtlasDetailMode atlasDetailMode = CurrentAtlasDetailMode;
+        preparingSurfaceFilter = !surfaceHeightTexture.Advance(
+            performanceBudget.FirstFrameWorkBudgetMilliseconds,
+            performanceBudget.SurfaceMaximumChunks
+        );
+        preparingOreConcealment = SurvivalOreConcealmentEnabled
+            && !exactChunkRenderer.AdvanceSurvivalOreConcealment(
+                performanceBudget.OreWorkBudgetMilliseconds
+            );
+        preparingVegetationMask = config.HideVegetation
+            && !exactChunkRenderer.AdvanceVegetationMask(
+                performanceBudget.VegetationWorkBudgetMilliseconds
+            );
+        if (preparingSurfaceFilter || preparingOreConcealment)
+        {
+            List<string> reasons = new();
+            if (preparingSurfaceFilter) reasons.Add("surface filter");
+            if (preparingOreConcealment)
+            {
+                reasons.Add("survival ore concealment");
+            }
+            if (preparingVegetationMask) reasons.Add("vegetation mask");
+            LogAtlasPreparationReason(string.Join(", ", reasons));
             ClearSurfacePreparationFrame();
             return false;
+        }
+        if (preparingVegetationMask)
+        {
+            LogAtlasPreparationReason(
+                "optional vegetation mask is not ready; normal vegetation remains visible"
+            );
         }
 
         AtlasViewportBounds viewport = AtlasViewport;
@@ -104,7 +138,7 @@ public sealed partial class ModernAtlasDialog
 
         // Tiled screenshots preserve the same disclosed living models as the
         // interactive atlas, including the local player's own 3D model.
-        bool rendered = exactChunkRenderer?.Render(
+        bool rendered = exactChunkRenderer.Render(
             deltaTime,
             projection,
             centerX,
@@ -118,26 +152,57 @@ public sealed partial class ModernAtlasDialog
             surfaceHeightTexture,
             mapLayerTexture,
             EffectiveMapLayerOpacity,
-            0,
+            AtlasDetailModeInfo.EffectiveTextureDetailReduction(atlasDetailMode),
             config.PerformanceLightingEnabled,
-            config.HideVegetation,
+            config.HideVegetation && !preparingVegetationMask,
             config.AnimationsEnabled,
-            Math.Clamp(config.AtlasExposurePercent, 50, 150) / 100f,
+            AtlasExposureCalibration.ToMultiplier(config.AtlasExposurePercent),
             Math.Clamp(config.CaveMaskBrightnessPercent, 50, 150) / 100f,
             windWaveCounter,
             windWaveCounterHighFrequency,
             waterStillCounter,
             waterFlowCounter,
-            config.CloudsEnabled,
+            AtlasDetailModeInfo.EffectiveCloudsEnabled(
+                atlasDetailMode,
+                config.CloudsEnabled
+            ),
             config.LiveLightingEnabled,
             config.FixedSunHour,
             renderAnimationOffset,
             captureProjection ? screenshotFrozenCloudOffset : null,
             visibleEntityPolicy,
-            false
-        ) == true;
+            false,
+            performanceBudget.OreWorkBudgetMilliseconds,
+            performanceBudget.VegetationWorkBudgetMilliseconds
+        );
         render.GlViewport(0, 0, render.FrameWidth, render.FrameHeight);
+        if (rendered)
+        {
+            AdvanceAutomatedAtlasDetailRenderCheck();
+        }
+        if (!rendered)
+        {
+            if (exactChunkRenderer.RenderingFailed)
+            {
+                MarkAtlasRenderingFailure(
+                    "The exact atlas renderer was disabled after a rendering exception."
+                );
+            }
+            else
+            {
+                LogAtlasPreparationReason(
+                    "the terrain renderer has not published a complete frame yet"
+                );
+            }
+        }
         return rendered;
+        }
+        catch (Exception exception)
+        {
+            MarkAtlasRenderingFailure(
+                $"An atlas rendering exception occurred: {exception.Message}"
+            );
+            return false;
         }
         finally
         {
@@ -188,6 +253,7 @@ public sealed partial class ModernAtlasDialog
     {
         leftDragging = false;
         rightDragging = false;
+        settingsScrollbarPointerDown = false;
         leftDragDistance = 0;
     }
 
@@ -269,18 +335,34 @@ public sealed partial class ModernAtlasDialog
 
         int chunkSize = GlobalConstants.ChunkSize;
         int radius = GameViewDistance;
-        int minimumChunkX = (int)Math.Floor(
-            (capi.World.Player.Entity.Pos.X - radius) / chunkSize
+        int playerChunkX = (int)Math.Floor(
+            capi.World.Player.Entity.Pos.X / chunkSize
         );
-        int maximumChunkX = (int)Math.Floor(
-            (capi.World.Player.Entity.Pos.X + radius) / chunkSize
+        int playerChunkZ = (int)Math.Floor(
+            capi.World.Player.Entity.Pos.Z / chunkSize
         );
-        int minimumChunkZ = (int)Math.Floor(
-            (capi.World.Player.Entity.Pos.Z - radius) / chunkSize
-        );
-        int maximumChunkZ = (int)Math.Floor(
-            (capi.World.Player.Entity.Pos.Z + radius) / chunkSize
-        );
+        int completeChunkRadius =
+            ExactChunkRendererAdapter.CalculateCompleteViewChunkRadius(radius);
+        int minimumChunkX = completeChunkRadius > 0
+            ? playerChunkX - completeChunkRadius
+            : (int)Math.Floor(
+                (capi.World.Player.Entity.Pos.X - radius) / chunkSize
+            );
+        int maximumChunkX = completeChunkRadius > 0
+            ? playerChunkX + completeChunkRadius
+            : (int)Math.Floor(
+                (capi.World.Player.Entity.Pos.X + radius) / chunkSize
+            );
+        int minimumChunkZ = completeChunkRadius > 0
+            ? playerChunkZ - completeChunkRadius
+            : (int)Math.Floor(
+                (capi.World.Player.Entity.Pos.Z - radius) / chunkSize
+            );
+        int maximumChunkZ = completeChunkRadius > 0
+            ? playerChunkZ + completeChunkRadius
+            : (int)Math.Floor(
+                (capi.World.Player.Entity.Pos.Z + radius) / chunkSize
+            );
         int verticalChunkCount = Math.Max(
             1,
             (capi.World.BlockAccessor.MapSizeY + chunkSize - 1) / chunkSize
@@ -293,6 +375,11 @@ public sealed partial class ModernAtlasDialog
         float measuredForwardExtent = 0;
         bool found = false;
 
+        // consideredTerrainColumns also contains completed mesh columns that
+        // the conservative complete-view boundary rejects. Fitting the camera
+        // to those columns exposes the rejected corner as dark vertical chunk
+        // walls when the user zooms. Measure only the same player-anchored
+        // safe square that the renderer is allowed to publish.
         IReadOnlyCollection<(int X, int Z)> completedColumns = exactChunkRenderer
             ?.CompletedTerrainColumns ?? Array.Empty<(int X, int Z)>();
         foreach ((int X, int Z) column in completedColumns)
