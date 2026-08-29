@@ -5,7 +5,8 @@
 ModernAtlas is a Vintage Story 1.22.6 mod that should turn the world map into a
 readable, Google-Earth-like 3D atlas while remaining an independent product
 with its own name and visual identity. Rendering is client-side; the optional
-server side owns multiplayer living-entity disclosure policy.
+server side owns the authoritative multiplayer policy for living-entity
+disclosure and client Settings access.
 
 The target view contains terrain relief, mountains, water, block-built
 structures, ruins and trees. It should resemble the approved ModernAtlas
@@ -320,13 +321,53 @@ empty while the automated exact-terrain check still reported success.
   Multiplayer must not request distant chunks or disclose activity outside data
   already sent by the server.
 - `ModernAtlasServer.json` is authoritative in multiplayer. Its default is
-  `LivingEntitiesEnabled: false`. Players, animals,
-  hostile mobs and NPCs have independent allow flags after the master entity
-  switch is enabled. A missing server policy channel must use the same safe
-  defaults, and clients must not override them. Client settings may hide all
-  living models or any individual allowed category, but may never enable a
-  category denied by the multiplayer server. Singleplayer uses those client
-  visibility switches without the multiplayer server restriction.
+  `LivingEntitiesEnabled: false`, `AllowClientSettings: true` and
+  `AllowHideVegetation: true`. Players,
+  animals, hostile mobs and NPCs have independent allow flags after the master
+  entity switch is enabled. Setting `AllowClientSettings: false` sends an
+  explicit `ClientSettingsLocked` policy bit that disables the Settings
+  hierarchy and its preset mutations for multiplayer clients without changing
+  or deleting their saved local configuration. Once a matching policy channel
+  is observed it is latched for the world session, and Settings stay locked
+  until its packet arrives; an absent channel, an
+  older packet without that optional field, and singleplayer retain Settings
+  access for client-only compatibility. A missing server policy channel still
+  uses the safe defaults for Cheat Mode and living-entity disclosure, and
+  clients must not override those defaults. Client settings may hide all living
+  models or any individual allowed category, but may never enable a category
+  denied by the multiplayer server. Singleplayer uses those client visibility
+  switches without the multiplayer server restriction.
+  `AllowHideVegetation: false` keeps registered atlas vegetation visible,
+  disables that Performance control with the server-policy reason and prevents
+  Low/High presets from changing the saved client preference. Singleplayer,
+  absent channels and older packets retain the control for compatibility.
+  `PlayerOverrides` holds optional exceptions keyed only by the stable
+  `PlayerUID`; player names are display metadata and must never be used as the
+  authority key. Every nullable exception has three UI states: `Inherit`,
+  `Deny` and `Allow`. `Inherit` resolves from the current server default, and a
+  player entry with no remaining exception is removed instead of persisting an
+  empty override. Compute a separate effective policy for each recipient on
+  join and after every policy edit; never broadcast one player's exception to
+  another player.
+  `/ma admin` opens the server policy editor only for an in-game caller with
+  Vintage Story's `controlserver` privilege. The server must independently
+  recheck that privilege and validate every submitted value; displaying the
+  client GUI is never proof of authority. The panel edits global defaults and
+  persistent online or previously stored player exceptions, writes
+  `ModernAtlasServer.json`, and immediately redistributes effective policies
+  to all online players without requiring a restart. An unauthorized packet
+  must be rejected and logged without changing config or client policy.
+  The panel's `Creative / Cheat atlas tools` permission governs only
+  ModernAtlas cave mode, loaded-data search, unit inspection, dropped-item
+  markers, camera-angle tools and ore analysis. It must never grant or revoke
+  Vintage Story Creative mode, change a player's `CurrentGameMode`, or mutate
+  the world's `AllowCreativeMode`. Revoking the atlas permission must disable
+  any active ModernAtlas Cheat Mode on that client.
+  Multiplayer must never restore Cheat Mode from `CheatModeByWorld` or another
+  client configuration value. Enabling it requires a received authoritative
+  policy with `CheatModeAllowed: true` followed by the server-owned command
+  packet. Server denial also cancels every deferred Settings mutation before
+  it can update or save the local configuration.
 
 ## Performance and compatibility
 
@@ -413,6 +454,14 @@ empty while the automated exact-terrain check still reported success.
   `Releases/modernatlas_0.6.8.zip`. Do not change the version number unless the
   project owner explicitly requests it. Package-content changes may continue
   under this version during the current test cycle.
+- The current server package includes `/ma admin`, a ModernAtlas-styled
+  operator dialog for Server defaults and UID-keyed player exceptions. Its
+  controls cover Settings access, Hide vegetation, Creative/Cheat atlas tools
+  and the four living-entity categories. Updates are persisted server-side and
+  effective policy packets are refreshed immediately. The command is
+  player-only and uses `controlserver`; console invocation correctly stops at
+  the player requirement. Pure policy validation covers target isolation and
+  inheritance, and the admin state protobuf round trip is verified separately.
 - The verified liquid implementation uses completed liquid chunk meshes and a
   dedicated stable shader. Water and lava must remain anchored to their block
   coordinates when the atlas camera pans, rotates or tilts.
@@ -776,7 +825,27 @@ empty while the automated exact-terrain check still reported success.
   streaming queue when configured with an extreme full-LOD range.
 - Test both the safe server defaults and a policy with living models enabled.
   Confirm the generated server JSON, received policy log, per-category filter,
-  fallback behavior when the server has no policy channel.
+  `AllowClientSettings` allow/deny behavior (including `/ma low`/`high`, `.ma`
+  commands and incoming preset packets), temporary connected-channel lock,
+  fallback behavior when the server has no policy channel, and compatibility
+  with an older packet that has no Settings field.
+- Test `/ma admin` with both an unauthorized player and a caller holding
+  `controlserver`. Exercise Server defaults plus a named player's `Inherit`,
+  `Deny` and `Allow` states; verify the UID-keyed JSON, immediate target-only
+  policy refresh, reconnect persistence, removal of an all-Inherit entry and
+  active Cheat Mode revocation. Confirm that no selection changes the player's
+  Vintage Story game mode or the world's `AllowCreativeMode`.
+- `scripts/run-admin-policy-smoke-test.sh` is the separate opt-in dedicated
+  server/client smoke for that administrator workflow. It uses
+  `MODERNATLAS_ADMIN_POLICY_SMOKE_TEST=1`, requires distinct disposable data
+  paths plus a persisted admin/root fixture player, and exercises Target, all
+  seven policy selectors, `Apply policy`, `Inherit all`, `Close`, reopening,
+  JSON persistence, target isolation and immediate effective-policy refresh.
+  Keep it independent from `MODERNATLAS_SMOKE_TEST` and
+  `scripts/run-smoke-test.sh`: run it when server policy, `/ma admin`, its
+  network messages or admin GUI changes, not after every ordinary renderer
+  edit. It must restore the fixture's effective defaults and remove its player
+  exception before reporting success.
 
 ## Legal and repository rules
 

@@ -38,6 +38,13 @@ public sealed partial class ModernAtlasDialog
     private void SyncVisualLabControls()
     {
         ConfigureVisualLabSliders();
+        bool settingsAllowed = SettingsAccessAllowed;
+        if (visualLabModal != null)
+        {
+            visualLabModal.GetAtlasSlider("atlas-exposure")!.Enabled = settingsAllowed;
+            visualLabModal.GetAtlasSlider("cave-mask-brightness")!.Enabled = settingsAllowed;
+            visualLabModal.GetAtlasButton("visual-lab-reset")!.Enabled = settingsAllowed;
+        }
         // Current values live on the sliders; the neutral defaults are stated
         // next to them so "neutral" is a number, not a guess.
         visualLabModal?.GetDynamicText("visual-lab-exposure-default")?.SetNewText(
@@ -58,6 +65,7 @@ public sealed partial class ModernAtlasDialog
 
     private bool OnAtlasExposureChanged(int value)
     {
+        if (!SettingsAccessAllowed) return false;
         config.AtlasExposurePercent = AtlasExposureCalibration.ClampPercent(value);
         saveConfig();
         return true;
@@ -65,6 +73,7 @@ public sealed partial class ModernAtlasDialog
 
     private bool OnCaveMaskBrightnessChanged(int value)
     {
+        if (!SettingsAccessAllowed) return false;
         config.CaveMaskBrightnessPercent = Math.Clamp(value, 50, 150);
         saveConfig();
         return true;
@@ -72,6 +81,7 @@ public sealed partial class ModernAtlasDialog
 
     private bool ResetVisualTuning()
     {
+        if (!SettingsAccessAllowed) return false;
         config.AtlasExposurePercent = DefaultAtlasExposurePercent;
         config.MapLayerOpacityPercent = DefaultMapLayerOpacityPercent;
         config.CaveMaskBrightnessPercent = DefaultCaveMaskBrightnessPercent;
@@ -82,6 +92,7 @@ public sealed partial class ModernAtlasDialog
 
     private void OnRenderOnScrollToggled(bool enabled)
     {
+        if (!SettingsAccessAllowed) return;
         presentationChangeCoordinator.Request(
             enabled,
             capi.ElapsedMilliseconds,
@@ -95,6 +106,7 @@ public sealed partial class ModernAtlasDialog
 
     private void OnScrollRealtimeWeatherToggled(bool enabled)
     {
+        if (!SettingsAccessAllowed) return;
         config.ScrollRealtimeWeatherEnabled = enabled;
         saveConfig();
         SyncSettingsControls();
@@ -138,8 +150,18 @@ public sealed partial class ModernAtlasDialog
         SyncToolbarControls();
     }
 
+    private void OnSettingsHandheldInstrumentChoiceChanged(
+        string value,
+        bool selected
+    )
+    {
+        if (!SettingsAccessAllowed) return;
+        OnHandheldInstrumentChoiceChanged(value, selected);
+    }
+
     private void OnMapLayersToggled(bool enabled)
     {
+        if (!SettingsAccessAllowed) return;
         config.MapLayersEnabled = enabled;
         if (enabled)
         {
@@ -156,7 +178,7 @@ public sealed partial class ModernAtlasDialog
 
     private void OnCaveModeToggled(bool enabled)
     {
-        if (!CreativeCheatSettingsAvailable) return;
+        if (!SettingsAccessAllowed || !CreativeCheatSettingsAvailable) return;
 
         config.CaveModeEnabled = enabled;
         selectedEntityId = null;
@@ -167,7 +189,7 @@ public sealed partial class ModernAtlasDialog
 
     private void OnSearchModeToggled(bool enabled)
     {
-        if (!CreativeCheatSettingsAvailable)
+        if (!SettingsAccessAllowed || !CreativeCheatSettingsAvailable)
         {
             SyncSettingsControls();
             return;
@@ -187,7 +209,7 @@ public sealed partial class ModernAtlasDialog
 
     private void OnCameraAngleLockToggled(bool enabled)
     {
-        if (!CreativeCheatSettingsAvailable) return;
+        if (!SettingsAccessAllowed || !CreativeCheatSettingsAvailable) return;
 
         config.CameraAngleLocked = enabled;
         if (enabled)
@@ -200,6 +222,7 @@ public sealed partial class ModernAtlasDialog
 
     private void OnCloseAtlasOnDamageToggled(bool enabled)
     {
+        if (!SettingsAccessAllowed) return;
         config.CloseAtlasOnDamage = enabled;
         saveConfig();
         capi.Logger.Notification(
@@ -211,6 +234,7 @@ public sealed partial class ModernAtlasDialog
 
     private void OnAnimationsToggled(bool enabled)
     {
+        if (!SettingsAccessAllowed) return;
         if (!enabled && config.AnimationsEnabled)
         {
             CaptureAnimationFrame();
@@ -222,7 +246,7 @@ public sealed partial class ModernAtlasDialog
 
     private void OnPerformanceLightingToggled(bool enabled)
     {
-        if (synchronizingPerformanceControls) return;
+        if (synchronizingPerformanceControls || !SettingsAccessAllowed) return;
         config.PerformanceLightingEnabled = enabled;
         saveConfig();
         SyncPerformanceControls();
@@ -230,7 +254,7 @@ public sealed partial class ModernAtlasDialog
 
     private void OnPerformanceModeChanged(string value, bool selected)
     {
-        if (!selected || synchronizingPerformanceControls) return;
+        if (!selected || synchronizingPerformanceControls || !SettingsAccessAllowed) return;
 
         AtlasPerformanceMode mode = AtlasPerformanceModeInfo.Parse(value);
         string canonical = AtlasPerformanceModeInfo.CanonicalValue(mode);
@@ -255,7 +279,7 @@ public sealed partial class ModernAtlasDialog
 
     private void OnAtlasDetailChanged(string value, bool selected)
     {
-        if (!selected || synchronizingPerformanceControls) return;
+        if (!selected || synchronizingPerformanceControls || !SettingsAccessAllowed) return;
 
         AtlasDetailMode mode = AtlasDetailModeInfo.Parse(value);
         string canonical = AtlasDetailModeInfo.CanonicalValue(mode);
@@ -280,7 +304,13 @@ public sealed partial class ModernAtlasDialog
 
     private void OnHideVegetationToggled(bool enabled)
     {
-        if (synchronizingPerformanceControls) return;
+        if (synchronizingPerformanceControls
+            || !SettingsAccessAllowed
+            || !HideVegetationAllowed)
+        {
+            SyncPerformanceControls();
+            return;
+        }
         config.HideVegetation = enabled;
         saveConfig();
         SyncPerformanceControls();
@@ -288,6 +318,7 @@ public sealed partial class ModernAtlasDialog
 
     private void OnSkipOpeningAnimationToggled(bool enabled)
     {
+        if (!SettingsAccessAllowed) return;
         config.SkipOpeningAnimation = enabled;
         saveConfig();
         SyncSettingsControls();
@@ -295,6 +326,7 @@ public sealed partial class ModernAtlasDialog
 
     private void OnCloudsToggled(bool enabled)
     {
+        if (!SettingsAccessAllowed) return;
         config.CloudsEnabled = enabled;
         saveConfig();
         SyncSettingsControls();
@@ -302,36 +334,42 @@ public sealed partial class ModernAtlasDialog
 
     private void OnLivingEntitiesToggled(bool enabled)
     {
+        if (!SettingsAccessAllowed) return;
         config.LivingEntitiesEnabled = enabled;
         SaveEntitySettings();
     }
 
     private void OnPlayersToggled(bool enabled)
     {
+        if (!SettingsAccessAllowed) return;
         config.ShowPlayers = enabled;
         SaveEntitySettings();
     }
 
     private void OnAnimalsToggled(bool enabled)
     {
+        if (!SettingsAccessAllowed) return;
         config.ShowAnimals = enabled;
         SaveEntitySettings();
     }
 
     private void OnMobsToggled(bool enabled)
     {
+        if (!SettingsAccessAllowed) return;
         config.ShowMobs = enabled;
         SaveEntitySettings();
     }
 
     private void OnNpcsToggled(bool enabled)
     {
+        if (!SettingsAccessAllowed) return;
         config.ShowNpcs = enabled;
         SaveEntitySettings();
     }
 
     private void OnLiveLightingToggled(bool enabled)
     {
+        if (!SettingsAccessAllowed) return;
         config.LiveLightingEnabled = enabled;
         // Live and fixed solar controls are meaningful only with directional
         // atlas lighting enabled. Selecting either mode must not silently
@@ -344,6 +382,7 @@ public sealed partial class ModernAtlasDialog
 
     private bool OnFixedSunHourChanged(int hour)
     {
+        if (!SettingsAccessAllowed) return false;
         config.FixedSunHour = Math.Clamp(hour, 0, 24);
         config.LiveLightingEnabled = false;
         config.PerformanceLightingEnabled = true;
@@ -351,6 +390,49 @@ public sealed partial class ModernAtlasDialog
         SyncSettingsControls();
         SyncPerformanceControls();
         return true;
+    }
+
+    private static bool IsSettingsHierarchySection(AtlasPanelSection section) =>
+        section == AtlasPanelSection.Settings
+        || section == AtlasPanelSection.Performance
+        || section == AtlasPanelSection.Creative
+        || section == AtlasPanelSection.VisualLab;
+
+    /// <summary>
+    /// A policy update can arrive between two GUI frames. Dispose the active
+    /// Settings composer immediately instead of queueing an animated close:
+    /// this prevents a pending child section from being rebuilt by a viewport
+    /// recompose and leaves Exit/Hide and the atlas renderer untouched.
+    /// </summary>
+    private void CloseSettingsHierarchyForServerPolicy()
+    {
+        // The presentation switch commits after a short debounce. Revocation
+        // must cancel that pending write even when the Settings panel was
+        // already closing, otherwise a client preference can change after the
+        // authoritative deny packet has been applied.
+        presentationChangeCoordinator.Reset(config.RenderOnScroll);
+        bool currentIsSettings = IsSettingsHierarchySection(bottomPanelSection);
+        bool queuedIsSettings = IsSettingsHierarchySection(queuedBottomPanelSection);
+        if (!SettingsHierarchyOpen && !currentIsSettings && !queuedIsSettings)
+        {
+            return;
+        }
+
+        ResetPointerDrag();
+        if (currentIsSettings)
+        {
+            DisposeBottomPanelComposer();
+        }
+        else
+        {
+            queuedBottomPanelSection = AtlasPanelSection.None;
+        }
+        SetLogicalBottomPanel(AtlasPanelSection.None);
+        settingsScrollOffset = 0;
+        settingsSectionScrollOffset = 0;
+        capi.Logger.Notification(
+            "[ModernAtlas] Closed the Settings hierarchy because the server policy disabled client Settings; local configuration was preserved."
+        );
     }
 
     private void SaveEntitySettings()
@@ -363,57 +445,86 @@ public sealed partial class ModernAtlasDialog
     private void RefreshVisibleEntityPolicy()
     {
         bool masterEnabled = config.LivingEntitiesEnabled;
-        visibleEntityPolicy.ShowPlayers = masterEnabled
-            && config.ShowPlayers
-            && (capi.IsSinglePlayer || serverPolicy.ShowPlayers);
-        visibleEntityPolicy.ShowAnimals = masterEnabled
-            && config.ShowAnimals
-            && (capi.IsSinglePlayer || serverPolicy.ShowAnimals);
-        visibleEntityPolicy.ShowMobs = masterEnabled
-            && config.ShowMobs
-            && (capi.IsSinglePlayer || serverPolicy.ShowMobs);
-        visibleEntityPolicy.ShowNpcs = masterEnabled
-            && config.ShowNpcs
-            && (capi.IsSinglePlayer || serverPolicy.ShowNpcs);
+        visibleEntityPolicy.ShowPlayers =
+            ModernAtlasServerSettingsPolicy.AllowsEntityCategory(
+                capi.IsSinglePlayer,
+                config.ShowPlayers,
+                serverPolicy.ShowPlayers,
+                masterEnabled
+            );
+        visibleEntityPolicy.ShowAnimals =
+            ModernAtlasServerSettingsPolicy.AllowsEntityCategory(
+                capi.IsSinglePlayer,
+                config.ShowAnimals,
+                serverPolicy.ShowAnimals,
+                masterEnabled
+            );
+        visibleEntityPolicy.ShowMobs =
+            ModernAtlasServerSettingsPolicy.AllowsEntityCategory(
+                capi.IsSinglePlayer,
+                config.ShowMobs,
+                serverPolicy.ShowMobs,
+                masterEnabled
+            );
+        visibleEntityPolicy.ShowNpcs =
+            ModernAtlasServerSettingsPolicy.AllowsEntityCategory(
+                capi.IsSinglePlayer,
+                config.ShowNpcs,
+                serverPolicy.ShowNpcs,
+                masterEnabled
+            );
     }
 
     private void SyncSettingsControls()
     {
         if (settingsModal == null) return;
+        bool settingsAllowed = SettingsAccessAllowed;
         settingsModal.GetAtlasSwitch("render-on-scroll")?.SetValue(
             presentationChangeCoordinator.DisplayedValue(config.RenderOnScroll)
         );
+        settingsModal.GetAtlasSwitch("render-on-scroll")!.Enabled = settingsAllowed;
         settingsModal.GetAtlasSwitch("scroll-realtime-weather")?.SetValue(
             config.ScrollRealtimeWeatherEnabled
         );
-        settingsModal.GetAtlasChoice("handheld-instrument")?.SetSelectedIndex(
-            HandheldInstrumentChoiceIndex
-        );
+        settingsModal.GetAtlasSwitch("scroll-realtime-weather")!.Enabled = settingsAllowed;
+        GuiElementAtlasChoice? settingsInstrument =
+            settingsModal.GetAtlasChoice("handheld-instrument");
+        if (settingsInstrument != null)
+        {
+            settingsInstrument.SetSelectedIndex(HandheldInstrumentChoiceIndex);
+            settingsInstrument.Enabled = settingsAllowed;
+        }
         settingsModal.GetAtlasSwitch("map-layers")?.SetValue(config.MapLayersEnabled);
+        settingsModal.GetAtlasSwitch("map-layers")!.Enabled = settingsAllowed;
         settingsModal.GetAtlasSwitch("search-mode")?.SetValue(
             CreativeCheatSettingsAvailable && config.SearchModeEnabled
         );
         settingsModal.GetAtlasSwitch("search-mode")!.Enabled =
-            CreativeCheatSettingsAvailable;
+            settingsAllowed && CreativeCheatSettingsAvailable;
         settingsModal.GetAtlasSwitch("animations")?.SetValue(config.AnimationsEnabled);
+        settingsModal.GetAtlasSwitch("animations")!.Enabled = settingsAllowed;
         // The switch shows the stored preference in every mode; actual Creative
         // only suppresses its effect, so the value survives a mode change.
         settingsModal.GetAtlasSwitch("close-on-damage")?.SetValue(
             config.CloseAtlasOnDamage
         );
+        settingsModal.GetAtlasSwitch("close-on-damage")!.Enabled = settingsAllowed;
         settingsModal.GetAtlasSwitch("skip-opening-animation")?.SetValue(
             config.SkipOpeningAnimation
         );
+        settingsModal.GetAtlasSwitch("skip-opening-animation")!.Enabled = settingsAllowed;
         bool liveCloudsAvailable =
             VolumetricCloudRendererAdapter.IsEnabledByGraphicsSettings(capi);
         settingsModal.GetAtlasSwitch("clouds")?.SetValue(
             liveCloudsAvailable && config.CloudsEnabled
         );
-        settingsModal.GetAtlasSwitch("clouds")!.Enabled = liveCloudsAvailable;
+        settingsModal.GetAtlasSwitch("clouds")!.Enabled =
+            settingsAllowed && liveCloudsAvailable;
         bool solarLightingActive = config.PerformanceLightingEnabled;
         settingsModal.GetAtlasSwitch("live-lighting")?.SetValue(
             solarLightingActive && config.LiveLightingEnabled
         );
+        settingsModal.GetAtlasSwitch("live-lighting")!.Enabled = settingsAllowed;
         settingsModal.GetAtlasSlider("fixed-sun-hour")?.SetValues(
             Math.Clamp(config.FixedSunHour, 0, 24),
             0,
@@ -425,10 +536,14 @@ public sealed partial class ModernAtlasDialog
         // opt back into directional lighting. Do not show a live switch as on
         // while the performance override is silently suppressing it.
         settingsModal.GetAtlasSlider("fixed-sun-hour")!.Enabled =
-            !solarLightingActive || !config.LiveLightingEnabled;
+            settingsAllowed
+            && (!solarLightingActive || !config.LiveLightingEnabled);
         bool serverAllowsAny = capi.IsSinglePlayer || serverPolicy.AnyEntityModels;
-        settingsModal.GetAtlasSwitch("entities")?.SetValue(config.LivingEntitiesEnabled && serverAllowsAny);
-        settingsModal.GetAtlasSwitch("entities")!.Enabled = serverAllowsAny;
+        settingsModal.GetAtlasSwitch("entities")?.SetValue(
+            config.LivingEntitiesEnabled && serverAllowsAny
+        );
+        settingsModal.GetAtlasSwitch("entities")!.Enabled =
+            settingsAllowed && serverAllowsAny;
         SyncEntityCategorySwitch("players", config.ShowPlayers, serverPolicy.ShowPlayers);
         SyncEntityCategorySwitch("animals", config.ShowAnimals, serverPolicy.ShowAnimals);
         SyncEntityCategorySwitch("mobs", config.ShowMobs, serverPolicy.ShowMobs);
@@ -445,20 +560,38 @@ public sealed partial class ModernAtlasDialog
             performanceModal.GetAtlasChoice("performance-mode")?.SetSelectedIndex(
                 PerformanceModeChoiceIndex
             );
+            performanceModal.GetAtlasChoice("performance-mode")!.Enabled =
+                SettingsAccessAllowed;
             performanceModal.GetDynamicText("performance-description")?.SetNewText(
                 AtlasPerformanceModeInfo.Description(PerformanceMode)
             );
             performanceModal.GetAtlasChoice("atlas-detail")?.SetSelectedIndex(
                 AtlasDetailChoiceIndex
             );
+            performanceModal.GetAtlasChoice("atlas-detail")!.Enabled =
+                SettingsAccessAllowed;
             performanceModal.GetDynamicText("atlas-detail-description")?.SetNewText(
                 AtlasDetailModeInfo.Description(CurrentAtlasDetailMode)
             );
             performanceModal.GetAtlasSwitch("performance-lighting")?.SetValue(
                 config.PerformanceLightingEnabled
             );
+            performanceModal.GetAtlasSwitch("performance-lighting")!.Enabled =
+                SettingsAccessAllowed;
             performanceModal.GetAtlasSwitch("hide-vegetation")?.SetValue(
-                config.HideVegetation
+                HideVegetationActive
+            );
+            performanceModal.GetAtlasSwitch("hide-vegetation")!.Enabled =
+                SettingsAccessAllowed && HideVegetationAllowed;
+            performanceModal.GetDynamicText("hide-vegetation-label")?.SetNewText(
+                HideVegetationAllowed
+                    ? "Hide vegetation"
+                    : $"Hide vegetation · {ModernAtlasServerSettingsPolicy.DisabledReason}"
+            );
+            performanceModal.GetDynamicText("hide-vegetation-description")?.SetNewText(
+                HideVegetationAllowed
+                    ? "Hides registered plants, bushes and leaves, including mods."
+                    : ModernAtlasServerSettingsPolicy.DisabledReason
             );
         }
         finally
@@ -478,15 +611,18 @@ public sealed partial class ModernAtlasDialog
         creativeSettingsModal.GetAtlasSwitch("camera-angle-lock")?.SetValue(
             available && config.CameraAngleLocked
         );
-        creativeSettingsModal.GetAtlasSwitch("cave-mode")!.Enabled = available;
-        creativeSettingsModal.GetAtlasSwitch("camera-angle-lock")!.Enabled = available;
+        creativeSettingsModal.GetAtlasSwitch("cave-mode")!.Enabled =
+            SettingsAccessAllowed && available;
+        creativeSettingsModal.GetAtlasSwitch("camera-angle-lock")!.Enabled =
+            SettingsAccessAllowed && available;
     }
 
     private void SyncEntityCategorySwitch(string key, bool clientEnabled, bool serverEnabled)
     {
         bool categoryAllowed = capi.IsSinglePlayer || serverEnabled;
         settingsModal.GetAtlasSwitch(key)?.SetValue(clientEnabled && categoryAllowed);
-        settingsModal.GetAtlasSwitch(key)!.Enabled = config.LivingEntitiesEnabled && categoryAllowed;
+        settingsModal.GetAtlasSwitch(key)!.Enabled =
+            SettingsAccessAllowed && config.LivingEntitiesEnabled && categoryAllowed;
     }
 
 }

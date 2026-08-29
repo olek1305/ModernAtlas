@@ -893,6 +893,18 @@ internal sealed class GuiElementAtlasChoice : GuiElementControl
 
     public void SetSelectedIndex(int index) => Select(index, false);
 
+    /// <summary>
+    /// Exercises the same selection path as one arrow click for the separate
+    /// opt-in GUI smoke tests. Normal UI code must keep using mouse input or
+    /// SetSelectedIndex when no callback is intended.
+    /// </summary>
+    internal bool InvokeDirectionFromOwner(int direction)
+    {
+        if (!Enabled || direction == 0 || names.Length == 0) return false;
+        Select(selectedIndex + Math.Sign(direction), true);
+        return true;
+    }
+
     public void SetList(string[] values, string[] names)
     {
         this.values = values;

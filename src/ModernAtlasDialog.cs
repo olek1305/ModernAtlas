@@ -77,6 +77,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private readonly ModernAtlasServerPolicy serverPolicy;
     private readonly ModernAtlasServerPolicy visibleEntityPolicy = new();
     private readonly Action saveConfig;
+    private readonly Func<bool> settingsAccessAllowedProvider;
     private readonly Action<string>? performanceTelemetryLogger;
     private readonly Func<bool> requestClose;
     private readonly Func<bool> requestEmergencyClose;
@@ -582,6 +583,27 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         public bool DisplayedValue(bool committedRenderOnScroll) => pending
             ? requestedRenderOnScroll
             : committedRenderOnScroll;
+
+        public static string? ValidateServerPolicyCancellation()
+        {
+            PresentationChangeCoordinator coordinator = new();
+            coordinator.Reset(committedRenderOnScroll: true);
+            coordinator.Request(
+                requestedRenderOnScroll: false,
+                nowMilliseconds: 100,
+                debounceMilliseconds: 250
+            );
+            coordinator.Reset(committedRenderOnScroll: true);
+            if (coordinator.HasPending
+                || !coordinator.DisplayedValue(committedRenderOnScroll: true)
+                || coordinator.TryTake(1000, out _)
+                || coordinator.TryTakePending(out _))
+            {
+                return "a deferred presentation change survived a server-policy cancellation";
+            }
+
+            return null;
+        }
     }
 
     private string HandheldInstrumentMode => string.Equals(
@@ -656,8 +678,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
             // takes the access away for a few statements and checks that the
             // ore layer, its selector entry and its read-out all withdraw.
             if (automatedSmokeTestRevokeSpoilerAccess) return false;
-            if (cheatModeEnabled
-                && (capi.IsSinglePlayer || serverPolicy.CheatModeAllowed))
+            if (cheatModeEnabled && CheatModeAccessAllowed)
             {
                 return true;
             }
@@ -699,6 +720,24 @@ public sealed partial class ModernAtlasDialog : GuiDialog
     private bool SearchModeActive => CreativeCheatSettingsAvailable
         && config.SearchModeEnabled;
     private bool MapLayerControlsVisible => config.MapLayersEnabled;
+    /// <summary>
+    /// Client Settings are non-sensitive and stay usable for singleplayer or
+    /// a client-only install. In multiplayer only an explicit server lock can
+    /// deny them; the lock is never inferred from the entity policy fields.
+    /// </summary>
+    private bool SettingsAccessAllowed => settingsAccessAllowedProvider();
+    private bool HideVegetationAllowed =>
+        ModernAtlasServerSettingsPolicy.AllowsHideVegetation(
+            capi.IsSinglePlayer,
+            serverPolicy
+        );
+    private bool HideVegetationActive =>
+        config.HideVegetation && HideVegetationAllowed;
+    private bool CheatModeAccessAllowed =>
+        ModernAtlasServerSettingsPolicy.AllowsCheatMode(
+            capi.IsSinglePlayer,
+            serverPolicy
+        );
     private bool SettingsHierarchyOpen => settingsModalOpen
         || performanceModalOpen
         || creativeSettingsModalOpen
@@ -814,6 +853,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         ModernAtlasConfig config,
         ModernAtlasServerPolicy serverPolicy,
         Action saveConfig,
+        Func<bool> settingsAccessAllowedProvider,
         Func<bool> requestClose,
         Func<bool> requestEmergencyClose,
         Func<IShaderProgram?> stableLiquidShaderProvider,
@@ -831,6 +871,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         this.config = config;
         this.serverPolicy = serverPolicy;
         this.saveConfig = saveConfig;
+        this.settingsAccessAllowedProvider = settingsAccessAllowedProvider;
         this.performanceTelemetryLogger = performanceTelemetryLogger;
         this.requestClose = requestClose;
         this.requestEmergencyClose = requestEmergencyClose;
@@ -1894,6 +1935,12 @@ public sealed partial class ModernAtlasDialog : GuiDialog
 
     private void AdvancePresentationChange()
     {
+        if (!SettingsAccessAllowed)
+        {
+            presentationChangeCoordinator.Reset(config.RenderOnScroll);
+            return;
+        }
+
         if (!presentationChangeCoordinator.TryTake(
             capi.ElapsedMilliseconds,
             out bool requestedRenderOnScroll
@@ -1930,6 +1977,12 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         // Closing during the debounce interval must not silently discard the
         // final visible switch value. Automated smoke preferences are restored
         // separately and must never be persisted as player settings.
+        if (!SettingsAccessAllowed)
+        {
+            presentationChangeCoordinator.Reset(config.RenderOnScroll);
+            return;
+        }
+
         if (automatedSmokeTestActive
             || !presentationChangeCoordinator.TryTakePending(
                 out bool requestedRenderOnScroll
@@ -2119,20 +2172,24 @@ public sealed partial class ModernAtlasDialog : GuiDialog
 
     public void OnServerPolicyChanged()
     {
-        if (!capi.IsSinglePlayer && !serverPolicy.CheatModeAllowed)
+        if (!capi.IsSinglePlayer && !SettingsAccessAllowed)
+        {
+            CloseSettingsHierarchyForServerPolicy();
+        }
+        if (!CheatModeAccessAllowed)
         {
             SetCheatMode(false);
         }
         RefreshVisibleEntityPolicy();
         SyncSettingsControls();
+        SyncPerformanceControls();
         SyncToolbarControls();
     }
 
     public void SetCheatMode(bool enabled)
     {
         bool accessWasAvailable = CreativeCheatSettingsAvailable;
-        cheatModeEnabled = enabled
-            && (capi.IsSinglePlayer || serverPolicy.CheatModeAllowed);
+        cheatModeEnabled = enabled && CheatModeAccessAllowed;
         if (activeMapLayer.RequiresSpoilerAccess() && !CreativeCheatSettingsAvailable)
         {
             SetMapLayer(AtlasMapLayer.TexturedTerrain);
@@ -2165,7 +2222,7 @@ public sealed partial class ModernAtlasDialog : GuiDialog
         if (exactChunkRenderer == null) return false;
         bool oreReady = !SurvivalOreConcealmentEnabled
             || exactChunkRenderer.AdvanceSurvivalOreConcealment();
-        bool vegetationReady = !config.HideVegetation
+        bool vegetationReady = !HideVegetationActive
             || exactChunkRenderer.AdvanceVegetationMask();
         return oreReady && vegetationReady;
     }

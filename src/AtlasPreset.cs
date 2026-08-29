@@ -70,14 +70,52 @@ internal static class AtlasPresetProfile
 
     public static bool Apply(
         ModernAtlasConfig config,
-        AtlasPresetKind preset
+        AtlasPresetKind preset,
+        bool applyHideVegetation = true
     ) => preset == AtlasPresetKind.High
-        ? ApplyHigh(config)
-        : ApplyLow(config);
+        ? ApplyHigh(config, applyHideVegetation)
+        : ApplyLow(config, applyHideVegetation);
 
-    public static string AppliedMessage(AtlasPresetKind preset) =>
+    public static bool ApplyLow(
+        ModernAtlasConfig config,
+        bool applyHideVegetation
+    )
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        return Apply(
+            config,
+            AtlasPerformanceModeInfo.OnDemandValue,
+            AtlasDetailModeInfo.ReducedValue,
+            animationsEnabled: false,
+            performanceLightingEnabled: false,
+            hideVegetation: applyHideVegetation ? true : null
+        );
+    }
+
+    public static bool ApplyHigh(
+        ModernAtlasConfig config,
+        bool applyHideVegetation
+    )
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        return Apply(
+            config,
+            AtlasPerformanceModeInfo.HighThroughputValue,
+            AtlasDetailModeInfo.FullValue,
+            animationsEnabled: true,
+            performanceLightingEnabled: true,
+            hideVegetation: applyHideVegetation ? false : null
+        );
+    }
+
+    public static string AppliedMessage(
+        AtlasPresetKind preset,
+        bool appliedHideVegetation = true
+    ) =>
         preset == AtlasPresetKind.Low
-            ? "Applied ModernAtlas Low profile (on-demand, reduced detail, animations off, atlas lighting off, vegetation hidden). If the atlas still does not open, lower Vintage Story view distance in the normal Graphics settings."
+            ? appliedHideVegetation
+                ? "Applied ModernAtlas Low profile (on-demand, reduced detail, animations off, atlas lighting off, vegetation hidden). If the atlas still does not open, lower Vintage Story view distance in the normal Graphics settings."
+                : "Applied ModernAtlas Low profile (on-demand, reduced detail, animations off, atlas lighting off; vegetation remains visible by server policy). If the atlas still does not open, lower Vintage Story view distance in the normal Graphics settings."
             : "Applied ModernAtlas High profile (high-throughput, full detail, animations on, atlas lighting on, vegetation visible).";
 
     public static string ServerRequestMessage(AtlasPresetKind preset) =>
@@ -89,7 +127,7 @@ internal static class AtlasPresetProfile
         string atlasDetail,
         bool animationsEnabled,
         bool performanceLightingEnabled,
-        bool hideVegetation
+        bool? hideVegetation
     )
     {
         bool changed = false;
@@ -113,9 +151,10 @@ internal static class AtlasPresetProfile
             config.PerformanceLightingEnabled = performanceLightingEnabled;
             changed = true;
         }
-        if (config.HideVegetation != hideVegetation)
+        if (hideVegetation.HasValue
+            && config.HideVegetation != hideVegetation.Value)
         {
-            config.HideVegetation = hideVegetation;
+            config.HideVegetation = hideVegetation.Value;
             changed = true;
         }
 
@@ -161,6 +200,20 @@ internal static class AtlasPresetProfile
             || ApplyLow(lowConfig))
         {
             return "Low preset values, idempotency, or unrelated preferences are invalid";
+        }
+
+        ModernAtlasConfig lockedVegetationConfig = new()
+        {
+            PerformanceMode = AtlasPerformanceModeInfo.HighThroughputValue,
+            AtlasDetail = AtlasDetailModeInfo.FullValue,
+            AnimationsEnabled = true,
+            PerformanceLightingEnabled = true,
+            HideVegetation = false
+        };
+        if (!ApplyLow(lockedVegetationConfig, applyHideVegetation: false)
+            || lockedVegetationConfig.HideVegetation)
+        {
+            return "Low preset changed Hide vegetation despite server policy";
         }
 
         ModernAtlasConfig highConfig = new()

@@ -16,12 +16,14 @@ namespace ModernAtlas;
 /// Owns the independent ModernAtlas 3D dialog. The vanilla map remains
 /// untouched and can still be opened through its own configured controls.
 /// </summary>
-public sealed class ModernAtlasSystem : ModSystem
+public sealed partial class ModernAtlasSystem : ModSystem
 {
     private const string ConfigFileName = "ModernAtlas.json";
     private const string ServerConfigFileName = "ModernAtlasServer.json";
     private const string PolicyChannelName = "modernatlas-policy";
     private const string SmokeTestEnvironmentVariable = "MODERNATLAS_SMOKE_TEST";
+    private const string AdminPolicySmokeEnvironmentVariable =
+        "MODERNATLAS_ADMIN_POLICY_SMOKE_TEST";
     private const string SmokeRealDamageEnvironmentVariable =
         "MODERNATLAS_SMOKE_REAL_DAMAGE";
     private const string SmokeCreativeWorldName =
@@ -39,6 +41,7 @@ public sealed class ModernAtlasSystem : ModSystem
         + "/ma high - Apply the ModernAtlas High profile.\n"
         + "/ma cheat on - Enable ModernAtlas Cheat Mode.\n"
         + "/ma cheat off - Disable ModernAtlas Cheat Mode.\n"
+        + "/ma admin - Open the operator-only server policy panel.\n"
         + "Local alternatives:\n"
         + ".ma low - Apply the ModernAtlas Low profile locally.\n"
         + ".ma high - Apply the ModernAtlas High profile locally.";
@@ -63,6 +66,11 @@ public sealed class ModernAtlasSystem : ModSystem
     private readonly ModernAtlasServerPolicy serverPolicy = new();
     private IServerNetworkChannel? serverPolicyChannel;
     private IClientNetworkChannel? clientPolicyChannel;
+    private bool serverPolicyPacketReceived;
+    private bool serverPolicyChannelObserved;
+    private bool serverPolicyPendingLogShown;
+    private long serverPolicyAuthorityListenerId = -1;
+    private bool clientWorldSessionActive;
     private IShaderProgram? stableLiquidShader;
     private IShaderProgram? atlasCloudShader;
     private IShaderProgram? atlasBoundaryShader;
@@ -70,6 +78,7 @@ public sealed class ModernAtlasSystem : ModSystem
     private IShaderProgram? atlasOpacityShader;
     private IShaderProgram? atlasScrollShader;
     private CheatModeConsentDialog? cheatModeDialog;
+    private AtlasAdminPolicyDialog? adminPolicyDialog;
     private AtlasOpeningTransitionDialog? openingTransition;
     private AtlasOrdinaryWorldScreenshotRenderer? ordinaryWorldScreenshotRenderer;
     private AtlasSoundController? soundController;
@@ -131,6 +140,10 @@ public sealed class ModernAtlasSystem : ModSystem
         serverApi = api;
         serverConfig = api.LoadModConfig<ModernAtlasServerConfig>(ServerConfigFileName)
             ?? new ModernAtlasServerConfig();
+        serverConfig.PlayerOverrides ??= new Dictionary<
+            string,
+            ModernAtlasPlayerPolicyOverride
+        >(StringComparer.Ordinal);
         api.StoreModConfig(serverConfig, ServerConfigFileName);
 
         serverPolicyChannel = api.Network
@@ -139,12 +152,17 @@ public sealed class ModernAtlasSystem : ModSystem
             .RegisterMessageType<AtlasScrollAnimationMessage>()
             .RegisterMessageType<AtlasCheatModeMessage>()
             .RegisterMessageType<AtlasPresetMessage>()
+            .RegisterMessageType<AtlasAdminPolicyState>()
+            .RegisterMessageType<AtlasAdminPolicyUpdate>()
             .RegisterMessageType<ModernAtlasSmokeDamageMessage>()
             .SetMessageHandler<AtlasScrollAnimationMessage>(
                 OnServerScrollAnimation
             )
             .SetMessageHandler<ModernAtlasSmokeDamageMessage>(
                 OnServerSmokeDamageRequest
+            )
+            .SetMessageHandler<AtlasAdminPolicyUpdate>(
+                OnServerAdminPolicyUpdate
             );
         api.Event.PlayerNowPlaying += OnPlayerNowPlaying;
         if (AutomatedSmokeTestEnabled)
@@ -198,6 +216,12 @@ public sealed class ModernAtlasSystem : ModSystem
                     .HandleWith(OnServerCheatModeOffCommand)
                 .EndSubCommand()
             .EndSubCommand()
+            .BeginSubCommand("admin")
+                .WithDescription("Open the ModernAtlas server policy panel")
+                .RequiresPlayer()
+                .RequiresPrivilege(Privilege.controlserver)
+                .HandleWith(OnServerAdminCommand)
+            .EndSubCommand()
             .BeginSubCommand("help")
                 .WithDescription("Show all ModernAtlas commands")
                 .HandleWith(OnServerHelpCommand)
@@ -205,7 +229,9 @@ public sealed class ModernAtlasSystem : ModSystem
 
         ModernAtlasServerPolicy policy = serverConfig.ToPolicy();
         api.Logger.Notification(
-            "[ModernAtlas] Server policy loaded: Cheat Mode allowed={0}; live 3D models players={1}, animals={2}, mobs={3}, npcs={4}.",
+            "[ModernAtlas] Server policy loaded: client Settings allowed={0}; Hide vegetation allowed={1}; Cheat Mode allowed={2}; live 3D models players={3}, animals={4}, mobs={5}, npcs={6}.",
+            !policy.ClientSettingsLocked,
+            !policy.HideVegetationLocked,
             policy.CheatModeAllowed,
             policy.ShowPlayers,
             policy.ShowAnimals,
@@ -273,6 +299,10 @@ public sealed class ModernAtlasSystem : ModSystem
             "[ModernAtlas] Registered client presets: .ma low and .ma high."
         );
         serverPolicy.ResetToSafeDefaults();
+        serverPolicyPacketReceived = false;
+        serverPolicyChannelObserved = false;
+        serverPolicyPendingLogShown = false;
+        clientWorldSessionActive = false;
 
         clientPolicyChannel = api.Network
             .RegisterChannel(PolicyChannelName)
@@ -280,18 +310,29 @@ public sealed class ModernAtlasSystem : ModSystem
             .RegisterMessageType<AtlasScrollAnimationMessage>()
             .RegisterMessageType<AtlasCheatModeMessage>()
             .RegisterMessageType<AtlasPresetMessage>()
+            .RegisterMessageType<AtlasAdminPolicyState>()
+            .RegisterMessageType<AtlasAdminPolicyUpdate>()
             .RegisterMessageType<ModernAtlasSmokeDamageMessage>()
             .SetMessageHandler<ModernAtlasServerPolicy>(OnServerPolicyReceived)
             .SetMessageHandler<AtlasScrollAnimationMessage>(
                 OnRemoteScrollAnimation
             )
             .SetMessageHandler<AtlasCheatModeMessage>(OnCheatModeMessage)
-            .SetMessageHandler<AtlasPresetMessage>(OnAtlasPresetMessage);
+            .SetMessageHandler<AtlasPresetMessage>(OnAtlasPresetMessage)
+            .SetMessageHandler<AtlasAdminPolicyState>(OnAdminPolicyState);
         clientPolicyChannel.SetMessageHandler<ModernAtlasSmokeDamageMessage>(
             OnClientSmokeDamageResult
         );
         api.Event.LeaveWorld += OnLeaveWorld;
         api.Event.LevelFinalize += OnLevelFinalize;
+        // This is deliberately a small authority-only watcher. It does not
+        // render, scan, capture or touch atlas resources; it only notices a
+        // policy channel that becomes connected between GUI frames so an
+        // already-open Settings panel cannot keep writing during that gap.
+        serverPolicyAuthorityListenerId = api.Event.RegisterGameTickListener(
+            RefreshPendingClientAuthorityTick,
+            100
+        );
         handActionSuppressionListenerId = api.Event.RegisterGameTickListener(
             MaintainLocalHandActionSuppression,
             10
@@ -328,6 +369,7 @@ public sealed class ModernAtlasSystem : ModSystem
             config,
             serverPolicy,
             SaveConfig,
+            ResolveClientSettingsAccess,
             RequestCloseAtlas,
             RequestEmergencyCloseAtlas,
             GetStableLiquidShader,
@@ -396,6 +438,8 @@ public sealed class ModernAtlasSystem : ModSystem
         {
             return true;
         }
+
+        RefreshPendingClientAuthority(logState: false);
 
         if (cheatModeDialog?.IsOpened() == true)
         {
@@ -727,6 +771,12 @@ public sealed class ModernAtlasSystem : ModSystem
                     handActionSuppressionListenerId
                 );
             }
+            if (serverPolicyAuthorityListenerId >= 0)
+            {
+                clientApi.Event.UnregisterGameTickListener(
+                    serverPolicyAuthorityListenerId
+                );
+            }
         }
         if (serverApi != null)
         {
@@ -767,6 +817,8 @@ public sealed class ModernAtlasSystem : ModSystem
         cheatModeDialog?.CancelWithoutDecision();
         cheatModeDialog?.Dispose();
         cheatModeDialog = null;
+        adminPolicyDialog?.Dispose();
+        adminPolicyDialog = null;
         stableLiquidShader = null;
         atlasCloudShader = null;
         atlasBoundaryShader = null;
@@ -780,6 +832,7 @@ public sealed class ModernAtlasSystem : ModSystem
         serverPolicyChannel = null;
         clientPolicyChannel = null;
         activeWorldIdentifier = null;
+        clientWorldSessionActive = false;
         realDamageSmokeWorldRejected = false;
         automatedSmokeFixtureListenerId = -1;
         automatedSmokeFixturePrepared = false;
@@ -789,6 +842,8 @@ public sealed class ModernAtlasSystem : ModSystem
         automatedSmokeFixtureReadyLogged = false;
         suppressLocalHandActions = false;
         handActionSuppressionListenerId = -1;
+        serverPolicyAuthorityListenerId = -1;
+        serverPolicyPendingLogShown = false;
         base.Dispose();
     }
 
@@ -810,7 +865,10 @@ public sealed class ModernAtlasSystem : ModSystem
 
         if (serverConfig != null)
         {
-            serverPolicyChannel?.SendPacket(serverConfig.ToPolicy(), player);
+            serverPolicyChannel?.SendPacket(
+                serverConfig.ToPolicy(player.PlayerUID),
+                player
+            );
         }
     }
 
@@ -1133,16 +1191,400 @@ public sealed class ModernAtlasSystem : ModSystem
 
     private void OnServerPolicyReceived(ModernAtlasServerPolicy policy)
     {
+        // PlayerNowPlaying can deliver the only policy packet before the
+        // client's LevelFinalize callback. Do not discard that early packet.
+        // Without a session nonce the protocol cannot distinguish it from a
+        // late packet after LeaveWorld; normal lifecycle reset handles the
+        // usual ordering, while an old late packet is an unavoidable protocol
+        // compatibility risk until the next authoritative packet arrives.
+        serverPolicyChannelObserved = true;
+        serverPolicyPacketReceived = true;
         serverPolicy.CopyFrom(policy);
+        serverPolicyPendingLogShown = false;
         dialog?.OnServerPolicyChanged();
         clientApi?.Logger.Notification(
-            "[ModernAtlas] Applied server policy: Cheat Mode allowed={0}; live 3D models players={1}, animals={2}, mobs={3}, npcs={4}.",
+            "[ModernAtlas] Applied server policy: client Settings allowed={0}; Hide vegetation allowed={1}; Cheat Mode allowed={2}; live 3D models players={3}, animals={4}, mobs={5}, npcs={6}.",
+            !policy.ClientSettingsLocked,
+            !policy.HideVegetationLocked,
             policy.CheatModeAllowed,
             policy.ShowPlayers,
             policy.ShowAnimals,
             policy.ShowMobs,
             policy.ShowNpcs
         );
+    }
+
+    /// <summary>
+    /// Once the ModernAtlas channel has been observed on a multiplayer
+    /// server, keep Settings closed until its authoritative packet arrives.
+    /// The observation is latched for the world session so a transient channel
+    /// state change cannot reopen Settings. With no matching server channel,
+    /// client-only Settings retain their documented compatibility fallback.
+    /// </summary>
+    private void RefreshPendingClientAuthority(bool logState)
+    {
+        if (clientApi == null
+            || clientApi.IsSinglePlayer
+            || !clientWorldSessionActive)
+        {
+            return;
+        }
+
+        serverPolicyChannelObserved |= clientPolicyChannel?.Connected == true;
+        if (serverPolicyPacketReceived)
+        {
+            return;
+        }
+
+        bool temporarilyLocked =
+            ModernAtlasServerSettingsPolicy.ShouldTemporarilyLockUntilPolicyPacket(
+                isSinglePlayer: false,
+                channelConnected: serverPolicyChannelObserved,
+                policyPacketReceived: false
+            );
+        bool changed = serverPolicy.ClientSettingsLocked != temporarilyLocked;
+        serverPolicy.ClientSettingsLocked = temporarilyLocked;
+        if (changed)
+        {
+            dialog?.OnServerPolicyChanged();
+            clientApi.Logger.Notification(
+                temporarilyLocked
+                    ? "[ModernAtlas] ModernAtlas policy channel became connected before its policy packet arrived; client Settings are temporarily locked until the authoritative packet arrives."
+                    : "[ModernAtlas] ModernAtlas policy channel is no longer pending; client Settings remain available for client-only compatibility."
+            );
+        }
+
+        if (!logState || serverPolicyPendingLogShown || changed)
+        {
+            return;
+        }
+
+        serverPolicyPendingLogShown = true;
+        clientApi.Logger.Notification(
+            temporarilyLocked
+                ? "[ModernAtlas] ModernAtlas policy channel is connected but no policy packet has arrived yet; client Settings are temporarily locked until the authoritative packet arrives."
+                : "[ModernAtlas] No ModernAtlas policy channel is connected; client Settings remain allowed for client-only compatibility, while Cheat Mode and living-entity disclosure stay at their safe defaults."
+        );
+    }
+
+    private void RefreshPendingClientAuthorityTick(float _)
+    {
+        // Keep this callback authority-only. In particular, do not call any
+        // atlas preparation/rendering path while the atlas is closed.
+        if (clientApi == null
+            || clientApi.IsSinglePlayer
+            || !clientWorldSessionActive
+            || serverPolicyPacketReceived)
+        {
+            return;
+        }
+
+        RefreshPendingClientAuthority(logState: false);
+    }
+
+    private bool ResolveClientSettingsAccess()
+    {
+        // Settings callbacks use this synchronous path so a channel that
+        // connected since the last watcher tick cannot mutate config during
+        // the pre-policy authority window.
+        RefreshPendingClientAuthority(logState: false);
+        return ModernAtlasServerSettingsPolicy.AllowsClientSettings(
+            clientApi?.IsSinglePlayer == true,
+            serverPolicy
+        );
+    }
+
+    private TextCommandResult OnServerAdminCommand(TextCommandCallingArgs args)
+    {
+        if (args.Caller.Player is not IServerPlayer player)
+        {
+            return TextCommandResult.Error(
+                "ModernAtlas administration requires an in-game player."
+            );
+        }
+        if (!player.HasPrivilege(Privilege.controlserver))
+        {
+            return TextCommandResult.Error(
+                "ModernAtlas administration requires the controlserver privilege."
+            );
+        }
+        if (serverPolicyChannel == null || serverConfig == null)
+        {
+            return TextCommandResult.Error(
+                "ModernAtlas could not open the server policy panel."
+            );
+        }
+
+        serverPolicyChannel.SendPacket(
+            BuildAdminPolicyState("Server policy loaded."),
+            player
+        );
+        return TextCommandResult.Success(
+            "Opening the ModernAtlas server policy panel."
+        );
+    }
+
+    private void OnServerAdminPolicyUpdate(
+        IServerPlayer player,
+        AtlasAdminPolicyUpdate update
+    )
+    {
+        if (serverApi == null || serverConfig == null
+            || serverPolicyChannel == null)
+        {
+            return;
+        }
+        if (!player.HasPrivilege(Privilege.controlserver))
+        {
+            serverApi.Logger.Warning(
+                "[ModernAtlas] Rejected an unauthorized server policy update from {0}.",
+                player.PlayerName
+            );
+            return;
+        }
+
+        bool defaults = string.IsNullOrEmpty(update.PlayerUid);
+        if (!ValidAdminModes(update, defaults))
+        {
+            serverPolicyChannel.SendPacket(
+                BuildAdminPolicyState("Rejected invalid policy values."),
+                player
+            );
+            return;
+        }
+
+        if (defaults)
+        {
+            ApplyAdminDefaults(update);
+        }
+        else if (!TryApplyPlayerOverride(update))
+        {
+            serverPolicyChannel.SendPacket(
+                BuildAdminPolicyState("That player is no longer known to this panel."),
+                player
+            );
+            return;
+        }
+
+        serverApi.StoreModConfig(serverConfig, ServerConfigFileName);
+        BroadcastServerPolicies();
+        serverPolicyChannel.SendPacket(
+            BuildAdminPolicyState(
+                defaults
+                    ? "Server defaults saved and applied."
+                    : "Player exception saved and applied."
+            ),
+            player
+        );
+        serverApi.Logger.Notification(
+            "[ModernAtlas] {0} updated the atlas policy for {1}.",
+            player.PlayerName,
+            defaults ? "server defaults" : update.PlayerUid
+        );
+    }
+
+    private AtlasAdminPolicyState BuildAdminPolicyState(string status)
+    {
+        AtlasAdminPolicyState state = new() { Status = status };
+        if (serverConfig == null) return state;
+
+        ModernAtlasServerPolicy defaults = serverConfig.ToPolicy();
+        state.Targets.Add(new AtlasAdminPolicyTarget
+        {
+            PlayerName = "Server defaults",
+            ClientSettings = defaults.ClientSettingsLocked ? 0 : 1,
+            HideVegetation = defaults.HideVegetationLocked ? 0 : 1,
+            CreativeCheatTools = defaults.CheatModeAllowed ? 1 : 0,
+            ShowPlayers = defaults.ShowPlayers ? 1 : 0,
+            ShowAnimals = defaults.ShowAnimals ? 1 : 0,
+            ShowMobs = defaults.ShowMobs ? 1 : 0,
+            ShowNpcs = defaults.ShowNpcs ? 1 : 0
+        });
+
+        Dictionary<string, string> players = new(StringComparer.Ordinal);
+        if (serverApi != null)
+        {
+            foreach (IPlayer online in serverApi.World.AllOnlinePlayers)
+            {
+                if (!string.IsNullOrWhiteSpace(online.PlayerUID))
+                {
+                    players[online.PlayerUID] = online.PlayerName;
+                }
+            }
+        }
+        foreach (KeyValuePair<string, ModernAtlasPlayerPolicyOverride> entry
+            in serverConfig.PlayerOverrides)
+        {
+            if (!players.ContainsKey(entry.Key))
+            {
+                players[entry.Key] = string.IsNullOrWhiteSpace(
+                    entry.Value.LastKnownPlayerName
+                ) ? $"Offline · {ShortPlayerUid(entry.Key)}"
+                  : $"{entry.Value.LastKnownPlayerName} · offline";
+            }
+        }
+
+        foreach (KeyValuePair<string, string> entry in players)
+        {
+            serverConfig.PlayerOverrides.TryGetValue(
+                entry.Key,
+                out ModernAtlasPlayerPolicyOverride? playerOverride
+            );
+            state.Targets.Add(new AtlasAdminPolicyTarget
+            {
+                PlayerUid = entry.Key,
+                PlayerName = entry.Value,
+                ClientSettings = Mode(playerOverride?.AllowClientSettings),
+                HideVegetation = Mode(playerOverride?.AllowHideVegetation),
+                CreativeCheatTools = Mode(playerOverride?.CheatModeAllowed),
+                ShowPlayers = Mode(playerOverride?.ShowPlayers),
+                ShowAnimals = Mode(playerOverride?.ShowAnimals),
+                ShowMobs = Mode(playerOverride?.ShowMobs),
+                ShowNpcs = Mode(playerOverride?.ShowNpcs)
+            });
+        }
+        state.Targets.Sort(1, state.Targets.Count - 1,
+            Comparer<AtlasAdminPolicyTarget>.Create((left, right) =>
+                StringComparer.OrdinalIgnoreCase.Compare(
+                    left.PlayerName,
+                    right.PlayerName
+                )
+            ));
+        return state;
+    }
+
+    private static int Mode(bool? value) => value.HasValue
+        ? value.Value ? 1 : 0
+        : -1;
+
+    private static bool? OverrideValue(int mode) => mode < 0
+        ? null
+        : mode > 0;
+
+    private static string ShortPlayerUid(string playerUid) =>
+        playerUid.Length <= 8 ? playerUid : playerUid[..8];
+
+    private static bool ValidAdminModes(
+        AtlasAdminPolicyUpdate update,
+        bool defaults
+    )
+    {
+        int minimum = defaults ? 0 : -1;
+        return update.ClientSettings is >= -1 and <= 1
+            && update.HideVegetation is >= -1 and <= 1
+            && update.CreativeCheatTools is >= -1 and <= 1
+            && update.ShowPlayers is >= -1 and <= 1
+            && update.ShowAnimals is >= -1 and <= 1
+            && update.ShowMobs is >= -1 and <= 1
+            && update.ShowNpcs is >= -1 and <= 1
+            && update.ClientSettings >= minimum
+            && update.HideVegetation >= minimum
+            && update.CreativeCheatTools >= minimum
+            && update.ShowPlayers >= minimum
+            && update.ShowAnimals >= minimum
+            && update.ShowMobs >= minimum
+            && update.ShowNpcs >= minimum;
+    }
+
+    private void ApplyAdminDefaults(AtlasAdminPolicyUpdate update)
+    {
+        if (serverConfig == null) return;
+        serverConfig.AllowClientSettings = update.ClientSettings == 1;
+        serverConfig.AllowHideVegetation = update.HideVegetation == 1;
+        serverConfig.CheatModeAllowed = update.CreativeCheatTools == 1;
+        serverConfig.ShowPlayers = update.ShowPlayers == 1;
+        serverConfig.ShowAnimals = update.ShowAnimals == 1;
+        serverConfig.ShowMobs = update.ShowMobs == 1;
+        serverConfig.ShowNpcs = update.ShowNpcs == 1;
+        serverConfig.LivingEntitiesEnabled = serverConfig.ShowPlayers
+            || serverConfig.ShowAnimals
+            || serverConfig.ShowMobs
+            || serverConfig.ShowNpcs;
+    }
+
+    private bool TryApplyPlayerOverride(AtlasAdminPolicyUpdate update)
+    {
+        if (serverApi == null || serverConfig == null) return false;
+        IPlayer? onlinePlayer = null;
+        foreach (IPlayer candidate in serverApi.World.AllOnlinePlayers)
+        {
+            if (candidate.PlayerUID == update.PlayerUid)
+            {
+                onlinePlayer = candidate;
+                break;
+            }
+        }
+        if (onlinePlayer == null
+            && !serverConfig.PlayerOverrides.ContainsKey(update.PlayerUid))
+        {
+            return false;
+        }
+
+        serverConfig.PlayerOverrides.TryGetValue(
+            update.PlayerUid,
+            out ModernAtlasPlayerPolicyOverride? playerOverride
+        );
+        playerOverride ??= new ModernAtlasPlayerPolicyOverride();
+        if (onlinePlayer != null)
+        {
+            playerOverride.LastKnownPlayerName = onlinePlayer.PlayerName;
+        }
+        playerOverride.AllowClientSettings = OverrideValue(update.ClientSettings);
+        playerOverride.AllowHideVegetation = OverrideValue(update.HideVegetation);
+        playerOverride.CheatModeAllowed = OverrideValue(update.CreativeCheatTools);
+        playerOverride.ShowPlayers = OverrideValue(update.ShowPlayers);
+        playerOverride.ShowAnimals = OverrideValue(update.ShowAnimals);
+        playerOverride.ShowMobs = OverrideValue(update.ShowMobs);
+        playerOverride.ShowNpcs = OverrideValue(update.ShowNpcs);
+        if (playerOverride.HasAnyOverride)
+        {
+            serverConfig.PlayerOverrides[update.PlayerUid] = playerOverride;
+        }
+        else
+        {
+            serverConfig.PlayerOverrides.Remove(update.PlayerUid);
+        }
+        return true;
+    }
+
+    private void BroadcastServerPolicies()
+    {
+        if (serverApi == null || serverConfig == null
+            || serverPolicyChannel == null) return;
+        foreach (IPlayer online in serverApi.World.AllOnlinePlayers)
+        {
+            if (online is IServerPlayer player)
+            {
+                serverPolicyChannel.SendPacket(
+                    serverConfig.ToPolicy(player.PlayerUID),
+                    player
+                );
+            }
+        }
+    }
+
+    private void OnAdminPolicyState(AtlasAdminPolicyState state)
+    {
+        if (clientApi == null) return;
+        if (adminPolicyDialog == null)
+        {
+            adminPolicyDialog = new AtlasAdminPolicyDialog(
+                clientApi,
+                state,
+                SendAdminPolicyUpdate
+            );
+            adminPolicyDialog.TryOpen();
+            HandleAdminPolicySmokeState(state);
+            return;
+        }
+        adminPolicyDialog.UpdateState(state);
+        if (!adminPolicyDialog.IsOpened()) adminPolicyDialog.TryOpen();
+        HandleAdminPolicySmokeState(state);
+    }
+
+    private void SendAdminPolicyUpdate(AtlasAdminPolicyUpdate update)
+    {
+        clientPolicyChannel?.SendPacket(update);
     }
 
     private static TextCommandResult OnServerCheatHelpCommand(
@@ -1168,19 +1610,32 @@ public sealed class ModernAtlasSystem : ModSystem
             return TextCommandResult.Error("ModernAtlas requires a player caller.");
         }
 
-        if (enabled && serverApi.Server.IsDedicated && !serverConfig.CheatModeAllowed)
+        bool integratedHostCaller = IsIntegratedHostCaller(player);
+        bool effectiveCheatAllowed = serverConfig.ToPolicy(
+            player.PlayerUID
+        ).CheatModeAllowed;
+        if (enabled
+            && !(integratedHostCaller && !serverApi.Server.IsDedicated)
+            && !effectiveCheatAllowed)
         {
             return TextCommandResult.Error(
-                "The server owner has disabled ModernAtlas Cheat Mode."
+                "The server owner has disabled ModernAtlas Cheat Mode for multiplayer callers."
             );
         }
 
-        serverPolicyChannel?.SendPacket(
+        if (serverPolicyChannel == null)
+        {
+            return TextCommandResult.Error(
+                "ModernAtlas could not reach the client policy channel."
+            );
+        }
+        serverPolicyChannel.SendPacket(
             new AtlasCheatModeMessage { Enabled = enabled },
             player
         );
         bool creativeStillGrantsAccess = !enabled
             && !serverApi.Server.IsDedicated
+            && integratedHostCaller
             && player.WorldData.CurrentGameMode == EnumGameMode.Creative;
         return TextCommandResult.Success(
             enabled
@@ -1213,6 +1668,17 @@ public sealed class ModernAtlasSystem : ModSystem
             return TextCommandResult.Error("ModernAtlas requires a player caller.");
         }
 
+        bool integratedHostCaller = IsIntegratedHostCaller(player);
+        bool settingsAllowed = serverConfig != null
+            && !serverConfig.ToPolicy(player.PlayerUID).ClientSettingsLocked;
+        if (!(integratedHostCaller && serverApi?.Server.IsDedicated == false)
+            && !settingsAllowed)
+        {
+            return TextCommandResult.Error(
+                "The server owner has disabled ModernAtlas client Settings; /ma low and /ma high are unavailable."
+            );
+        }
+
         if (serverPolicyChannel == null)
         {
             return TextCommandResult.Error(
@@ -1227,6 +1693,37 @@ public sealed class ModernAtlasSystem : ModSystem
         return TextCommandResult.Success(AtlasPresetProfile.ServerRequestMessage(preset));
     }
 
+    /// <summary>
+    /// In an integrated/listen server the local host is also the singleplayer
+    /// client. The public client API exposes that host's PlayerUID, which lets
+    /// us keep the local behavior without reporting success to a remote caller
+    /// whose client would correctly reject a locked policy.
+    /// </summary>
+    private bool IsIntegratedHostCaller(IServerPlayer player)
+    {
+        if (serverApi?.Server.IsDedicated != false
+            || clientApi?.IsSinglePlayer != true)
+        {
+            return false;
+        }
+
+        try
+        {
+            return string.Equals(
+                clientApi.World.Player?.PlayerUID,
+                player.PlayerUID,
+                StringComparison.Ordinal
+            );
+        }
+        catch
+        {
+            // A listen-server command can arrive while the client world is
+            // transitioning. Treat an unknown caller as remote and fail
+            // closed until the public host identity is available again.
+            return false;
+        }
+    }
+
     private TextCommandResult ApplyClientPresetCommand(AtlasPresetKind preset)
     {
         if (clientApi == null || config == null)
@@ -1236,14 +1733,45 @@ public sealed class ModernAtlasSystem : ModSystem
             );
         }
 
+        RefreshPendingClientAuthority(logState: false);
+        if (!ModernAtlasServerSettingsPolicy.AllowsClientPreset(
+                clientApi.IsSinglePlayer,
+                serverPolicy
+            ))
+        {
+            return TextCommandResult.Error(
+                "ModernAtlas Settings are disabled by server policy; client presets are unavailable."
+            );
+        }
+
         ApplyClientPreset(preset, "client command", showConfirmation: false);
-        return TextCommandResult.Success(AtlasPresetProfile.AppliedMessage(preset));
+        return TextCommandResult.Success(
+            AtlasPresetProfile.AppliedMessage(
+                preset,
+                ModernAtlasServerSettingsPolicy.AllowsHideVegetation(
+                    clientApi.IsSinglePlayer,
+                    serverPolicy
+                )
+            )
+        );
     }
 
     private void OnAtlasPresetMessage(AtlasPresetMessage message)
     {
         if (clientApi == null || config == null)
         {
+            return;
+        }
+
+        RefreshPendingClientAuthority(logState: false);
+        if (!ModernAtlasServerSettingsPolicy.AllowsClientPreset(
+                clientApi.IsSinglePlayer,
+                serverPolicy
+            ))
+        {
+            clientApi.Logger.Warning(
+                "[ModernAtlas] Ignored client preset message because Settings are disabled by server policy."
+            );
             return;
         }
 
@@ -1270,9 +1798,34 @@ public sealed class ModernAtlasSystem : ModSystem
             return;
         }
 
-        bool changed = AtlasPresetProfile.Apply(config, preset);
+        RefreshPendingClientAuthority(logState: false);
+        if (!ModernAtlasServerSettingsPolicy.AllowsClientPreset(
+                clientApi.IsSinglePlayer,
+                serverPolicy
+            ))
+        {
+            clientApi.Logger.Warning(
+                "[ModernAtlas] Ignored client preset '{0}' because Settings are disabled by server policy.",
+                preset
+            );
+            return;
+        }
+
+        bool applyHideVegetation =
+            ModernAtlasServerSettingsPolicy.AllowsHideVegetation(
+                clientApi.IsSinglePlayer,
+                serverPolicy
+            );
+        bool changed = AtlasPresetProfile.Apply(
+            config,
+            preset,
+            applyHideVegetation
+        );
         SaveConfig();
-        string message = AtlasPresetProfile.AppliedMessage(preset);
+        string message = AtlasPresetProfile.AppliedMessage(
+            preset,
+            applyHideVegetation
+        );
         if (showConfirmation)
         {
             clientApi.ShowChatMessage(message);
@@ -1292,12 +1845,15 @@ public sealed class ModernAtlasSystem : ModSystem
             return;
         }
 
-        if (!clientApi.IsSinglePlayer
-            && message.Enabled
-            && !serverPolicy.CheatModeAllowed)
+        if (!ModernAtlasServerSettingsPolicy.AllowsCheatModeRequest(
+                clientApi.IsSinglePlayer,
+                serverPolicyPacketReceived,
+                serverPolicy,
+                message.Enabled
+            ))
         {
             clientApi.Logger.Warning(
-                "[ModernAtlas] Ignored a Cheat Mode command that conflicts with the server policy."
+                "[ModernAtlas] Ignored a Cheat Mode enable command because no authoritative multiplayer grant is active."
             );
             return;
         }
@@ -1776,6 +2332,8 @@ public sealed class ModernAtlasSystem : ModSystem
         cheatModeDialog?.CancelWithoutDecision();
         cheatModeDialog?.Dispose();
         cheatModeDialog = null;
+        adminPolicyDialog?.Dispose();
+        adminPolicyDialog = null;
         openingTransition?.CancelWithoutOpening();
         openingTransition?.ClearRemoteAnimations();
         soundController?.StopAll();
@@ -1785,8 +2343,13 @@ public sealed class ModernAtlasSystem : ModSystem
         automatedSmokeAllCyclesPassed = true;
         automatedSmokeCycleFinishing = false;
         suppressLocalHandActions = false;
+        clientWorldSessionActive = false;
         dialog?.OnWorldLeave();
         serverPolicy.ResetToSafeDefaults();
+        serverPolicyPacketReceived = false;
+        serverPolicyChannelObserved = false;
+        serverPolicyPendingLogShown = false;
+        ResetAdminPolicySmokeState();
         if (completeAutomatedWorldExit)
         {
             clientApi?.Logger.Notification(
@@ -1817,8 +2380,25 @@ public sealed class ModernAtlasSystem : ModSystem
         string worldIdentifier = clientApi.World.SavegameIdentifier;
         if (string.IsNullOrWhiteSpace(worldIdentifier)) return;
 
+        // A malformed lifecycle sequence must not carry an old policy into a
+        // different save. Normal LeaveWorld already performs this reset, but
+        // the identity check also protects reconnects that skip that event.
+        if (clientWorldSessionActive
+            && !string.Equals(
+                activeWorldIdentifier,
+                worldIdentifier,
+                StringComparison.Ordinal
+            ))
+        {
+            serverPolicy.ResetToSafeDefaults();
+            serverPolicyPacketReceived = false;
+            serverPolicyChannelObserved = false;
+            serverPolicyPendingLogShown = false;
+        }
+
         int sessionGeneration = ++worldSessionGeneration;
         activeWorldIdentifier = worldIdentifier;
+        clientWorldSessionActive = true;
         realDamageSmokeWorldRejected = false;
         automatedSmokeTestOpeningStarted = false;
         automatedSmokeAtlasCycle = 0;
@@ -1833,10 +2413,21 @@ public sealed class ModernAtlasSystem : ModSystem
         if (!clientApi.IsSinglePlayer)
         {
             dialog?.SetCheatMode(false);
+            RefreshPendingClientAuthority(logState: true);
+            clientApi.Logger.Notification(
+                "[ModernAtlas] Multiplayer authority active: local CheatModeByWorld values cannot enable Cheat Mode; an authoritative server grant is required."
+            );
             if (AutomatedSmokeTestEnabled)
             {
                 clientApi.Logger.Warning(
                     "[ModernAtlas] Automated smoke test skipped because it is restricted to singleplayer."
+                );
+            }
+            if (AdminPolicySmokeEnabled)
+            {
+                ScheduleAdminPolicySmokeStart(
+                    worldIdentifier,
+                    sessionGeneration
                 );
             }
             return;
@@ -1996,6 +2587,12 @@ public sealed class ModernAtlasSystem : ModSystem
 
     private bool AutomatedSmokeTestEnabled => string.Equals(
         Environment.GetEnvironmentVariable(SmokeTestEnvironmentVariable),
+        "1",
+        StringComparison.Ordinal
+    );
+
+    private bool AdminPolicySmokeEnabled => string.Equals(
+        Environment.GetEnvironmentVariable(AdminPolicySmokeEnvironmentVariable),
         "1",
         StringComparison.Ordinal
     );
@@ -3066,6 +3663,7 @@ public sealed class ModernAtlasSystem : ModSystem
     private void SaveCheatModeDecision(string worldIdentifier, bool enabled)
     {
         if (clientApi == null || config == null
+            || !clientApi.IsSinglePlayer
             || activeWorldIdentifier != worldIdentifier)
         {
             return;
