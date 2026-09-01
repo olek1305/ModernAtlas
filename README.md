@@ -18,6 +18,16 @@ provides the authoritative multiplayer policy for already loaded living
 entities and client Settings; ModernAtlas can also be used on the client when
 a server does not install it.
 
+When a server does install ModernAtlas 0.6.9, Vintage Story's native mod
+handshake requires a matching `modernatlas` network version (`0.6.9`) before
+the world session is created. A 0.6.8 client, or a client without ModernAtlas,
+is rejected before joining because it cannot satisfy that required client mod.
+This gate comes from `networkVersion` and `requiredOnClient` in
+`modinfo.json`; it does not depend on the optional ModernAtlas policy packet.
+`requiredOnServer` remains `false`, so a client with ModernAtlas 0.6.9 can
+still connect to a server that does not install ModernAtlas. Such a server
+cannot enforce this gate or provide the server-owned ModernAtlas policy.
+
 When the server also installs ModernAtlas, it creates `ModernAtlasServer.json`
 in the server configuration directory. `AllowClientSettings` defaults to
 `true`; set it to `false` when the server owner wants to lock the ModernAtlas
@@ -105,10 +115,10 @@ arrives. Editing `CheatModeByWorld` or other permission-looking values in the
 client's `ModernAtlas.json` cannot grant Cheat Mode or reveal an entity
 category denied by the server. A multiplayer Cheat Mode enable request is
 accepted only after the client has received an explicit server grant.
-The new Settings-lock field is enforced by current ModernAtlas clients; an
-older client can still open its legacy Settings UI because it cannot understand
-that optional packet field, so require the current client version when the lock
-is part of the server's rules.
+The native version gate above ensures that a server carrying ModernAtlas 0.6.9
+does not admit an older client that would not understand these policy rules.
+Servers without ModernAtlas retain the client-only compatibility path described
+above and therefore cannot enforce server policy or a ModernAtlas version.
 
 ## Screenshots
 

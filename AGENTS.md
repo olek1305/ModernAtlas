@@ -337,6 +337,15 @@ empty while the automated exact-terrain check still reported success.
   models or any individual allowed category, but may never enable a category
   denied by the multiplayer server. Singleplayer uses those client visibility
   switches without the multiplayer server restriction.
+- Starting with ModernAtlas `0.6.9`, `modinfo.json` must declare
+  `requiredOnClient: true` and `networkVersion: "0.6.9"`. When the server has
+  ModernAtlas installed, Vintage Story's native pre-world mod handshake then
+  rejects clients without ModernAtlas or with a different ModernAtlas
+  `networkVersion` before they enter the world. Keep `requiredOnServer: false`
+  so a client-only ModernAtlas installation remains allowed on servers that do
+  not install the mod. `networkVersion` describes network-protocol
+  compatibility: change it only when the protocol becomes incompatible, not
+  automatically for every product-version bump.
   `AllowHideVegetation: false` keeps registered atlas vegetation visible,
   disables that Performance control with the server-policy reason and prevents
   Low/High presets from changing the saved client preference. Singleplayer,

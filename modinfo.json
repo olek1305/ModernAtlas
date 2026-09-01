@@ -7,9 +7,10 @@
   ],
   "description": "Interactive 3D block atlas with live clouds, loaded-data tools and server-controlled multiplayer policy.",
   "version": "0.6.9",
+  "networkVersion": "0.6.9",
   "side": "Universal",
   "requiredOnServer": false,
-  "requiredOnClient": false,
+  "requiredOnClient": true,
   "dependencies": {
     "game": "1.22.3"
   }
