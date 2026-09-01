@@ -13,7 +13,7 @@ server_config="$server_data/ModConfig/ModernAtlasServer.json"
 server_log="$server_data/Logs/server-main.log"
 client_log="$client_data/Logs/client-main.log"
 client_crash_log="$client_data/Logs/client-crash.log"
-release="$project_dir/Releases/modernatlas_0.6.8.zip"
+release="$project_dir/Releases/modernatlas_0.6.9.zip"
 
 if [[ ! -d "$server_data" || ! -d "$client_data" ]]; then
     printf '[ModernAtlas] Admin policy smoke requires existing disposable server and client data directories.\n' >&2
@@ -80,8 +80,8 @@ crash_log_mtime=0
 
 "$project_dir/scripts/package.sh"
 mkdir -p "$server_data/Mods" "$client_data/Mods"
-cp "$release" "$server_data/Mods/modernatlas_0.6.8.zip"
-cp "$release" "$client_data/Mods/modernatlas_0.6.8.zip"
+cp "$release" "$server_data/Mods/modernatlas_0.6.9.zip"
+cp "$release" "$client_data/Mods/modernatlas_0.6.9.zip"
 
 control_fifo="$(mktemp -u /tmp/modernatlas-admin-policy-control.XXXXXX)"
 server_stdout="$(mktemp /tmp/modernatlas-admin-policy-server.XXXXXX.log)"

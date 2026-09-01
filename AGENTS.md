@@ -450,8 +450,8 @@ empty while the automated exact-terrain check still reported success.
 
 ## Current verified baseline
 
-- The current working version is `0.6.8`, matching `modinfo.json` and
-  `Releases/modernatlas_0.6.8.zip`. Do not change the version number unless the
+- The current working version is `0.6.9`, matching `modinfo.json` and
+  `Releases/modernatlas_0.6.9.zip`. Do not change the version number unless the
   project owner explicitly requests it. Package-content changes may continue
   under this version during the current test cycle.
 - The current server package includes `/ma admin`, a ModernAtlas-styled
@@ -707,7 +707,7 @@ empty while the automated exact-terrain check still reported success.
 ## Build and in-game test workflow
 
 - For every rendering change, build `ModernAtlas.csproj` in Release mode,
-  create `Releases/modernatlas_0.6.8.zip`, validate the ZIP, and copy that exact
+  create `Releases/modernatlas_0.6.9.zip`, validate the ZIP, and copy that exact
   archive to the active Vintage Story `Mods` directory. Compare SHA-256 hashes
   so the release and active archives are demonstrably identical.
 - Close the running game cleanly before replacing or retesting the active mod.

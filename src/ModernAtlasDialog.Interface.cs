@@ -187,7 +187,7 @@ public sealed partial class ModernAtlasDialog
                 ElementBounds.Fixed(toolbarX + 10, toolbarY + 10, toolbarWidth - 20, 18)
             )
             .AddStaticText(
-                "v0.6.8",
+                "v0.6.9",
                 AtlasUiStyle.DetailFont(14),
                 ElementBounds.Fixed(toolbarX + 10, toolbarY + 27, toolbarWidth - 20, 18)
             )
@@ -1680,7 +1680,7 @@ public sealed partial class ModernAtlasDialog
                 )
             )
             .AddStaticText(
-                "v0.6.8",
+                "v0.6.9",
                 AtlasUiStyle.DetailFont(9),
                 ElementBounds.Fixed(contentX + versionX, contentY + versionY, 52, 18)
             )

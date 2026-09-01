@@ -6,7 +6,7 @@
     "Arcylisz"
   ],
   "description": "Interactive 3D block atlas with live clouds, loaded-data tools and server-controlled multiplayer policy.",
-  "version": "0.6.8",
+  "version": "0.6.9",
   "side": "Universal",
   "requiredOnServer": false,
   "requiredOnClient": false,
