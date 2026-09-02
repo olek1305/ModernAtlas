@@ -50,7 +50,7 @@ public sealed partial class ModernAtlasDialog
             && !exactChunkRenderer.AdvanceSurvivalOreConcealment(
                 performanceBudget.OreWorkBudgetMilliseconds
             );
-        preparingVegetationMask = config.HideVegetation
+        preparingVegetationMask = HideVegetationActive
             && !exactChunkRenderer.AdvanceVegetationMask(
                 performanceBudget.VegetationWorkBudgetMilliseconds
             );
@@ -154,7 +154,7 @@ public sealed partial class ModernAtlasDialog
             EffectiveMapLayerOpacity,
             AtlasDetailModeInfo.EffectiveTextureDetailReduction(atlasDetailMode),
             config.PerformanceLightingEnabled,
-            config.HideVegetation && !preparingVegetationMask,
+            HideVegetationActive && !preparingVegetationMask,
             config.AnimationsEnabled,
             AtlasExposureCalibration.ToMultiplier(config.AtlasExposurePercent),
             Math.Clamp(config.CaveMaskBrightnessPercent, 50, 150) / 100f,

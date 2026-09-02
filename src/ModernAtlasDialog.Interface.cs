@@ -187,7 +187,7 @@ public sealed partial class ModernAtlasDialog
                 ElementBounds.Fixed(toolbarX + 10, toolbarY + 10, toolbarWidth - 20, 18)
             )
             .AddStaticText(
-                "v0.6.8",
+                "v0.6.9",
                 AtlasUiStyle.DetailFont(14),
                 ElementBounds.Fixed(toolbarX + 10, toolbarY + 27, toolbarWidth - 20, 18)
             )
@@ -397,6 +397,7 @@ public sealed partial class ModernAtlasDialog
 
         bool atlasFrameReady = HasCompleteAtlasFrame;
         bool settingsActive = SettingsHierarchyOpen;
+        bool settingsAllowed = SettingsAccessAllowed;
         overlay.GetAtlasButton("settings-button")?.SetActive(settingsActive);
         overlay.GetAtlasButton("screenshot-options-button")?.SetActive(
             ScreenshotOptionsOpen
@@ -404,7 +405,8 @@ public sealed partial class ModernAtlasDialog
         overlay.GetAtlasButton("map-options-button")?.SetActive(MapPanelOpen);
         overlay.GetAtlasButton("search-button")?.SetActive(SearchPanelOpen);
         overlay.GetAtlasButton("instrument-button")?.SetActive(InstrumentPanelOpen);
-        overlay.GetAtlasButton("settings-button")!.Enabled = atlasFrameReady;
+        overlay.GetAtlasButton("settings-button")!.Enabled =
+            atlasFrameReady && settingsAllowed;
         overlay.GetAtlasButton("screenshot-options-button")!.Enabled =
             atlasFrameReady;
         overlay.GetAtlasButton("map-options-button")!.Enabled =
@@ -426,7 +428,10 @@ public sealed partial class ModernAtlasDialog
 
         (string Key, string Text)[] tooltips =
         {
-            ("settings-button", "Settings"),
+            ("settings-button", ModernAtlasServerSettingsPolicy.ToolbarText(
+                capi.IsSinglePlayer,
+                serverPolicy
+            )),
             ("quick-screenshot-button", "Quick screenshot"),
             ("screenshot-options-button", "Screenshot setup"),
             ("map-options-button", $"Map layers · {activeMapLayer.DisplayName()}"),
@@ -668,6 +673,10 @@ public sealed partial class ModernAtlasDialog
 
     private void ComposeBottomPanel(AtlasPanelSection section, bool animate)
     {
+        if (IsSettingsHierarchySection(section) && !SettingsAccessAllowed)
+        {
+            return;
+        }
         DisposeBottomPanelComposer();
         ElementBounds root = GetBottomPanelRoot(section, out _);
         bottomPanelSection = section;
@@ -714,6 +723,10 @@ public sealed partial class ModernAtlasDialog
             {
                 StartClosingBottomPanel(AtlasPanelSection.None);
             }
+            return;
+        }
+        if (IsSettingsHierarchySection(section) && !SettingsAccessAllowed)
+        {
             return;
         }
         if (section == AtlasPanelSection.Search && !SearchModeActive) return;
@@ -769,6 +782,10 @@ public sealed partial class ModernAtlasDialog
 
     private void OpenBottomPanel(AtlasPanelSection section)
     {
+        if (IsSettingsHierarchySection(section) && !SettingsAccessAllowed)
+        {
+            return;
+        }
         OpenBottomPanelImmediately(section);
         bottomPanelProgress = 0;
         bottomPanelAnimationStart = 0;
@@ -1500,7 +1517,14 @@ public sealed partial class ModernAtlasDialog
             )
             .AddStaticText("Atlas lighting", AtlasUiStyle.DetailFont(11), ElementBounds.Fixed(16, 167, width - 84, 22))
             .AddAtlasSwitch(OnPerformanceLightingToggled, ElementBounds.Fixed(width - 62, 162, 50, 28), "performance-lighting")
-            .AddStaticText("Hide vegetation", AtlasUiStyle.DetailFont(11), ElementBounds.Fixed(16, 200, width - 84, 22))
+            .AddDynamicText(
+                HideVegetationAllowed
+                    ? "Hide vegetation"
+                    : $"Hide vegetation · {ModernAtlasServerSettingsPolicy.DisabledReason}",
+                AtlasUiStyle.DetailFont(HideVegetationAllowed ? 11 : 9),
+                ElementBounds.Fixed(16, 200, width - 84, 22),
+                "hide-vegetation-label"
+            )
             .AddAtlasSwitch(OnHideVegetationToggled, ElementBounds.Fixed(width - 62, 195, 50, 28), "hide-vegetation")
             .AddStaticText("Developer visual controls only affect the atlas framebuffer.", AtlasUiStyle.DetailFont(9), ElementBounds.Fixed(16, height - 25, Math.Max(120, width - 32), 18), "performance-note");
     }
@@ -1656,7 +1680,7 @@ public sealed partial class ModernAtlasDialog
                 )
             )
             .AddStaticText(
-                "v0.6.8",
+                "v0.6.9",
                 AtlasUiStyle.DetailFont(9),
                 ElementBounds.Fixed(contentX + versionX, contentY + versionY, 52, 18)
             )
@@ -2003,7 +2027,7 @@ public sealed partial class ModernAtlasDialog
                 new[] { "off", "compass", "time" },
                 new[] { "Off", "Compass", "Time" },
                 HandheldInstrumentChoiceIndex,
-                OnHandheldInstrumentChoiceChanged,
+                OnSettingsHandheldInstrumentChoiceChanged,
                 ElementBounds.Fixed(212, 622, 200, 42),
                 "handheld-instrument"
             )
@@ -2103,10 +2127,13 @@ public sealed partial class ModernAtlasDialog
                 ElementBounds.Fixed(370, 191, 64, 40),
                 "hide-vegetation"
             )
-            .AddStaticText(
-                "Hides registered plants, bushes and leaves, including mods.",
+            .AddDynamicText(
+                HideVegetationAllowed
+                    ? "Hides registered plants, bushes and leaves, including mods."
+                    : ModernAtlasServerSettingsPolicy.DisabledReason,
                 AtlasUiStyle.DetailFont(11),
-                ElementBounds.Fixed(28, 233, 404, 42)
+                ElementBounds.Fixed(28, 233, 404, 42),
+                "hide-vegetation-description"
             )
             .AddStaticText(
                 "Atlas refresh: 60 FPS focused • 12 FPS background.",
@@ -2234,6 +2261,7 @@ public sealed partial class ModernAtlasDialog
 
     private bool OpenSettingsModal()
     {
+        if (!SettingsAccessAllowed) return false;
         // Opening Settings from the toolbar starts at the top; only a return
         // from a sub-panel restores the remembered position.
         settingsScrollOffset = 0;
@@ -2257,6 +2285,7 @@ public sealed partial class ModernAtlasDialog
 
     private bool OpenCreativeSettingsModal()
     {
+        if (!SettingsAccessAllowed) return false;
         // Sub-panels share one scroll offset with Settings. Remember where the
         // reader was so returning does not throw them back to the top.
         settingsSectionScrollOffset = settingsScrollOffset;
@@ -2273,6 +2302,7 @@ public sealed partial class ModernAtlasDialog
 
     private bool OpenPerformanceModal()
     {
+        if (!SettingsAccessAllowed) return false;
         // Sub-panels share one scroll offset with Settings. Remember where the
         // reader was so returning does not throw them back to the top.
         settingsSectionScrollOffset = settingsScrollOffset;
@@ -2289,6 +2319,7 @@ public sealed partial class ModernAtlasDialog
 
     private bool OpenVisualLab()
     {
+        if (!SettingsAccessAllowed) return false;
         // Sub-panels share one scroll offset with Settings. Remember where the
         // reader was so returning does not throw them back to the top.
         settingsSectionScrollOffset = settingsScrollOffset;

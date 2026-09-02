@@ -68,13 +68,20 @@ public sealed partial class ModernAtlasDialog
     private List<AtlasSettingsSection> BuildSettingsSections(double rowHeight)
     {
         bool access = CreativeCheatSettingsAvailable;
+        bool settingsAllowed = SettingsAccessAllowed;
         bool cloudsAvailable = VolumetricCloudRendererAdapter.IsEnabledByGraphicsSettings(capi);
         bool serverAllowsAny = capi.IsSinglePlayer || serverPolicy.AnyEntityModels;
+
+        string? SettingsReason() => settingsAllowed
+            ? null
+            : SettingsReasonServerPolicy;
 
         // A category is gated by the server only in multiplayer; singleplayer
         // always allows it, exactly as SyncEntityCategorySwitch decides.
         string? CategoryReason(bool serverEnabled) =>
-            !serverAllowsAny || !(capi.IsSinglePlayer || serverEnabled)
+            !settingsAllowed
+                ? SettingsReasonServerPolicy
+                : !serverAllowsAny || !(capi.IsSinglePlayer || serverEnabled)
                 ? SettingsReasonServerPolicy
                 : null;
 
@@ -84,13 +91,21 @@ public sealed partial class ModernAtlasDialog
                 "Map & Data",
                 new List<AtlasSettingsRow>
                 {
-                    SwitchRow("Map layers", OnMapLayersToggled, "map-layers", rowHeight),
+                    SwitchRow(
+                        "Map layers",
+                        OnMapLayersToggled,
+                        "map-layers",
+                        rowHeight,
+                        SettingsReason()
+                    ),
                     SwitchRow(
                         "Search loaded data",
                         OnSearchModeToggled,
                         "search-mode",
                         rowHeight,
-                        access ? null : SettingsReasonCreativeOnly
+                        !settingsAllowed
+                            ? SettingsReasonServerPolicy
+                            : access ? null : SettingsReasonCreativeOnly
                     )
                 }
             ),
@@ -98,19 +113,21 @@ public sealed partial class ModernAtlasDialog
                 "Presentation & Lighting",
                 new List<AtlasSettingsRow>
                 {
-                    SwitchRow("3D scroll", OnRenderOnScrollToggled, "render-on-scroll", rowHeight),
-                    SwitchRow("Scroll weather", OnScrollRealtimeWeatherToggled, "scroll-realtime-weather", rowHeight),
-                    SwitchRow("Animations", OnAnimationsToggled, "animations", rowHeight),
-                    SwitchRow("Skip transitions", OnSkipOpeningAnimationToggled, "skip-opening-animation", rowHeight),
+                    SwitchRow("3D scroll", OnRenderOnScrollToggled, "render-on-scroll", rowHeight, SettingsReason()),
+                    SwitchRow("Scroll weather", OnScrollRealtimeWeatherToggled, "scroll-realtime-weather", rowHeight, SettingsReason()),
+                    SwitchRow("Animations", OnAnimationsToggled, "animations", rowHeight, SettingsReason()),
+                    SwitchRow("Skip transitions", OnSkipOpeningAnimationToggled, "skip-opening-animation", rowHeight, SettingsReason()),
                     SwitchRow(
                         "Live clouds",
                         OnCloudsToggled,
                         "clouds",
                         rowHeight,
-                        cloudsAvailable ? null : SettingsReasonVolumetricClouds
+                        !settingsAllowed
+                            ? SettingsReasonServerPolicy
+                            : cloudsAvailable ? null : SettingsReasonVolumetricClouds
                     ),
-                    SwitchRow("Live sun", OnLiveLightingToggled, "live-lighting", rowHeight),
-                    SliderRow("Fixed hour (0–24)", OnFixedSunHourChanged, "fixed-sun-hour", rowHeight)
+                    SwitchRow("Live sun", OnLiveLightingToggled, "live-lighting", rowHeight, SettingsReason()),
+                    SliderRow("Fixed hour (0–24)", OnFixedSunHourChanged, "fixed-sun-hour", rowHeight, SettingsReason())
                 }
             ),
             new(
@@ -122,7 +139,9 @@ public sealed partial class ModernAtlasDialog
                         OnLivingEntitiesToggled,
                         "entities",
                         rowHeight,
-                        serverAllowsAny ? null : SettingsReasonServerPolicy
+                        !settingsAllowed || !serverAllowsAny
+                            ? SettingsReasonServerPolicy
+                            : null
                     ),
                     SwitchRow("Players", OnPlayersToggled, "players", rowHeight, CategoryReason(serverPolicy.ShowPlayers)),
                     SwitchRow("Animals", OnAnimalsToggled, "animals", rowHeight, CategoryReason(serverPolicy.ShowAnimals)),
@@ -138,7 +157,8 @@ public sealed partial class ModernAtlasDialog
                         "Close atlas when taking damage",
                         OnCloseAtlasOnDamageToggled,
                         "close-on-damage",
-                        rowHeight
+                        rowHeight,
+                        SettingsReason()
                     )
                 }
             ),
@@ -146,14 +166,16 @@ public sealed partial class ModernAtlasDialog
                 "Advanced",
                 new List<AtlasSettingsRow>
                 {
-                    ButtonRow("Performance", OpenPerformanceModal, "performance-open", rowHeight),
-                    ButtonRow("Visual lab", OpenVisualLab, "visual-lab-open", rowHeight),
+                    ButtonRow("Performance", OpenPerformanceModal, "performance-open", rowHeight, SettingsReason()),
+                    ButtonRow("Visual lab", OpenVisualLab, "visual-lab-open", rowHeight, SettingsReason()),
                     ButtonRow(
                         "Creative / Cheat",
                         OpenCreativeSettingsModal,
                         "creative-settings-button",
                         rowHeight,
-                        access ? null : SettingsReasonCreativeOnly
+                        !settingsAllowed
+                            ? SettingsReasonServerPolicy
+                            : access ? null : SettingsReasonCreativeOnly
                     )
                 }
             )

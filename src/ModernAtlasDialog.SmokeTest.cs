@@ -25,6 +25,21 @@ public sealed partial class ModernAtlasDialog
         bool realDamageSmokePhase
     )
     {
+        string? serverAuthorityFailure = ModernAtlasServerSettingsPolicy.Validate()
+            ?? PresentationChangeCoordinator.ValidateServerPolicyCancellation();
+        if (serverAuthorityFailure != null)
+        {
+            capi.Logger.Error(
+                "[ModernAtlas] Automated server-authority self-check failed: {0}.",
+                serverAuthorityFailure
+            );
+            completion(false);
+            return;
+        }
+        capi.Logger.Notification(
+            "[ModernAtlas] Automated server-authority pure self-check passed: Settings allow/deny rules, deferred-write cancellation seam, preset guards, multiplayer Cheat Mode authority, entity disclosure matrix, CopyFrom/Reset, missing-channel fallback and legacy protobuf compatibility were verified; live channel and GUI lifecycle checks run separately."
+        );
+
         string? performancePolicyFailure = AtlasPerformanceModeInfo.Validate()
             ?? AtlasDetailModeInfo.Validate()
             ?? AtlasPresetProfile.Validate()
@@ -41,7 +56,6 @@ public sealed partial class ModernAtlasDialog
             completion(false);
             return;
         }
-
         presentationChangeCoordinator.Reset(config.RenderOnScroll);
         automatedOriginalMapLayersEnabled = config.MapLayersEnabled;
         automatedOriginalCaveModeEnabled = config.CaveModeEnabled;
